@@ -1368,6 +1368,7 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
         crate::explorer::initialize_image_thumbnail_cache(cx);
         crate::explorer::initialize_folder_size_cache(cx);
         crate::explorer::initialize_file_checksum_cache(cx);
+        crate::explorer::initialize_window_cleanup(cx);
         crate::explorer::initialize_cache_cleanup(cx);
         cx.bind_keys(platform_key_bindings());
 

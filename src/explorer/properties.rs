@@ -1245,6 +1245,7 @@ impl PropertiesDialog {
         self.cancel_checksum_task();
         self.checksum_generation = self.checksum_generation.wrapping_add(1);
         let generation = self.checksum_generation;
+        let cache_session = super::image_memory::session(cx);
         let cancel = Arc::new(AtomicBool::new(false));
         self.checksum_cancel = Some(cancel.clone());
         self.checksum_state = PropertyChecksumState::Loading;
@@ -1271,7 +1272,8 @@ impl PropertiesDialog {
                 .await;
 
             let _ = this.update(cx, |dialog, cx| {
-                if dialog.checksum_generation != generation
+                if super::image_memory::session(cx) != cache_session
+                    || dialog.checksum_generation != generation
                     || dialog
                         .checksum_cancel
                         .as_ref()
@@ -5607,6 +5609,12 @@ impl FileChecksumCache {
 
 pub(crate) fn initialize_file_checksum_cache(cx: &mut App) {
     cx.set_global(FileChecksumCache::new());
+}
+
+pub(super) fn clear_checksum_memory(cx: &mut App) {
+    if let Some(cache) = cx.try_global::<FileChecksumCache>() {
+        *cache.entries.borrow_mut() = HashMap::new();
+    }
 }
 
 const FILE_CHECKSUM_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
@@ -11517,6 +11525,36 @@ mod tests {
                 dialog.checksum_state,
                 PropertyChecksumState::NotRequested
             ));
+        });
+    }
+
+    #[gpui::test]
+    fn checksum_task_started_before_clear_cannot_refill_cache(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("checksum.txt");
+        fs::write(&file, b"abc").unwrap();
+        let dialog = test_properties_dialog(cx, PropertyTarget { paths: vec![file] });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| dialog.start_checksum_task(cx));
+            super::super::image_memory::clear_memory_caches(cx);
+        });
+        cx.run_until_parked();
+        cx.read(|cx| assert!(cx.global::<FileChecksumCache>().entries.borrow().is_empty()));
+        cx.update(|cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.reset_checksum_state();
+                dialog.start_checksum_task(cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read(|cx| assert_eq!(cx.global::<FileChecksumCache>().entries.borrow().len(), 1));
+        cx.update(clear_checksum_memory);
+        cx.read(|cx| {
+            assert_eq!(
+                cx.global::<FileChecksumCache>().entries.borrow().capacity(),
+                0
+            )
         });
     }
 

@@ -7,6 +7,57 @@ use gpui::{App, Global, RenderImage};
 struct RetiredImages(RefCell<HashMap<gpui::ImageId, Arc<RenderImage>>>);
 impl Global for RetiredImages {}
 
+#[derive(Default)]
+struct MemoryCacheSession {
+    epoch: u64,
+    initialized: bool,
+    window_cleanup_initialized: bool,
+}
+impl Global for MemoryCacheSession {}
+
+pub(super) fn session(cx: &App) -> u64 {
+    cx.try_global::<MemoryCacheSession>()
+        .map_or(0, |session| session.epoch)
+}
+
+pub(crate) fn initialize_window_cleanup(cx: &mut App) {
+    if cx
+        .default_global::<MemoryCacheSession>()
+        .window_cleanup_initialized
+    {
+        return;
+    }
+    cx.default_global::<MemoryCacheSession>()
+        .window_cleanup_initialized = true;
+    cx.on_window_closed(|cx| {
+        if cx.windows().is_empty() {
+            cx.defer(|cx| {
+                // A launch request can reopen a window before teardown finishes.
+                if cx.windows().is_empty() {
+                    super::clear_memory_caches(cx);
+                }
+            });
+        }
+    })
+    .detach();
+}
+
+pub(crate) fn clear_memory_caches(cx: &mut App) {
+    let session = cx.default_global::<MemoryCacheSession>();
+    session.epoch = session
+        .epoch
+        .checked_add(1)
+        .expect("memory cache epoch exhausted");
+    super::image_thumbnails::clear_memory(cx);
+    super::app_icons::clear_memory(cx);
+    super::resource_images::clear_memory(cx);
+    super::folder_size::clear_memory(cx);
+    super::properties::clear_checksum_memory(cx);
+    super::remote_directory_cache::clear_memory();
+    cx.clear_image_assets();
+    trim_memory(cx);
+}
+
 pub(super) fn image_bytes(image: &RenderImage) -> usize {
     (0..image.frame_count())
         .filter_map(|frame| image.as_bytes(frame))
@@ -54,6 +105,12 @@ impl ImageRetention {
         }
     }
 
+    pub(super) fn clear(&mut self) {
+        self.entries = HashMap::new();
+        self.clock = 0;
+        self.bytes = 0;
+    }
+
     pub(super) fn evict(&mut self, mut is_pinned: impl FnMut(&str) -> bool) -> Vec<String> {
         if self.bytes <= self.max_bytes && self.entries.len() <= self.max_entries {
             return Vec::new();
@@ -98,10 +155,11 @@ pub(super) fn retire(images: impl IntoIterator<Item = Arc<RenderImage>>, cx: &mu
 }
 
 pub(super) fn initialize(cx: &mut App) {
-    if cx.has_global::<RetiredImages>() {
+    if cx.default_global::<MemoryCacheSession>().initialized {
         return;
     }
-    cx.set_global(RetiredImages::default());
+    cx.default_global::<MemoryCacheSession>().initialized = true;
+    cx.default_global::<RetiredImages>();
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -139,6 +197,89 @@ mod tests {
     use gpui::{Context, IntoElement, ParentElement, Render, Window};
 
     struct ImageConsumers(Vec<Arc<RenderImage>>);
+
+    fn seed_folder_size(cx: &mut App) {
+        super::super::folder_size::initialize(cx);
+        cx.global::<super::super::folder_size::FolderSizeCache>()
+            .insert("cached-folder".into(), 42);
+    }
+
+    fn cached_folder_size(cx: &App) -> Option<u64> {
+        cx.global::<super::super::folder_size::FolderSizeCache>()
+            .get(std::path::Path::new("cached-folder"))
+    }
+
+    #[gpui::test]
+    fn final_window_close_clears_caches_but_other_windows_keep_them(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            initialize_window_cleanup(cx);
+            initialize_window_cleanup(cx);
+            seed_folder_size(cx);
+        });
+        let explorer = cx.add_window(|_, _| ImageConsumers(Vec::new()));
+        let dialog = cx.add_window(|_, _| ImageConsumers(Vec::new()));
+        explorer
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.read(|cx| {
+            assert_eq!(session(cx), 0);
+            assert_eq!(cached_folder_size(cx), Some(42));
+        });
+        dialog
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.read(|cx| {
+            assert!(cx.windows().is_empty());
+            assert_eq!(session(cx), 1);
+            assert_eq!(cached_folder_size(cx), None);
+        });
+        let reopened = cx.add_window(|_, _| ImageConsumers(Vec::new()));
+        cx.update(seed_folder_size);
+        assert_eq!(cx.read(cached_folder_size), Some(42));
+        reopened
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        assert_eq!(cx.read(cached_folder_size), None);
+        assert_eq!(cx.read(session), 2);
+    }
+
+    #[gpui::test]
+    fn reopening_during_teardown_prevents_cache_cleanup(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        cx.update(|cx| {
+            initialize_window_cleanup(cx);
+            seed_folder_size(cx);
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.open_window(gpui::WindowOptions::default(), |_, cx| {
+                        cx.new(|_| ImageConsumers(Vec::new()))
+                    })
+                    .unwrap();
+                }
+            })
+            .detach();
+        });
+        let window = cx.add_window(|_, _| ImageConsumers(Vec::new()));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.read(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            assert_eq!(session(cx), 0);
+            assert_eq!(cached_folder_size(cx), Some(42));
+        });
+    }
+
+    #[test]
+    fn clearing_retention_releases_capacity_and_preserves_limits() {
+        let mut retention = ImageRetention::new(4, 1);
+        retention.insert("old".into(), 4);
+        retention.clear();
+        assert_eq!(retention.retained_bytes(), 0);
+        assert_eq!(retention.entries.capacity(), 0);
+        retention.insert("new".into(), 8);
+        assert_eq!(retention.evict(|_| false), ["new"]);
+    }
 
     impl Render for ImageConsumers {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

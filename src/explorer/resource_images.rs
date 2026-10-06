@@ -104,6 +104,38 @@ impl BoundedImageCache {
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn clearing_detaches_cache_releases_images_and_reopening_uses_new_entity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::new(1, 1),
+        )]));
+        let held = image.clone();
+        let weak = Arc::downgrade(&image);
+        let old = cx.update(|cx| {
+            let cache = cache(cx);
+            cache.update(cx, |cache, _| {
+                cache.retention.insert("1".into(), 4);
+                cache.items.insert(1, ImageCacheItem::Loaded(Ok(image)));
+            });
+            clear_memory(cx);
+            cache
+        });
+        cx.update(|cx| {
+            old.update(cx, |cache, _| {
+                assert_eq!(cache.items.capacity(), 0);
+                assert_eq!(cache.retention.retained_bytes(), 0);
+            });
+            assert_ne!(cache(cx).entity_id(), old.entity_id());
+            super::super::image_memory::trim_memory(cx);
+        });
+        assert!(weak.upgrade().is_some());
+        drop(held);
+        cx.update(super::super::image_memory::trim_memory);
+        assert!(weak.upgrade().is_none());
+    }
+
     #[test]
     fn dynamic_resource_pixels_and_failure_entries_are_bounded() {
         let mut cache = BoundedImageCache {
@@ -181,6 +213,25 @@ pub(super) fn trim_memory(cx: &mut App) {
     if let Some(cache) = cache {
         let images = cache.update(cx, |cache, _| {
             cache.trim();
+            std::mem::take(&mut cache.retired_images)
+        });
+        retire(images, cx);
+    }
+}
+
+pub(super) fn clear_memory(cx: &mut App) {
+    let cache = cx
+        .try_global::<ResourceImages>()
+        .and_then(|global| global.0.clone());
+    if let Some(cache) = cache {
+        cx.global_mut::<ResourceImages>().0 = None;
+        let images = cache.update(cx, |cache, _| {
+            cache.retention.clear();
+            for mut item in std::mem::take(&mut cache.items).into_values() {
+                if let Some(Ok(image)) = item.get() {
+                    cache.retired_images.push(image);
+                }
+            }
             std::mem::take(&mut cache.retired_images)
         });
         retire(images, cx);

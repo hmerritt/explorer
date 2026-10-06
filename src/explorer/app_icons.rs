@@ -189,6 +189,18 @@ struct UrlIconLoadJob {
 }
 
 impl NativeIconCacheInner {
+    fn clear_memory(&mut self) {
+        // next_load_id remains monotonic so old completions cannot match new jobs.
+        self.pending = VecDeque::new();
+        self.loader_running = false;
+        self.retention.clear();
+        for state in std::mem::take(&mut self.states).into_values() {
+            if let Some(image) = state.icon() {
+                self.retired_images.push(image);
+            }
+        }
+    }
+
     fn new(store: DiskIconStore) -> Self {
         Self {
             states: HashMap::new(),
@@ -391,6 +403,13 @@ impl NativeIconCacheInner {
 }
 
 impl UrlIconCacheInner {
+    fn clear_memory(&mut self) {
+        self.states = HashMap::new();
+        self.pending = VecDeque::new();
+        self.loader_running = false;
+        self.retention.clear();
+    }
+
     fn new(cache_dir: Option<PathBuf>) -> Self {
         Self {
             cache_dir,
@@ -480,6 +499,21 @@ pub(super) fn trim_memory(cx: &mut App) {
         })
         .unwrap_or_default();
     super::image_memory::retire(images, cx);
+}
+
+pub(super) fn clear_memory(cx: &mut App) {
+    let images = cx
+        .try_global::<NativeIconCache>()
+        .map(|cache| {
+            let mut inner = cache.inner.borrow_mut();
+            inner.clear_memory();
+            std::mem::take(&mut inner.retired_images)
+        })
+        .unwrap_or_default();
+    super::image_memory::retire(images, cx);
+    if let Some(cache) = cx.try_global::<UrlIconCache>() {
+        cache.inner.borrow_mut().clear_memory();
+    }
 }
 
 impl NativeIconState {
@@ -608,6 +642,7 @@ impl ExplorerView {
 }
 
 fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
+    let cache_session = super::image_memory::session(cx);
     cx.spawn(async move |_, cx| {
         let mut timings = IconTimingBatch::start();
 
@@ -615,6 +650,7 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
             let job = cx
                 .update(|cx| {
                     cx.try_global::<NativeIconCache>()
+                        .filter(|_| super::image_memory::session(cx) == cache_session)
                         .and_then(|cache| cache.inner.borrow_mut().next_load_job())
                 })
                 .ok()
@@ -644,7 +680,10 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
                     let stale_publish_started = timings.now();
                     let load_id = job.load_id;
                     let published = cx
-                        .update_global::<NativeIconCache, _>(|cache, _| {
+                        .update_global::<NativeIconCache, _>(|cache, cx| {
+                            if super::image_memory::session(cx) != cache_session {
+                                return false;
+                            }
                             cache
                                 .inner
                                 .borrow_mut()
@@ -667,6 +706,9 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
 
             let fresh_commit_started = timings.now();
             let _committed = cx.update_global::<NativeIconCache, _>(|cache, cx| {
+                if super::image_memory::session(cx) != cache_session {
+                    return;
+                }
                 cache
                     .inner
                     .borrow_mut()
@@ -688,12 +730,14 @@ fn start_native_icon_loader(cx: &mut Context<ExplorerView>) {
 }
 
 fn start_url_icon_loader(cx: &mut Context<ExplorerView>) {
+    let cache_session = super::image_memory::session(cx);
     let client = cx.http_client();
     cx.spawn(async move |view, cx| {
         loop {
             let job = cx
                 .update(|cx| {
                     cx.try_global::<UrlIconCache>()
+                        .filter(|_| super::image_memory::session(cx) == cache_session)
                         .and_then(|cache| cache.inner.borrow_mut().next_load_job())
                 })
                 .ok()
@@ -710,7 +754,10 @@ fn start_url_icon_loader(cx: &mut Context<ExplorerView>) {
                 .spawn(async move { download_url_icon_to_path(client, &url, &path).await });
             let loaded_path = load_task.await;
 
-            let _committed = cx.update_global::<UrlIconCache, _>(|cache, _| {
+            let _committed = cx.update_global::<UrlIconCache, _>(|cache, cx| {
+                if super::image_memory::session(cx) != cache_session {
+                    return;
+                }
                 cache
                     .inner
                     .borrow_mut()
@@ -2478,6 +2525,169 @@ impl StableHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_native_icons_keeps_disk_mappings_and_rejects_old_load_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cache = cache_with_dir(Some(temp.path().to_owned()));
+        let ready = test_request("ready");
+        let job = start_load_job(&mut cache, ready.clone());
+        cache.finish_request(ready.clone(), job.load_id, Some(one_pixel_png_bytes()));
+        let hash = cache.store.icon_hash(&ready.key).unwrap().to_owned();
+        let old = start_load_job(&mut cache, test_request("loading"));
+        cache.icon_for_request(test_request("pending"));
+        cache.clear_memory();
+        cache.retired_images.clear();
+        assert_eq!(cache.states.capacity(), 0);
+        assert_eq!(cache.pending.capacity(), 0);
+        assert_eq!(cache.retention.retained_bytes(), 0);
+        assert!(!cache.loader_running);
+        assert!(read_cached_icon_by_hash(Some(temp.path()), &hash).is_some());
+        let reload = start_load_job(&mut cache, ready);
+        assert_eq!(reload.stale_hash.as_deref(), Some(hash.as_str()));
+        let new = start_load_job(&mut cache, old.request.clone());
+        assert_ne!(old.load_id, new.load_id);
+        assert!(!cache.finish_request(old.request, old.load_id, Some(one_pixel_png_bytes())));
+        assert!(cache.finish_request(new.request, new.load_id, Some(one_pixel_png_bytes())));
+    }
+
+    #[gpui::test]
+    fn old_native_loader_cannot_take_requests_from_reopened_session(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        cx.set_global(NativeIconCache {
+            inner: RefCell::new(cache_with_dir(None)),
+        });
+        let view = cx.new(|_| ExplorerView::new("icons".into()));
+        cx.update(|cx| {
+            view.update(cx, |_, cx| start_native_icon_loader(cx));
+            super::super::image_memory::clear_memory_caches(cx);
+            cx.global::<NativeIconCache>()
+                .inner
+                .borrow_mut()
+                .icon_for_request(test_request("new"));
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let cache = cx.global::<NativeIconCache>().inner.borrow();
+            assert_eq!(cache.pending.len(), 1);
+            assert!(matches!(
+                cache.states.get("new"),
+                Some(NativeIconState::Pending { .. })
+            ));
+        });
+        cx.update(|cx| {
+            view.update(cx, |_, cx| start_native_icon_loader(cx));
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let cache = cx.global::<NativeIconCache>().inner.borrow();
+            assert!(cache.pending.is_empty());
+            assert!(!matches!(
+                cache.states.get("new"),
+                Some(NativeIconState::Pending { .. } | NativeIconState::Loading { .. })
+            ));
+        });
+    }
+
+    struct GatedHttpClient(
+        std::sync::Mutex<
+            Option<
+                futures::channel::oneshot::Receiver<
+                    gpui::http_client::Response<gpui::http_client::AsyncBody>,
+                >,
+            >,
+        >,
+    );
+
+    impl gpui::http_client::HttpClient for GatedHttpClient {
+        fn send(
+            &self,
+            _: gpui::http_client::Request<gpui::http_client::AsyncBody>,
+        ) -> futures::future::BoxFuture<
+            'static,
+            gpui::http_client::Result<gpui::http_client::Response<gpui::http_client::AsyncBody>>,
+        > {
+            use futures::FutureExt;
+            let response = self
+                .0
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one download per loader");
+            async move { Ok(response.await?) }.boxed()
+        }
+        fn user_agent(&self) -> Option<&gpui::http_client::http::HeaderValue> {
+            None
+        }
+        fn proxy(&self) -> Option<&gpui::http_client::Url> {
+            None
+        }
+        fn type_name(&self) -> &'static str {
+            "GatedHttpClient"
+        }
+    }
+
+    #[gpui::test]
+    fn url_download_finishing_after_clear_cannot_repopulate_or_dequeue_new_requests(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+        let temp = TempDir::new();
+        let url = "https://example.com/icon.png";
+        cx.set_global(UrlIconCache {
+            inner: RefCell::new(UrlIconCacheInner::new(Some(temp.path().to_path_buf()))),
+        });
+        let (old_tx, old_rx) = futures::channel::oneshot::channel();
+        cx.update(|cx| {
+            cx.set_http_client(Arc::new(GatedHttpClient(std::sync::Mutex::new(Some(
+                old_rx,
+            )))))
+        });
+        let view = cx.new(|_| ExplorerView::new("icons".into()));
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.cached_url_icon_path(url, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            super::super::image_memory::clear_memory_caches(cx);
+            let mut cache = cx.global::<UrlIconCache>().inner.borrow_mut();
+            assert_eq!(cache.states.capacity(), 0);
+            assert_eq!(cache.pending.capacity(), 0);
+            assert_eq!(cache.icon_path_for_url(url), (None, true));
+        });
+        let response = || {
+            gpui::http_client::Response::builder()
+                .status(200)
+                .body(gpui::http_client::AsyncBody::from(one_pixel_png_bytes()))
+                .unwrap()
+        };
+        old_tx.send(response()).ok().unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let cache = cx.global::<UrlIconCache>().inner.borrow();
+            assert_eq!(cache.pending.len(), 1);
+            assert_eq!(cache.states.get(url), Some(&UrlIconState::Pending));
+            assert_eq!(cache.retention.retained_bytes(), 0);
+        });
+        let (new_tx, new_rx) = futures::channel::oneshot::channel();
+        cx.update(|cx| {
+            cx.set_http_client(Arc::new(GatedHttpClient(std::sync::Mutex::new(Some(
+                new_rx,
+            )))));
+            view.update(cx, |_, cx| start_url_icon_loader(cx));
+        });
+        new_tx.send(response()).ok().unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let cache = cx.global::<UrlIconCache>().inner.borrow();
+            assert!(cache.pending.is_empty());
+            assert!(
+                matches!(cache.states.get(url), Some(UrlIconState::Ready(path)) if path.is_file())
+            );
+        });
+    }
 
     #[test]
     fn browsing_thousands_of_native_icons_bounds_pixels_and_failed_states() {

@@ -204,6 +204,19 @@ struct ImageThumbnailCacheWriteJob {
 }
 
 impl ImageThumbnailCacheInner {
+    fn clear_memory(&mut self) {
+        self.loader_generation = self.loader_generation.wrapping_add(1);
+        self.loader_running = false;
+        self.pending = VecDeque::new();
+        self.retention.clear();
+        for state in std::mem::take(&mut self.states).into_values() {
+            if let ImageThumbnailState::Loading { cancel, .. } = &state {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            self.retire_state(state);
+        }
+    }
+
     #[cfg(test)]
     fn new(cache_dir: Option<PathBuf>) -> Self {
         Self::with_writer(cache_dir, None)
@@ -560,6 +573,18 @@ pub(super) fn trim_memory(cx: &mut App) {
         .map(|cache| {
             let mut inner = cache.inner.borrow_mut();
             inner.trim();
+            std::mem::take(&mut inner.retired_images)
+        })
+        .unwrap_or_default();
+    super::image_memory::retire(images, cx);
+}
+
+pub(super) fn clear_memory(cx: &mut App) {
+    let images = cx
+        .try_global::<ImageThumbnailCache>()
+        .map(|cache| {
+            let mut inner = cache.inner.borrow_mut();
+            inner.clear_memory();
             std::mem::take(&mut inner.retired_images)
         })
         .unwrap_or_default();
@@ -1983,6 +2008,105 @@ impl StableHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Headless GPUI window lifecycle workload for Windows process-memory sampling.
+    #[gpui::test]
+    #[ignore = "manual windowless process-memory comparison"]
+    fn windowless_cache_memory_soak(cx: &mut gpui::TestAppContext) {
+        struct CacheWindow;
+        impl gpui::Render for CacheWindow {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::div()
+            }
+        }
+        cx.update(|cx| {
+            initialize_for_test(cx);
+            super::super::image_memory::initialize_window_cleanup(cx);
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        for cycle in 0..6 {
+            let window = cx.add_window(|_, _| CacheWindow);
+            let mut last_image = None;
+            cx.update(|cx| {
+                let mut cache = cx.global::<ImageThumbnailCache>().inner.borrow_mut();
+                for item in 0..512 {
+                    let request = request(&format!("cycle-{cycle}-{item}"), "folder");
+                    let (_, generation) = cache.thumbnail_for_request(request.clone());
+                    let generation = generation.unwrap();
+                    cache.next_load_job(generation).unwrap();
+                    let image = cached_thumbnail_image_from_rgba(image::RgbaImage::from_pixel(
+                        128,
+                        128,
+                        image::Rgba([32, 64, 128, 255]),
+                    ));
+                    last_image = Some(Arc::downgrade(&image.image));
+                    cache.finish_prepared_request(request, generation, Some(image));
+                    cache.next_load_job(generation);
+                }
+                assert_eq!(cache.retention.retained_bytes(), 32 * 1024 * 1024);
+                println!(
+                    "cycle={} phase=browse entries={} decoded_mib=32.00",
+                    cycle + 1,
+                    cache.states.len()
+                );
+            });
+            std::thread::sleep(Duration::from_millis(700));
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            cx.update(|cx| {
+                let cache = cx.global::<ImageThumbnailCache>().inner.borrow();
+                assert_eq!(cache.states.capacity(), 0);
+                assert_eq!(cache.retention.retained_bytes(), 0);
+                println!(
+                    "cycle={} phase=closed entries=0 decoded_mib=0.00",
+                    cycle + 1
+                );
+            });
+            assert!(last_image.unwrap().upgrade().is_none());
+            std::thread::sleep(Duration::from_millis(700));
+        }
+    }
+
+    #[test]
+    fn clearing_cache_cancels_loads_releases_capacity_and_preserves_disk_and_budgets() {
+        let temp = TempDir::new();
+        let mut cache = ImageThumbnailCacheInner::new(Some(temp.path().to_path_buf()));
+        let ready = request("ready", "folder");
+        let (_, generation) = cache.thumbnail_for_request(ready.clone());
+        let generation = generation.unwrap();
+        cache.next_load_job(generation).unwrap();
+        cache.finish_request(ready.clone(), generation, Some(one_pixel_png_bytes()));
+        let held = cache.thumbnail_for_request(ready).0.unwrap();
+        let weak = Arc::downgrade(&held.image);
+        let loading = request("loading", "folder");
+        cache.thumbnail_for_request(loading.clone());
+        let old_job = cache.next_load_job(generation).unwrap();
+        cache.thumbnail_for_request(request("pending", "folder"));
+        cache.clear_memory();
+        assert!(old_job.cancel.load(Ordering::Relaxed));
+        assert_eq!(cache.states.capacity(), 0);
+        assert_eq!(cache.pending.capacity(), 0);
+        assert_eq!(cache.retention.retained_bytes(), 0);
+        assert!(!cache.loader_running);
+        assert_eq!(cache.cache_dir.as_deref(), Some(temp.path()));
+        assert!(!cache.finish_request(loading.clone(), generation, Some(one_pixel_png_bytes())));
+        let (_, new_generation) = cache.thumbnail_for_request(loading.clone());
+        let new_generation = new_generation.unwrap();
+        assert_ne!(new_generation, generation);
+        assert!(cache.next_load_job(generation).is_none());
+        cache.next_load_job(new_generation).unwrap();
+        assert!(!cache.finish_request(loading.clone(), generation, Some(one_pixel_png_bytes())));
+        assert!(cache.finish_request(loading, new_generation, Some(one_pixel_png_bytes())));
+        cache.retired_images.clear();
+        assert!(weak.upgrade().is_some());
+        drop(held);
+        assert!(weak.upgrade().is_none());
+    }
 
     /// Run in separate processes with and without EXPLORER_MEMORY_SOAK_BASELINE
     /// to compare Windows private bytes / working set for the original retain-all

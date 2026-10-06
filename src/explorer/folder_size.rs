@@ -85,6 +85,12 @@ pub(crate) fn initialize(cx: &mut App) {
     cx.set_global(FolderSizeCache::new());
 }
 
+pub(super) fn clear_memory(cx: &mut App) {
+    if let Some(cache) = cx.try_global::<FolderSizeCache>() {
+        *cache.entries.borrow_mut() = HashMap::new();
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum FolderSizeError {
     Cancelled,

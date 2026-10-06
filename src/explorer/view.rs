@@ -1829,6 +1829,7 @@ impl ExplorerView {
 
         let root = self.path.clone();
         let generation = self.folder_size_generation;
+        let cache_session = super::image_memory::session(cx);
         let targets = self
             .all_entries
             .iter()
@@ -1874,14 +1875,28 @@ impl ExplorerView {
             futures::pin_mut!(calculation_task);
 
             loop {
-                Self::drain_folder_size_calculations(&this, cx, &calculation_rx, &root, generation);
+                Self::drain_folder_size_calculations(
+                    &this,
+                    cx,
+                    &calculation_rx,
+                    &root,
+                    generation,
+                    cache_session,
+                );
                 futures::select! {
                     _ = calculation_task => break,
                     _ = cx.background_executor().timer(FOLDER_SIZE_PROGRESS_INTERVAL).fuse() => {}
                 }
             }
 
-            Self::drain_folder_size_calculations(&this, cx, &calculation_rx, &root, generation);
+            Self::drain_folder_size_calculations(
+                &this,
+                cx,
+                &calculation_rx,
+                &root,
+                generation,
+                cache_session,
+            );
 
             let _ = this.update(cx, |explorer, _| {
                 if explorer.folder_size_generation == generation {
@@ -1900,6 +1915,7 @@ impl ExplorerView {
         calculation_rx: &mpsc::Receiver<FolderSizeCalculation>,
         root: &Path,
         generation: u64,
+        cache_session: u64,
     ) {
         let mut calculations = Vec::new();
         while let Ok(calculation) = calculation_rx.try_recv() {
@@ -1910,6 +1926,9 @@ impl ExplorerView {
         }
 
         let _ = this.update(cx, |explorer, cx| {
+            if super::image_memory::session(cx) != cache_session {
+                return;
+            }
             if explorer.apply_folder_size_calculations(root, generation, calculations, cx) {
                 cx.notify();
             }
@@ -3898,6 +3917,65 @@ mod tests {
         assert_eq!(
             cx.read_global::<FolderSizeCache, _>(|cache, _| cache.get(&folder)),
             Some(7)
+        );
+    }
+
+    #[gpui::test]
+    fn streamed_folder_sizes_from_old_cache_session_are_ignored(cx: &mut gpui::TestAppContext) {
+        cx.set_global(FolderSizeCache::new());
+        let temp = crate::explorer::test_support::TempDir::new();
+        let root = temp.path().to_path_buf();
+        let folder = root.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let view = cx.new(|_| ExplorerView::new(root.clone()));
+        let generation = cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.show_folder_size = true;
+                view.folder_size_generation
+            })
+        });
+        let old_session = cx.read(super::super::image_memory::session);
+        cx.update(super::super::image_memory::clear_memory_caches);
+        let mut async_cx = cx.update(|cx| cx.to_async());
+        let (tx, rx) = mpsc::channel();
+        tx.send(FolderSizeCalculation {
+            path: folder.clone(),
+            size: 42,
+        })
+        .unwrap();
+        ExplorerView::drain_folder_size_calculations(
+            &view.downgrade(),
+            &mut async_cx,
+            &rx,
+            &root,
+            generation,
+            old_session,
+        );
+        assert_eq!(
+            cx.read(|cx| cx.global::<FolderSizeCache>().get(&folder)),
+            None
+        );
+        tx.send(FolderSizeCalculation {
+            path: folder.clone(),
+            size: 7,
+        })
+        .unwrap();
+        ExplorerView::drain_folder_size_calculations(
+            &view.downgrade(),
+            &mut async_cx,
+            &rx,
+            &root,
+            generation,
+            cx.read(super::super::image_memory::session),
+        );
+        assert_eq!(
+            cx.read(|cx| cx.global::<FolderSizeCache>().get(&folder)),
+            Some(7)
+        );
+        cx.update(super::super::folder_size::clear_memory);
+        assert_eq!(
+            cx.read(|cx| cx.global::<FolderSizeCache>().get(&folder)),
+            None
         );
     }
 

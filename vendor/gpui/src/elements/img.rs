@@ -36,6 +36,71 @@ pub const LOADING_DELAY: Duration = Duration::from_millis(200);
 /// Custom loaders, or external images will not use this asset loader
 pub type ImgResourceLoader = AssetLogger<ImageAssetLoader>;
 
+impl App {
+    /// Release decoded image assets when the application has no windows.
+    /// Other asset types remain cached. Call after window teardown so scenes
+    /// and their sprite atlases have already been released.
+    pub fn clear_image_assets(&mut self) {
+        let resource_loader = std::any::TypeId::of::<ImgResourceLoader>();
+        let image_decoder = std::any::TypeId::of::<AssetLogger<ImageDecoder>>();
+        self.loading_assets = std::mem::take(&mut self.loading_assets)
+            .into_iter()
+            .filter(|((asset_type, _), _)| {
+                *asset_type != resource_loader && *asset_type != image_decoder
+            })
+            .collect();
+    }
+}
+
+#[cfg(test)]
+mod cache_cleanup_tests {
+    use super::*;
+    use futures::FutureExt;
+
+    #[crate::test]
+    fn clearing_image_assets_releases_both_loaders_and_preserves_other_assets(
+        cx: &mut crate::TestAppContext,
+    ) {
+        use std::any::TypeId;
+        let mut images = Vec::new();
+        cx.update(|cx| {
+            for (asset_type, frames) in [
+                (TypeId::of::<ImgResourceLoader>(), 2),
+                (TypeId::of::<AssetLogger<ImageDecoder>>(), 1),
+            ] {
+                let image = Arc::new(RenderImage::new(
+                    (0..frames)
+                        .map(|_| Frame::new(image::RgbaImage::new(2, 2)))
+                        .collect::<Vec<_>>(),
+                ));
+                images.push(Arc::downgrade(&image));
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { Ok::<_, ImageCacheError>(image) })
+                    .shared();
+                for source in 0..500 {
+                    cx.loading_assets
+                        .insert((asset_type, source), Box::new(task.clone()));
+                }
+            }
+            cx.loading_assets
+                .insert((TypeId::of::<u8>(), 1), Box::new(42u8));
+        });
+        cx.background_executor.run_until_parked();
+        assert!(images.iter().all(|image| image.upgrade().is_some()));
+        cx.update(|cx| {
+            cx.clear_image_assets();
+            assert_eq!(cx.loading_assets.len(), 1);
+            assert!(
+                cx.loading_assets.capacity() < 10,
+                "release the old asset map's capacity"
+            );
+            assert!(cx.loading_assets.contains_key(&(TypeId::of::<u8>(), 1)));
+        });
+        assert!(images.iter().all(|image| image.upgrade().is_none()));
+    }
+}
+
 /// A source of image content.
 #[derive(Clone)]
 pub enum ImageSource {

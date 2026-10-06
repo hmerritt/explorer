@@ -44,6 +44,10 @@ struct Cache {
 }
 
 impl Cache {
+    fn clear_memory(&mut self) {
+        self.listings = HashMap::new();
+        self.in_flight = HashMap::new();
+    }
     fn next_sequence(&mut self) -> u64 {
         self.sequence = self
             .sequence
@@ -98,6 +102,13 @@ fn shared_cache() -> Arc<Mutex<Cache>> {
     CACHE
         .get_or_init(|| Arc::new(Mutex::new(Cache::default())))
         .clone()
+}
+
+pub(super) fn clear_memory() {
+    let cache = shared_cache();
+    let mut cache = cache.lock().unwrap();
+    // Keep sequence numbers unique across reopening and outstanding requests.
+    cache.clear_memory();
 }
 
 pub(super) struct DirectoryLoadRequest {
@@ -255,6 +266,28 @@ impl Drop for DirectoryMutation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_releases_snapshots_and_rejects_old_requests_after_reopening() {
+        let cache = cache();
+        let now = Instant::now();
+        seed(&cache, "share/seed", now);
+        let old = request(&cache, "share/folder", DirectoryLoadPolicy::Cached, now);
+        let sequence = cache.lock().unwrap().sequence;
+        cache.lock().unwrap().clear_memory();
+        {
+            let cache = cache.lock().unwrap();
+            assert_eq!(cache.listings.capacity(), 0);
+            assert_eq!(cache.in_flight.capacity(), 0);
+            assert_eq!(cache.sequence, sequence);
+        }
+        let new = request(&cache, "share/folder", DirectoryLoadPolicy::Cached, now);
+        old.load_with(|_, _| Ok(entries("obsolete")), || now)
+            .unwrap();
+        assert!(cache.lock().unwrap().listings.is_empty());
+        new.load_with(|_, _| Ok(entries("new")), || now).unwrap();
+        assert!(hit(&cache, "share/folder", now));
+    }
 
     fn cache() -> Arc<Mutex<Cache>> {
         Arc::new(Mutex::new(Cache::default()))

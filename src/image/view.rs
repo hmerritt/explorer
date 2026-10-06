@@ -3788,6 +3788,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn closing_last_window_releases_image_viewer_gif_assets(cx: &mut TestAppContext) {
+        cx.update(crate::explorer::initialize_window_cleanup);
+        let temp = TestDir::new("image-viewer-gif-cleanup");
+        let path = temp.path().join("loop.gif");
+        fs::write(&path, animated_gif_bytes(8, 4)).unwrap();
+        for cycle in 0..4 {
+            let decoded =
+                animated_gif_decoded_image(path.clone(), &format!("gif-{cycle}"), 8, 4, Some(128));
+            let (viewer, visual_cx) = cx.add_window_view(move |_, cx| {
+                image_viewer_for_test(cx.focus_handle(), ImageViewerState::Ready(decoded))
+            });
+            let resource: gpui::Resource = path.clone().into();
+            let mut decoded_frames = None;
+            for _ in 0..10 {
+                visual_cx.run_until_parked();
+                decoded_frames = visual_cx
+                    .update(|window, app| {
+                        window.get_asset::<gpui::ImgResourceLoader>(&resource, app)
+                    })
+                    .and_then(Result::ok);
+                if decoded_frames.is_some() {
+                    break;
+                }
+            }
+            let image = decoded_frames.expect("GIF resource decoded");
+            assert_eq!(image.frame_count(), 2);
+            let weak = Arc::downgrade(&image);
+            drop(image);
+            drop(viewer);
+            visual_cx.update(|window, _| window.remove_window());
+            visual_cx.run_until_parked();
+            assert!(
+                weak.upgrade().is_none(),
+                "GIF frames must leave with the last window"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn animated_gif_ready_image_renders_animated_img_element(cx: &mut TestAppContext) {
         let temp = TestDir::new("image-viewer-animated-gif");
         let path = temp.path().join("loop.gif");
