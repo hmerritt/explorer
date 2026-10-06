@@ -58,6 +58,16 @@ continues through the existing workflows.
 
 ## Netlify deployment
 
+- Production: <https://hmerritt-explorer.netlify.app>
+- Netlify project and deploy logs:
+  <https://app.netlify.com/projects/hmerritt-explorer/deploys>
+- Setup pull request: <https://github.com/hmerritt/explorer/pull/4>
+- Setup Deploy Preview: <https://deploy-preview-4--hmerritt-explorer.netlify.app>
+
+The first verified preview deployed commit
+`a1a421163317f9f49b25671e31aa2f07c4ebad83`. Each Netlify deploy records its Git
+commit; use the project deploy log to identify the currently published revision.
+
 The repository's root `netlify.toml` is the source of truth:
 
 - Base directory: `website`
