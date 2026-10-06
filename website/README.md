@@ -52,6 +52,11 @@ installation. Do not edit it by hand: development and builds regenerate it from
 `src/routes/`. Generated routes and build output are excluded from formatting and
 linting.
 
+Type checking uses the Go-based TypeScript 7.0.2 compiler, installed as
+`@typescript/native`. The `typecheck` script invokes that package explicitly so
+it cannot select the older compiler. `typescript@6.0.3` is retained only to
+provide the JavaScript API required by ESLint's TypeScript parser and rules.
+
 The Website GitHub Actions workflow runs a frozen dependency installation and
 `bun run check` for relevant pull requests and pushes to `master`. Rust validation
 continues through the existing workflows.
