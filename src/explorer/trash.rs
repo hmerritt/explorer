@@ -41,6 +41,10 @@ pub(super) struct TrashEntry {
     native: trash::TrashItem,
 }
 
+pub(super) fn item_path(id: &TrashItemId) -> PathBuf {
+    PathBuf::from(format!("{ADDRESS}items/{}", id.0))
+}
+
 impl TrashEntry {
     pub(super) fn path(&self) -> PathBuf {
         PathBuf::from(format!("{ADDRESS}items/{}", self.id.0))
@@ -232,7 +236,15 @@ pub(super) fn trash_paths_batch(paths: &[PathBuf]) -> Result<TrashOutcome, Strin
 fn trash_paths_inner(paths: &[PathBuf]) -> Result<TrashOutcome, String> {
     let before: BTreeSet<_> = list_inner()?.into_iter().map(|e| e.id).collect();
     let mut outcome = TrashOutcome::default();
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
+        if crate::explorer::operation_control::current_checkpoint() {
+            break;
+        }
+        crate::explorer::operation_control::report_items(
+            index,
+            paths.len(),
+            &path.display().to_string(),
+        );
         if is_root(path) || is_item(path) {
             outcome
                 .failures
@@ -394,7 +406,7 @@ trait TrashBackend {
     fn purge_batch(&self, items: Vec<TrashEntry>, context: PurgeContext) -> BatchResult {
         let mut result = BatchResult::default();
         for (index, item) in items.iter().enumerate() {
-            if context.cancel.load(Ordering::Relaxed) {
+            if crate::explorer::operation_control::cancelled(&context.cancel) {
                 result.cancelled = true;
                 result
                     .cancelled_items
@@ -480,7 +492,7 @@ impl TrashBackend for NativeBackend {
         #[cfg(target_os = "linux")]
         if item.original_path.as_deref() == Some(target)
             && fs::symlink_metadata(target).is_err()
-            && !cancel.load(Ordering::Relaxed)
+            && !crate::explorer::operation_control::cancelled(&cancel)
             && fs::symlink_metadata(&item.payload)
                 .is_ok_and(|metadata| !metadata.file_type().is_symlink())
             && target.parent().is_some_and(|parent| {
@@ -527,7 +539,7 @@ impl TrashBackend for NativeBackend {
             undo,
             item.original_path.as_deref(),
             &|source, staged, cancel| {
-                if cancel.load(Ordering::Relaxed) {
+                if crate::explorer::operation_control::cancelled(&cancel) {
                     return Err(io::Error::new(
                         io::ErrorKind::Interrupted,
                         "Recovery cancelled.",
@@ -603,7 +615,7 @@ fn recover_with(
 ) -> BatchResult {
     let mut result = BatchResult::default();
     for (index, id) in request.ids.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
+        if crate::explorer::operation_control::cancelled(&cancel) {
             result.cancelled = true;
             result
                 .cancelled_items
@@ -643,7 +655,7 @@ fn recover_with(
             let complete = backend.recover(&item, &target, choice, cancel, &mut result.undo)?;
             if complete {
                 result.completed.push(id.clone());
-            } else if cancel.load(Ordering::Relaxed) {
+            } else if crate::explorer::operation_control::cancelled(&cancel) {
                 result.cancelled_items.push(id.clone());
             } else {
                 result.skipped.push(id.clone());
@@ -651,7 +663,7 @@ fn recover_with(
             Ok::<_, String>(())
         })();
         if let Err(error) = attempt {
-            if cancel.load(Ordering::Relaxed) {
+            if crate::explorer::operation_control::cancelled(&cancel) {
                 result.cancelled_items.push(id.clone());
             } else {
                 result.failed.push(id.clone());
@@ -662,7 +674,7 @@ fn recover_with(
         }
         progress(index + 1, request.ids.len(), &item.name.to_string_lossy());
     }
-    result.cancelled |= cancel.load(Ordering::Relaxed);
+    result.cancelled |= crate::explorer::operation_control::cancelled(&cancel);
     let _ = backend.list();
     result
 }
@@ -710,7 +722,7 @@ fn purge_with(
     };
     let mut resolved = Vec::with_capacity(ids.len());
     for (index, id) in ids.iter().enumerate() {
-        if context.cancel.load(Ordering::Relaxed) {
+        if crate::explorer::operation_control::cancelled(&context.cancel) {
             result.cancelled = true;
             result
                 .cancelled_items
@@ -731,7 +743,8 @@ fn purge_with(
     result.failed = batch.failed;
     result.failures.extend(batch.failures);
     result.cancelled_items.extend(batch.cancelled_items);
-    result.cancelled |= batch.cancelled || context.cancel.load(Ordering::Relaxed);
+    result.cancelled |=
+        batch.cancelled || crate::explorer::operation_control::cancelled(&context.cancel);
     let _ = backend.list();
     result
 }
@@ -784,7 +797,7 @@ fn recover_node_using(
     copy: &impl Fn(&Path, &Path, &AtomicBool) -> io::Result<()>,
     commit: &impl Fn(&Path, &Path) -> io::Result<()>,
 ) -> Result<bool, String> {
-    if cancel.load(Ordering::Relaxed) {
+    if crate::explorer::operation_control::cancelled(&cancel) {
         return Ok(false);
     }
     let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
@@ -915,8 +928,9 @@ fn recover_node_using(
 }
 
 fn copy_verified(source: &Path, target: &Path, cancel: &AtomicBool) -> io::Result<()> {
+    let _boundaries = crate::explorer::operation_control::boundaries_available();
     use std::io::{Read, Write};
-    if cancel.load(Ordering::Relaxed) {
+    if crate::explorer::operation_control::cancelled(&cancel) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "Recovery cancelled.",
@@ -954,7 +968,7 @@ fn copy_verified(source: &Path, target: &Path, cancel: &AtomicBool) -> io::Resul
         let mut hash = Sha256::new();
         let mut buffer = vec![0u8; 1024 * 1024];
         loop {
-            if cancel.load(Ordering::Relaxed) {
+            if crate::explorer::operation_control::cancelled(&cancel) {
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "Recovery cancelled.",
@@ -972,6 +986,12 @@ fn copy_verified(source: &Path, target: &Path, cancel: &AtomicBool) -> io::Resul
         let mut actual = Sha256::new();
         let mut output = fs::File::open(target)?;
         loop {
+            if crate::explorer::operation_control::cancelled(cancel) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Recovery cancelled.",
+                ));
+            }
             let count = output.read(&mut buffer)?;
             if count == 0 {
                 break;
@@ -1007,8 +1027,9 @@ fn remove_payload(path: &Path) -> io::Result<()> {
 }
 
 fn verify_tree(source: &Path, target: &Path, cancel: &AtomicBool) -> io::Result<()> {
+    let _boundaries = crate::explorer::operation_control::boundaries_available();
     use std::io::Read;
-    if cancel.load(Ordering::Relaxed) {
+    if crate::explorer::operation_control::cancelled(&cancel) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "Recovery cancelled.",
@@ -1042,7 +1063,7 @@ fn verify_tree(source: &Path, target: &Path, cancel: &AtomicBool) -> io::Result<
             let mut hash = Sha256::new();
             let mut buffer = vec![0u8; 1024 * 1024];
             loop {
-                if cancel.load(Ordering::Relaxed) {
+                if crate::explorer::operation_control::cancelled(&cancel) {
                     return Err(io::Error::new(
                         io::ErrorKind::Interrupted,
                         "Recovery cancelled.",
@@ -1148,7 +1169,7 @@ fn is_pinned_inode(pinned: &fs::File, path: &Path) -> bool {
         .is_some_and(|(left, right)| left.dev() == right.dev() && left.ino() == right.ino())
 }
 
-fn fingerprint(path: &Path) -> io::Result<String> {
+pub(super) fn fingerprint(path: &Path) -> io::Result<String> {
     let metadata = fs::symlink_metadata(path)?;
     #[cfg(unix)]
     {
@@ -1285,9 +1306,12 @@ pub(super) fn cleanup_undo(undo: RecoveryUndo) {
 
 #[cfg(target_os = "windows")]
 fn native_worker<T: Send>(work: impl FnOnce() -> Result<T, String> + Send) -> Result<T, String> {
+    let control = crate::explorer::operation_control::current();
+    let _suspended = crate::explorer::operation_control::suspend_current();
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
+                let _worker = control.as_ref().map(|control| control.enter());
                 use windows::Win32::System::Com::{
                     COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
                 };
@@ -1586,6 +1610,64 @@ mod tests {
             directory: directory.map(Path::to_owned),
         }
     }
+    #[test]
+    fn purge_and_restore_pause_between_items_without_replaying_completed_work() {
+        use crate::explorer::operation_control::OperationControl;
+        for restoring in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let control = OperationControl::new();
+            let worker_control = control.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                let worker = scope.spawn(|| {
+                    let _participant = worker_control.enter();
+                    let backend = FakeBackend::new();
+                    let items: Vec<_> = (0..3)
+                        .map(|index| backend.add(&format!("item-{index}.txt"), None, b"data"))
+                        .collect();
+                    let ids: Vec<_> = items.iter().map(|item| item.id.clone()).collect();
+                    let pause_control = worker_control.clone();
+                    let requested = AtomicBool::new(false);
+                    let report = move |done, _: usize, _: &str| {
+                        if done == 1 && !requested.swap(true, Ordering::Relaxed) {
+                            pause_control.pause();
+                            tx.send(()).unwrap();
+                        }
+                    };
+                    let result = if restoring {
+                        recover_with(
+                            &backend,
+                            request(&ids, Some(directory.path())),
+                            RecoveryChoice::Skip,
+                            &worker_control.cancel,
+                            report,
+                        )
+                    } else {
+                        purge_with(&backend, ids.clone(), worker_control.cancel.clone(), report)
+                    };
+                    assert_eq!(result.completed, ids);
+                    assert!(result.failures.is_empty());
+                    assert!(backend.items.borrow().is_empty());
+                });
+                rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !control.paused() {
+                    if std::time::Instant::now() > deadline {
+                        control.cancel();
+                        panic!("bin worker did not pause");
+                    }
+                    std::thread::yield_now();
+                }
+                if restoring {
+                    assert!(directory.path().join("item-0.txt").exists());
+                    assert!(!directory.path().join("item-1.txt").exists());
+                }
+                control.resume();
+                worker.join().unwrap();
+            });
+        }
+    }
+
     #[test]
     fn snapshot_empty_ignores_new_arrivals_and_reports_partial_failure() {
         let backend = FakeBackend::new();

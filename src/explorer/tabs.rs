@@ -4412,11 +4412,11 @@ mod tests {
                 cx.notify();
             });
         });
-        cx.run_until_parked();
+        super::super::operations::settle_for_test(cx);
 
         right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-extract");
-        cx.run_until_parked();
+        super::super::operations::settle_for_test(cx);
 
         assert_eq!(
             fs::read(temp.path().join("inside.txt")).unwrap(),
@@ -4721,7 +4721,7 @@ mod tests {
 
         right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-delete");
-        cx.run_until_parked();
+        super::super::operations::settle_for_test(cx);
 
         assert!(!path.exists());
         assert!(temp.path().join("b").exists());
@@ -4746,22 +4746,11 @@ mod tests {
                 });
                 view.confirm_pending_trash(cx);
                 assert!(view.pending_trash.is_none());
-                assert!(view.pending_trash_task.is_some());
-                assert_eq!(view.pending_deleted_paths, paths);
-                assert!(paths.iter().all(|path| path.exists()));
-                assert_eq!(selected_names(view), vec!["c.txt"]);
-                assert_eq!(
-                    view.entries
-                        .iter()
-                        .map(|entry| entry.name.as_str())
-                        .collect::<Vec<_>>(),
-                    vec!["c.txt"]
-                );
-                assert!(view.has_background_operation());
+                assert_eq!(super::super::operations::outstanding(cx), 1);
                 assert!(view.file_operation_undo_stack.is_empty());
             });
         });
-        cx.run_until_parked();
+        super::super::operations::settle_for_test(cx);
 
         assert!(!paths[0].exists());
         assert!(!paths[1].exists());
@@ -4791,7 +4780,7 @@ mod tests {
                 view.confirm_pending_permanent_delete(cx);
             });
         });
-        cx.run_until_parked();
+        super::super::operations::settle_for_test(cx);
 
         assert!(!paths[0].exists());
         assert!(!paths[1].exists());

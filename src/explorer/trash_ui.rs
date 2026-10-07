@@ -222,26 +222,9 @@ impl ExplorerView {
         request: RecoveryRequest,
         cx: &mut Context<Self>,
     ) {
-        if request.ids.is_empty() || self.has_background_operation() {
-            return;
+        if !request.ids.is_empty() {
+            self.enqueue_operation(super::operations::Request::Recover(request), cx);
         }
-        let task = cx.spawn(async move |this, cx| {
-            let request_for_check = request.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { trash::has_conflicts(&request_for_check) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.pending_trash_task = None;
-                match result {
-                    Ok(true) => view.show_bin_dialog(DialogKind::Conflict(request), cx),
-                    Ok(false) => view.start_bin_recovery(request, RecoveryChoice::Skip, cx),
-                    Err(error) => view.set_error_notice(error),
-                }
-                cx.notify();
-            });
-        });
-        self.pending_trash_task = Some(task);
     }
 
     pub(super) fn request_bin_delete(&mut self, cx: &mut Context<Self>) {
@@ -366,39 +349,12 @@ impl ExplorerView {
         purge: Vec<TrashItemId>,
         cx: &mut Context<Self>,
     ) {
-        if self.has_background_operation() {
-            return;
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        let progress = Arc::new(Mutex::new(Progress::default()));
-        self.trash_operation = Some(TrashOperation {
-            cancel: cancel.clone(),
-            task: None,
-        });
-        self.show_bin_dialog(DialogKind::Progress(progress.clone(), cancel.clone()), cx);
-        let task = cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let reported_progress = progress.clone();
-                    let report = move |done, total, name: &str| {
-                        let mut state = reported_progress.lock().unwrap();
-                        state.done = done;
-                        state.total = total;
-                        state.name = name.into();
-                    };
-                    let result = if let Some((request, choice)) = recovery {
-                        trash::recover(request, choice, &cancel, report)
-                    } else {
-                        trash::purge(purge, cancel, report)
-                    };
-                    progress.lock().unwrap().finished = true;
-                    result
-                })
-                .await;
-            let _ = this.update(cx, |view, cx| view.finish_bin_job(result, cx));
-        });
-        self.trash_operation.as_mut().unwrap().task = Some(task);
+        let request = if let Some((request, _)) = recovery {
+            super::operations::Request::Recover(request)
+        } else {
+            super::operations::Request::Purge(purge)
+        };
+        self.enqueue_operation(request, cx);
     }
 
     fn finish_bin_job(&mut self, result: BatchResult, cx: &mut Context<Self>) {
@@ -1159,7 +1115,7 @@ mod tests {
         assert!(cx.debug_bounds("trash-header-original-location").is_some());
         assert!(cx.debug_bounds("utility-bin-restore").is_some());
         assert!(cx.debug_bounds("utility-bin-empty").is_some());
-        assert!(cx.debug_bounds("explorer-sidebar-row-1000000").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-bin").is_some());
         cx.update(|_, app| {
             view.update(app, |view, cx| {
                 assert!(!view.can_start_selected_rename());

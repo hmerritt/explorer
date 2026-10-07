@@ -169,7 +169,7 @@ pub(crate) trait Platform: 'static {
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>);
     fn quit(&self);
     /// Controls whether closing the final native window terminates the process.
-    /// Platforms other than Windows keep their existing behavior.
+    /// Supported by Windows and Linux; other platforms keep their existing behavior.
     fn set_quit_on_last_window_closed(&self, _quit: bool) {}
     fn restart(&self, binary_path: Option<PathBuf>);
     fn activate(&self, ignoring_other_apps: bool);

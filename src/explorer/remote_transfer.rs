@@ -365,6 +365,7 @@ pub(super) struct JobSnapshot {
     pub current_file_bytes: u64,
     pub current_file_total: u64,
     pub warnings: Vec<String>,
+    pub(super) moved_sources: Vec<PathBuf>,
     title: String,
     files: usize,
     pub retained_partials: bool,
@@ -389,6 +390,7 @@ impl JobSnapshot {
             current_file_bytes: 512,
             current_file_total: 1024,
             warnings: vec![],
+            moved_sources: vec![],
             title: "file.txt".into(),
             files: 1,
             retained_partials: false,
@@ -422,6 +424,15 @@ impl JobSnapshot {
         self.files
     }
 }
+pub(super) fn is_running(id: u64) -> bool {
+    manager()
+        .jobs
+        .lock()
+        .unwrap()
+        .get(&id)
+        .is_some_and(|job| job.running.load(Ordering::Acquire))
+}
+
 pub(super) fn snapshots() -> Vec<JobSnapshot> {
     manager()
         .jobs
@@ -471,6 +482,16 @@ fn job_snapshot(job: &Job, now: std::time::Instant) -> Option<JobSnapshot> {
         speed,
         remaining,
         warnings: m.warnings.clone(),
+        moved_sources: m
+            .sources
+            .iter()
+            .filter(|source| {
+                m.items
+                    .iter()
+                    .any(|item| &item.source == *source && item.source_removed)
+            })
+            .map(Location::provider_path)
+            .collect(),
         title: m.title(),
         files: m.files(),
         retained_partials: m
@@ -754,7 +775,6 @@ pub(super) fn enqueue(
     });
     save(&job).map_err(|e| e.to_string())?;
     manager().jobs.lock().unwrap().insert(id, job.clone());
-    start(job);
     Ok(id)
 }
 pub(super) fn control(id: u64, action: &str, pipeline: SftpSettings) {

@@ -32,6 +32,8 @@ mod large_icons;
 mod mouse_selection;
 mod navigation;
 mod open_with;
+mod operation_control;
+mod operations;
 mod pdf_hover_preview;
 mod portable_devices;
 mod properties;
@@ -154,3 +156,5 @@ pub mod benchmark_support {
 pub use tabs::ExplorerTabs;
 #[allow(unused_imports)]
 pub use view::ExplorerView;
+
+pub(crate) use operations::initialize as initialize_operations;

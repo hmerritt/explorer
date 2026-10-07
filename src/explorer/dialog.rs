@@ -104,6 +104,7 @@ pub(super) enum ExplorerDialogKind {
 
 pub(super) struct ExplorerDialog {
     kind: ExplorerDialogKind,
+    operation_owner: Option<(WeakEntity<super::operations::Operations>, u64)>,
     explorer: WeakEntity<ExplorerView>,
     date_format: String,
     font: gpui::Font,
@@ -329,6 +330,7 @@ impl ExplorerDialog {
 
         let mut dialog = Self {
             kind,
+            operation_owner: None,
             explorer,
             date_format,
             font,
@@ -417,6 +419,12 @@ impl ExplorerDialog {
     }
 
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((owner, id)) = &self.operation_owner {
+            let _ = owner.update(cx, |manager, cx| manager.control(*id, "confirm", cx));
+            self.completed = true;
+            window.remove_window();
+            return;
+        }
         self.completed = true;
         self.cancel_folder_size_task();
         let _ = self.explorer.update(cx, |explorer, cx| {
@@ -428,6 +436,12 @@ impl ExplorerDialog {
     }
 
     fn confirm_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((owner, id)) = &self.operation_owner {
+            let _ = owner.update(cx, |manager, cx| manager.control(*id, "confirm", cx));
+            self.completed = true;
+            window.remove_window();
+            return;
+        }
         self.completed = true;
         let _ = self.explorer.update(cx, |explorer, cx| {
             explorer.confirm_pending_trash(cx);
@@ -438,6 +452,17 @@ impl ExplorerDialog {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((owner, id)) = &self.operation_owner {
+            let action = if matches!(self.kind, ExplorerDialogKind::FileConflict(_)) {
+                "skip"
+            } else {
+                "cancel"
+            };
+            let _ = owner.update(cx, |manager, cx| manager.control(*id, action, cx));
+            self.completed = true;
+            window.remove_window();
+            return;
+        }
         self.completed = true;
         self.cancel_folder_size_task();
         let kind = self.kind.clone();
@@ -484,6 +509,12 @@ impl ExplorerDialog {
     }
 
     fn replace_conflicts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((owner, id)) = &self.operation_owner {
+            let _ = owner.update(cx, |manager, cx| manager.control(*id, "replace", cx));
+            self.completed = true;
+            window.remove_window();
+            return;
+        }
         self.completed = true;
         let _ = self.explorer.update(cx, |explorer, cx| {
             explorer.clear_active_dialog_window();
@@ -497,6 +528,13 @@ impl ExplorerDialog {
     }
 
     fn release(&mut self, cx: &mut App) {
+        if let Some((owner, _)) = self.operation_owner.clone() {
+            self.cancel_folder_size_task();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |manager, _| manager.attention_closed());
+            });
+            return;
+        }
         self.cancel_folder_size_task();
         let kind = self.kind.clone();
         let completed = self.completed;
@@ -1123,6 +1161,32 @@ impl ExplorerDialog {
             )
             .into_any_element()
     }
+}
+
+pub(super) fn open_operation_dialog(
+    kind: ExplorerDialogKind,
+    explorer: Entity<ExplorerView>,
+    owner: WeakEntity<super::operations::Operations>,
+    id: u64,
+    cx: &mut App,
+) -> Result<AnyWindowHandle, String> {
+    let font = crate::settings::current_app_font(cx);
+    let date_format = cx.global::<SettingsState>().value.view.date_format.clone();
+    let options = dialog_window_options(&kind, &date_format, &font, cx);
+    cx.open_window(options, |window, cx| {
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window);
+        cx.new(|cx| {
+            cx.on_release(|dialog: &mut ExplorerDialog, cx| dialog.release(cx))
+                .detach();
+            let mut dialog =
+                ExplorerDialog::new(kind, explorer.downgrade(), date_format, focus_handle, cx);
+            dialog.operation_owner = Some((owner, id));
+            dialog
+        })
+    })
+    .map(Into::into)
+    .map_err(|error| error.to_string())
 }
 
 fn open_dialog_window(
@@ -2912,6 +2976,7 @@ mod tests {
                 assert!(view.operation_notice.is_none());
             });
         });
+        super::super::operations::settle_for_test(cx);
         assert!(!file.exists());
     }
 
