@@ -608,7 +608,7 @@ impl ExplorerView {
         self.filter_pending_deleted_entries();
         if let Some(path) = selection_after_delete.as_ref() {
             self.restore_selection_from_paths(std::slice::from_ref(path));
-            self.scroll_focused_selection_to_view_bottom();
+            self.reveal_selection_after_delete();
         } else {
             self.clear_selection();
         }
@@ -658,7 +658,9 @@ impl ExplorerView {
                 };
                 self.push_file_operation_undo(trash_undo);
                 self.remove_cut_paths(&completed_paths);
-                self.reload_after_successful_delete(selection_after_delete, cx);
+                if self.path == operation_path {
+                    self.reload_after_successful_delete(selection_after_delete, cx);
+                }
                 if failures.is_empty() {
                     self.clear_operation_notice();
                 } else {
@@ -755,7 +757,7 @@ impl ExplorerView {
         self.filter_pending_deleted_entries();
         if let Some(path) = selection_after_delete.as_ref() {
             self.restore_selection_from_paths(std::slice::from_ref(path));
-            self.scroll_focused_selection_to_view_bottom();
+            self.reveal_selection_after_delete();
         } else {
             self.clear_selection();
         }
@@ -867,7 +869,9 @@ impl ExplorerView {
         match result {
             Ok(_) => {
                 self.remove_cut_paths(&paths);
-                self.reload_after_successful_delete(selection_after_delete, cx);
+                if self.path == operation_path {
+                    self.reload_after_successful_delete(selection_after_delete, cx);
+                }
                 self.clear_operation_notice();
             }
             Err(RemoteDeleteError::Cancelled { .. }) => {
@@ -2463,6 +2467,101 @@ mod tests {
     }
 
     #[gpui::test]
+    fn successful_trash_completion_does_not_change_selection_or_scroll_after_navigation(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let origin = temp.path().join("origin");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&origin).unwrap();
+        fs::create_dir(&destination).unwrap();
+        for ix in 0..80 {
+            fs::write(destination.join(format!("item-{ix:03}.txt")), b"file").unwrap();
+        }
+        let current = destination.join("item-040.txt");
+        let (view, cx) = test_view_entity_at_path(cx, destination);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.restore_selection_from_paths(std::slice::from_ref(&current));
+                view.set_scroll_offset(400.0);
+                view.complete_trash_operation(
+                    origin.clone(),
+                    vec![origin.join("deleted.txt")],
+                    Some(origin.join("previous.txt")),
+                    Ok(None),
+                    cx,
+                );
+                assert!(view.directory_load_task.is_none());
+                assert_eq!(view.selected_paths(), vec![current.clone()]);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selected_paths(), vec![current]);
+            super::super::test_support::assert_approx_eq(
+                view.scrollbar_metrics().unwrap().scroll_top,
+                400.0,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn failed_trash_restores_large_icon_selection_without_resetting_scroll(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        for ix in 0..180 {
+            fs::write(temp.path().join(format!("item-{ix:03}.txt")), b"file").unwrap();
+        }
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_view_mode(crate::settings::FileViewMode::LargeIcons, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let (attempted, before) = cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let layout = view.large_icon_layout.as_ref().unwrap();
+                let ix = 7 * layout.columns + 1;
+                let before = (layout.row_bounds(5).unwrap().top + 19.0)
+                    .min(view.scrollbar_metrics().unwrap().scroll_max);
+                let attempted = view.entries[ix].path.clone();
+                let previous = view.entries[ix - 1].path.clone();
+                view.set_scroll_offset(before);
+                view.pending_deleted_paths = vec![attempted.clone()];
+                view.filter_pending_deleted_entries();
+                view.restore_selection_from_paths(&[previous]);
+                view.reveal_selection_after_delete();
+                cx.notify();
+                (attempted, before)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.complete_trash_operation(
+                    temp.path().to_path_buf(),
+                    vec![attempted.clone()],
+                    None,
+                    Err("Failed to trash the selected file.".to_owned()),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selected_paths(), vec![attempted]);
+            super::super::test_support::assert_approx_eq(
+                view.scrollbar_metrics().unwrap().scroll_top,
+                before,
+            );
+        });
+    }
+
+    #[gpui::test]
     fn external_drag_unoptimized_move_cleans_up_existing_sources(cx: &mut TestAppContext) {
         let temp = TempDir::new();
         let file = temp.path().join("dragged.txt");
@@ -2918,7 +3017,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn successful_delete_selects_and_reveals_the_next_row_in_a_large_folder(
+    fn successful_delete_selects_and_reveals_the_previous_row_in_a_large_folder(
         cx: &mut TestAppContext,
     ) {
         let temp = TempDir::new();
@@ -2927,7 +3026,7 @@ mod tests {
                 .expect("create test file");
         }
         let deleted = temp.path().join("item-040.txt");
-        let next = temp.path().join("item-041.txt");
+        let previous = temp.path().join("item-039.txt");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
         cx.run_until_parked();
 
@@ -2944,8 +3043,8 @@ mod tests {
 
         assert!(!deleted.exists());
         cx.read_entity(&view, |view, _| {
-            assert_eq!(view.selected_paths(), vec![next]);
-            assert_eq!(view.selection.focused_index, Some(40));
+            assert_eq!(view.selected_paths(), vec![previous]);
+            assert_eq!(view.selection.focused_index, Some(39));
             assert!(
                 view.scrollbar_metrics()
                     .is_some_and(|metrics| metrics.scroll_top > 0.0),

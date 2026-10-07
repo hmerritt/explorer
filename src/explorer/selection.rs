@@ -87,21 +87,20 @@ impl ExplorerView {
             .iter()
             .map(PathBuf::as_path)
             .collect::<HashSet<_>>();
-        let last_removed_index = self
+        let first_removed_index = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(ix, entry)| removed_paths.contains(entry.path.as_path()).then_some(ix))
-            .next_back()?;
+            .next()?;
 
-        self.entries
+        self.entries[..first_removed_index]
             .iter()
-            .skip(last_removed_index + 1)
+            .rev()
             .find(|entry| !removed_paths.contains(entry.path.as_path()))
             .or_else(|| {
-                self.entries[..last_removed_index]
+                self.entries[first_removed_index + 1..]
                     .iter()
-                    .rev()
                     .find(|entry| !removed_paths.contains(entry.path.as_path()))
             })
             .map(|entry| entry.path.clone())
@@ -264,6 +263,20 @@ impl ExplorerView {
 
         self.scroll_index_to_view_bottom(ix);
         true
+    }
+
+    pub(super) fn reveal_selection_after_delete(&self) {
+        let Some(ix) = self.selection.focused_index else {
+            return;
+        };
+        if self.view_mode == FileViewMode::LargeIcons {
+            // Deletion may have reflowed the grid. Resolve the path against the
+            // new layout at render time rather than scrolling with stale rows.
+            *self.pending_delete_reveal.borrow_mut() =
+                self.entries.get(ix).map(|entry| entry.path.clone());
+        } else {
+            self.scroll_index_into_view(ix);
+        }
     }
 
     pub(super) fn scroll_index_into_view(&self, ix: usize) {
@@ -513,12 +526,12 @@ mod tests {
     }
 
     #[test]
-    fn selection_after_removing_paths_prefers_first_survivor_after_last_removed_row() {
+    fn selection_after_removing_paths_prefers_survivor_before_first_removed_row() {
         let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"]);
 
         assert_eq!(
             view.selection_after_removing_paths(&[PathBuf::from("b.txt"), PathBuf::from("d.txt"),]),
-            Some(PathBuf::from("e.txt"))
+            Some(PathBuf::from("a.txt"))
         );
     }
 
@@ -530,6 +543,51 @@ mod tests {
             view.selection_after_removing_paths(&[PathBuf::from("c.txt"), PathBuf::from("d.txt"),]),
             Some(PathBuf::from("b.txt"))
         );
+    }
+
+    #[test]
+    fn selection_after_removing_paths_handles_single_items_and_first_item_fallback() {
+        let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        for (removed, expected) in [
+            (vec!["b.txt"], Some("a.txt")),
+            (vec!["d.txt"], Some("c.txt")),
+            (vec!["a.txt"], Some("b.txt")),
+            (vec!["a.txt", "b.txt"], Some("c.txt")),
+            (vec!["a.txt", "c.txt"], Some("b.txt")),
+        ] {
+            assert_eq!(
+                view.selection_after_removing_paths(
+                    &removed.into_iter().map(PathBuf::from).collect::<Vec<_>>()
+                ),
+                expected.map(PathBuf::from)
+            );
+        }
+        let view = test_view_with_entries(&["only.txt"]);
+        assert_eq!(
+            view.selection_after_removing_paths(&["only.txt".into()]),
+            None
+        );
+    }
+
+    #[test]
+    fn selection_after_removing_paths_uses_display_order() {
+        let view = test_view_with_entries(&["d.txt", "b.txt", "a.txt"]);
+        assert_eq!(
+            view.selection_after_removing_paths(&["b.txt".into()]),
+            Some("d.txt".into())
+        );
+        assert_eq!(view.selection_after_removing_paths(&[]), None);
+    }
+
+    #[test]
+    fn scroll_to_top_clears_deferred_deletion_reveal() {
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        view.view_mode = FileViewMode::LargeIcons;
+        view.select_single_index(1);
+        view.reveal_selection_after_delete();
+        assert_eq!(*view.pending_delete_reveal.borrow(), Some("b.txt".into()));
+        view.scroll_to_top();
+        assert!(view.pending_delete_reveal.borrow().is_none());
     }
 
     #[test]
@@ -558,7 +616,7 @@ mod tests {
 
         assert_eq!(
             view.selection_after_removing_paths(&[PathBuf::from("file-b.txt")]),
-            Some(PathBuf::from("folder-c"))
+            Some(PathBuf::from("folder-a"))
         );
     }
 

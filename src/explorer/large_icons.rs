@@ -81,6 +81,48 @@ impl LargeIconLayout {
         self.rows.get(row).copied()
     }
 
+    pub(super) fn content_height(&self) -> f32 {
+        self.rows.last().map_or(0.0, |row| row.top + row.height)
+    }
+
+    pub(super) fn scroll_top(&self, offset: gpui::ListOffset) -> f32 {
+        self.row_bounds(offset.item_ix)
+            .map_or(self.content_height(), |row| row.top)
+            + f32::from(offset.offset_in_item)
+    }
+
+    pub(super) fn scroll_offset(&self, scroll_top: f32) -> gpui::ListOffset {
+        let scroll_top = scroll_top.max(0.0);
+        let row_ix = self
+            .rows
+            .partition_point(|row| row.top + row.height <= scroll_top);
+        let row_top = self
+            .row_bounds(row_ix)
+            .map_or(self.content_height(), |row| row.top);
+        gpui::ListOffset {
+            item_ix: row_ix,
+            offset_in_item: px(scroll_top - row_top),
+        }
+    }
+
+    pub(super) fn scroll_top_revealing_index(
+        &self,
+        scroll_top: f32,
+        viewport_height: f32,
+        ix: usize,
+    ) -> f32 {
+        let Some((_, top, _, height)) = self.index_bounds(ix) else {
+            return scroll_top;
+        };
+        if top < scroll_top {
+            top
+        } else if top + height > scroll_top + viewport_height {
+            (top + height - viewport_height).max(0.0)
+        } else {
+            scroll_top
+        }
+    }
+
     pub(super) fn tile_height(&self, ix: usize) -> Option<f32> {
         self.tile_heights.get(ix).copied()
     }
@@ -358,5 +400,44 @@ mod tests {
         assert_eq!(short_top, tall_top);
         assert!(short_height < tall_height);
         assert_eq!(layout.row_bounds(0).unwrap().tile_height, tall_height);
+    }
+
+    #[test]
+    fn scroll_offsets_round_trip_across_variable_height_rows() {
+        let layout = LargeIconLayout::from_tile_heights(2, 0.0, vec![100.0, 160.0, 120.0, 100.0]);
+        let second_row_top = layout.row_bounds(1).unwrap().top;
+        for scroll_top in [
+            0.0,
+            19.0,
+            second_row_top,
+            second_row_top + 37.0,
+            layout.content_height(),
+        ] {
+            assert_eq!(
+                layout.scroll_top(layout.scroll_offset(scroll_top)),
+                scroll_top
+            );
+        }
+        assert_eq!(layout.scroll_offset(second_row_top).item_ix, 1);
+        let empty = LargeIconLayout::from_tile_heights(1, 0.0, vec![]);
+        assert_eq!(empty.scroll_top(empty.scroll_offset(0.0)), 0.0);
+    }
+
+    #[test]
+    fn reveal_preserves_visible_position_and_moves_only_to_item_edge() {
+        let layout = LargeIconLayout::from_tile_heights(1, 0.0, vec![100.0; 10]);
+        let scroll_top = layout.row_bounds(3).unwrap().top + 17.0;
+        assert_eq!(
+            layout.scroll_top_revealing_index(scroll_top, 400.0, 4),
+            scroll_top
+        );
+        assert_eq!(
+            layout.scroll_top_revealing_index(scroll_top, 400.0, 2),
+            layout.row_bounds(2).unwrap().top
+        );
+        assert_eq!(
+            layout.scroll_top_revealing_index(scroll_top, 400.0, 8),
+            layout.row_bounds(8).unwrap().top + 100.0 - 400.0
+        );
     }
 }

@@ -144,6 +144,8 @@ pub struct ExplorerView {
     pub(super) large_icon_list_state: gpui::ListState,
     pub(super) large_icon_layout: Option<LargeIconLayout>,
     pub(super) large_icon_layout_key: Option<LargeIconLayoutCacheKey>,
+    pub(super) pending_delete_reveal: RefCell<Option<PathBuf>>,
+    delete_selection_load_generation: Option<u64>,
     pub(super) focus_handle: Option<FocusHandle>,
     pub(super) scrollbar_hovered: bool,
     pub(super) scrollbar_drag: Option<ScrollbarDrag>,
@@ -610,6 +612,8 @@ impl ExplorerView {
                 .measure_all(),
             large_icon_layout: None,
             large_icon_layout_key: None,
+            pending_delete_reveal: RefCell::new(None),
+            delete_selection_load_generation: None,
             focus_handle,
             scrollbar_hovered: false,
             scrollbar_drag: None,
@@ -1517,8 +1521,13 @@ impl ExplorerView {
         }
         changed |= self.finish_directory_reload_layout();
         if reveal_selection_after_load {
-            changed |= self.scroll_focused_selection_to_view_bottom();
+            if self.delete_selection_load_generation == Some(state.generation) {
+                self.reveal_selection_after_delete();
+            } else {
+                changed |= self.scroll_focused_selection_to_view_bottom();
+            }
         }
+        self.delete_selection_load_generation = None;
         if let Some(path) = state.rename_after_load {
             changed |= if let Some(window) = window {
                 self.start_rename_for_path(&path, window, cx)
@@ -1613,6 +1622,7 @@ impl ExplorerView {
             false,
             cx,
         );
+        self.delete_selection_load_generation = Some(self.directory_load_generation);
         self.clear_selection();
     }
 
@@ -1634,6 +1644,7 @@ impl ExplorerView {
             false,
             cx,
         );
+        self.delete_selection_load_generation = Some(self.directory_load_generation);
         self.clear_selection();
     }
 

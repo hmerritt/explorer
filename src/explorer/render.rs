@@ -3014,12 +3014,20 @@ impl ExplorerView {
             self.show_file_name_extensions,
             &self.font,
         );
+        let viewport_height = f32::from(self.large_icon_list_state.viewport_bounds().size.height);
+        let mut scroll_top = self.large_icon_layout.as_ref().map_or(0.0, |layout| {
+            layout.scroll_top(self.large_icon_list_state.logical_scroll_top())
+        });
 
         if self.large_icon_layout_key.as_ref() != Some(&layout_key)
             || self.large_icon_layout.is_none()
         {
             let layout = LargeIconLayout::from_cache_key(&layout_key, cx);
             self.large_icon_list_state.reset(layout.row_count());
+            scroll_top =
+                scroll_top.clamp(0.0, (layout.content_height() - viewport_height).max(0.0));
+            self.large_icon_list_state
+                .scroll_to(layout.scroll_offset(scroll_top));
             self.large_icon_layout = Some(layout);
             self.large_icon_layout_key = Some(layout_key);
         }
@@ -3027,6 +3035,18 @@ impl ExplorerView {
             .large_icon_layout
             .clone()
             .expect("large icon layout is initialized before rendering");
+
+        if viewport_height > 0.0
+            && let Some(path) = self.pending_delete_reveal.borrow_mut().take()
+            && let Some(ix) = self.entry_index_by_path(&path)
+            && self.selection.focused_index == Some(ix)
+        {
+            let scroll_top = layout
+                .scroll_top_revealing_index(scroll_top, viewport_height, ix)
+                .clamp(0.0, (layout.content_height() - viewport_height).max(0.0));
+            self.large_icon_list_state
+                .scroll_to(layout.scroll_offset(scroll_top));
+        }
 
         div().flex().flex_col().size_full().overflow_hidden().child(
             div()
@@ -8343,6 +8363,160 @@ mod tests {
             ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings)
         });
         (temp, view, cx)
+    }
+
+    fn assert_delete_preserves_scrolled_position(
+        cx: &mut gpui::TestAppContext,
+        mode: FileViewMode,
+        trash: bool,
+        row_boundary: bool,
+    ) {
+        let names = (0..180)
+            .map(|ix| {
+                if ix % 3 == 0 {
+                    format!("item-{ix:03}-a longer filename that wraps across several lines.txt")
+                } else {
+                    format!("item-{ix:03}.txt")
+                }
+            })
+            .collect::<Vec<_>>();
+        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) = test_view_entity_with_mode(cx, &refs, mode);
+        run_until_debug_bounds(
+            cx,
+            if mode == FileViewMode::LargeIcons {
+                "explorer-large-icon-entry-0"
+            } else {
+                "explorer-entry-0"
+            },
+        );
+        let (target, before) = cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let (target, scroll_top) = if mode == FileViewMode::LargeIcons {
+                    let layout = view.large_icon_layout.as_ref().unwrap();
+                    (
+                        7 * layout.columns + usize::from(!row_boundary),
+                        layout.row_bounds(5).unwrap().top + 19.0,
+                    )
+                } else {
+                    (40, 30.0 * view.entry_row_height() + 7.0)
+                };
+                view.set_scroll_offset(scroll_top);
+                cx.notify();
+                (target, scroll_top)
+            })
+        });
+        cx.run_until_parked();
+
+        // Repeat from the replacement selection to cover consecutive deletions.
+        for target in [target, target - 1] {
+            let (deleted, previous) = cx.update(|_, app| {
+                view.update(app, |view, cx| {
+                    let deleted = view.entries[target].path.clone();
+                    let previous = view.entries[target - 1].path.clone();
+                    view.restore_selection_from_paths(std::slice::from_ref(&deleted));
+                    if trash {
+                        view.trash_selected_paths(cx);
+                    } else {
+                        view.pending_permanent_delete =
+                            Some(crate::explorer::view::PendingPermanentDelete {
+                                paths: vec![deleted.clone()],
+                            });
+                        view.confirm_pending_permanent_delete(cx);
+                        cx.notify();
+                    }
+                    (deleted, previous)
+                })
+            });
+            cx.run_until_parked();
+            assert!(!deleted.exists());
+            cx.read_entity(&view, |view, _| {
+                assert_eq!(view.selected_paths(), vec![previous]);
+                crate::explorer::test_support::assert_approx_eq(
+                    view.scrollbar_metrics().unwrap().scroll_top,
+                    before,
+                );
+                assert!(view.pending_delete_reveal.borrow().is_none());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn large_icon_permanent_delete_preserves_position(cx: &mut gpui::TestAppContext) {
+        assert_delete_preserves_scrolled_position(cx, FileViewMode::LargeIcons, false, false);
+    }
+
+    #[gpui::test]
+    fn large_icon_trash_preserves_position_at_row_boundary(cx: &mut gpui::TestAppContext) {
+        assert_delete_preserves_scrolled_position(cx, FileViewMode::LargeIcons, true, true);
+    }
+
+    #[gpui::test]
+    fn details_permanent_delete_preserves_position(cx: &mut gpui::TestAppContext) {
+        assert_delete_preserves_scrolled_position(cx, FileViewMode::Details, false, false);
+    }
+
+    #[gpui::test]
+    fn large_icon_delete_clamps_position_when_final_row_disappears(cx: &mut gpui::TestAppContext) {
+        let names = (0..180)
+            .map(|ix| format!("item-{ix:03}.txt"))
+            .collect::<Vec<_>>();
+        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) = test_view_entity_with_mode(cx, &refs, FileViewMode::LargeIcons);
+        run_until_debug_bounds(cx, "explorer-large-icon-entry-0");
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.set_scroll_offset(view.scrollbar_metrics().unwrap().scroll_max);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let previous = cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let layout = view.large_icon_layout.as_ref().unwrap();
+                let first = (layout.row_count() - 1) * layout.columns;
+                let previous = view.entries[first - 1].path.clone();
+                let paths = view.entries[first..]
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect();
+                view.pending_permanent_delete =
+                    Some(crate::explorer::view::PendingPermanentDelete { paths });
+                view.confirm_pending_permanent_delete(cx);
+                cx.notify();
+                previous
+            })
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selected_paths(), vec![previous]);
+            let metrics = view.scrollbar_metrics().unwrap();
+            assert!(metrics.scroll_top > 0.0);
+            crate::explorer::test_support::assert_approx_eq(metrics.scroll_top, metrics.scroll_max);
+        });
+    }
+
+    #[gpui::test]
+    fn large_icon_delete_only_item_clears_selection(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) =
+            test_view_entity_with_mode(cx, &["only.txt"], FileViewMode::LargeIcons);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(0);
+                view.pending_permanent_delete =
+                    Some(crate::explorer::view::PendingPermanentDelete {
+                        paths: view.selected_paths(),
+                    });
+                view.confirm_pending_permanent_delete(cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.entries.is_empty());
+            assert!(view.selected_paths().is_empty());
+        });
     }
 
     fn recursive_result_test_view<'a>(

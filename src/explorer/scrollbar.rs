@@ -202,6 +202,7 @@ fn clamped_visible_horizontal_scroll_offset(
 
 impl ExplorerView {
     pub(super) fn scroll_to_top(&self) {
+        self.pending_delete_reveal.borrow_mut().take();
         if self.view_mode == FileViewMode::LargeIcons {
             self.large_icon_list_state
                 .set_offset_from_scrollbar(point(px(0.0), px(0.0)));
