@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::SystemTime,
 };
@@ -359,9 +359,57 @@ fn destination(item: &TrashEntry, request: &RecoveryRequest) -> Result<PathBuf, 
     Ok(original)
 }
 
+type PurgeProgress = Arc<dyn Fn(usize, usize, &str) + Send + Sync>;
+
+#[derive(Clone)]
+struct PurgeContext {
+    cancel: Arc<AtomicBool>,
+    progress: PurgeProgress,
+    done: Arc<AtomicUsize>,
+    total: usize,
+}
+
+impl PurgeContext {
+    fn report(&self, name: &str) {
+        (self.progress)(self.done.load(Ordering::Relaxed), self.total, name);
+    }
+
+    fn processed(&self, name: &str) {
+        self.done.fetch_add(1, Ordering::Relaxed);
+        self.report(name);
+    }
+}
+
+impl BatchResult {
+    fn purge_failed(&mut self, item: &TrashEntry, error: String) {
+        self.failed.push(item.id.clone());
+        self.failures
+            .push(format!("{}: {error}", item.name.to_string_lossy()));
+    }
+}
+
 trait TrashBackend {
     fn list(&self) -> Result<Vec<TrashEntry>, String>;
     fn purge(&self, item: &TrashEntry) -> Result<(), String>;
+    fn purge_batch(&self, items: Vec<TrashEntry>, context: PurgeContext) -> BatchResult {
+        let mut result = BatchResult::default();
+        for (index, item) in items.iter().enumerate() {
+            if context.cancel.load(Ordering::Relaxed) {
+                result.cancelled = true;
+                result
+                    .cancelled_items
+                    .extend(items[index..].iter().map(|item| item.id.clone()));
+                break;
+            }
+            context.report(&item.name.to_string_lossy());
+            match self.purge(item) {
+                Ok(()) => result.completed.push(item.id.clone()),
+                Err(error) => result.purge_failed(item, error),
+            }
+            context.processed(&item.name.to_string_lossy());
+        }
+        result
+    }
     fn trash(&self, path: &Path) -> Result<(), String>;
     fn update_origin(&self, _: &RecoveredPath) -> Result<(), String> {
         Ok(())
@@ -395,6 +443,10 @@ impl TrashBackend for NativeBackend {
     }
     fn purge(&self, item: &TrashEntry) -> Result<(), String> {
         platform_purge(item)
+    }
+    #[cfg(target_os = "windows")]
+    fn purge_batch(&self, items: Vec<TrashEntry>, context: PurgeContext) -> BatchResult {
+        windows_backend::shell_delete_batch(items, context)
     }
     fn trash(&self, path: &Path) -> Result<(), String> {
         let outcome = trash_paths_inner(&[path.to_owned()])?;
@@ -617,8 +669,8 @@ fn recover_with(
 
 pub(super) fn purge(
     ids: Vec<TrashItemId>,
-    cancel: &AtomicBool,
-    progress: impl Fn(usize, usize, &str) + Sync + Send,
+    cancel: Arc<AtomicBool>,
+    progress: impl Fn(usize, usize, &str) + Sync + Send + 'static,
 ) -> BatchResult {
     let _guard = OPERATIONS.lock().unwrap_or_else(|e| e.into_inner());
     let failed = ids.clone();
@@ -633,40 +685,53 @@ pub(super) fn purge(
 fn purge_with(
     backend: &impl TrashBackend,
     ids: Vec<TrashItemId>,
-    cancel: &AtomicBool,
-    progress: impl Fn(usize, usize, &str),
+    cancel: Arc<AtomicBool>,
+    progress: impl Fn(usize, usize, &str) + Sync + Send + 'static,
 ) -> BatchResult {
     let mut result = BatchResult::default();
+    let context = PurgeContext {
+        cancel,
+        progress: Arc::new(progress),
+        done: Arc::new(AtomicUsize::new(0)),
+        total: ids.len(),
+    };
+    context.report("");
+    let mut entries: BTreeMap<_, _> = match backend.list() {
+        Ok(items) => items
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect(),
+        Err(error) => {
+            result.failures.push(error);
+            result.failed = ids;
+            let _ = backend.list();
+            return result;
+        }
+    };
+    let mut resolved = Vec::with_capacity(ids.len());
     for (index, id) in ids.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
+        if context.cancel.load(Ordering::Relaxed) {
             result.cancelled = true;
+            result
+                .cancelled_items
+                .extend(resolved.iter().map(|item: &TrashEntry| item.id.clone()));
             result.cancelled_items.extend(ids[index..].iter().cloned());
+            resolved.clear();
             break;
         }
-        let items = match backend.list() {
-            Ok(items) => items,
-            Err(error) => {
-                result.failures.push(error);
-                result.failed.extend(ids[index..].iter().cloned());
-                break;
-            }
-        };
-        let Some(item) = items.into_iter().find(|e| &e.id == id) else {
+        let Some(item) = entries.remove(id) else {
             result.skipped.push(id.clone());
+            context.processed("");
             continue;
         };
-        progress(index, ids.len(), &item.name.to_string_lossy());
-        match backend.purge(&item) {
-            Ok(()) => result.completed.push(id.clone()),
-            Err(error) => {
-                result.failed.push(id.clone());
-                result
-                    .failures
-                    .push(format!("{}: {error}", item.name.to_string_lossy()));
-            }
-        }
+        resolved.push(item);
     }
-    result.cancelled |= cancel.load(Ordering::Relaxed);
+    let batch = backend.purge_batch(resolved, context.clone());
+    result.completed = batch.completed;
+    result.failed = batch.failed;
+    result.failures.extend(batch.failures);
+    result.cancelled_items.extend(batch.cancelled_items);
+    result.cancelled |= batch.cancelled || context.cancel.load(Ordering::Relaxed);
     let _ = backend.list();
     result
 }
@@ -1432,11 +1497,13 @@ impl Drop for SnapshotFixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     struct FakeBackend {
         root: tempfile::TempDir,
         items: RefCell<Vec<TrashEntry>>,
         failed_purges: RefCell<BTreeSet<TrashItemId>>,
+        list_calls: Cell<usize>,
+        fail_list: Cell<bool>,
     }
     impl FakeBackend {
         fn new() -> Self {
@@ -1444,6 +1511,8 @@ mod tests {
                 root: tempfile::tempdir().unwrap(),
                 items: RefCell::new(Vec::new()),
                 failed_purges: RefCell::new(BTreeSet::new()),
+                list_calls: Cell::new(0),
+                fail_list: Cell::new(false),
             }
         }
         fn add(&self, name: &str, original: Option<PathBuf>, contents: &[u8]) -> TrashEntry {
@@ -1484,6 +1553,10 @@ mod tests {
     }
     impl TrashBackend for FakeBackend {
         fn list(&self) -> Result<Vec<TrashEntry>, String> {
+            self.list_calls.set(self.list_calls.get() + 1);
+            if self.fail_list.get() {
+                return Err("Injected enumeration failure".into());
+            }
             Ok(self.items.borrow().clone())
         }
         fn purge(&self, item: &TrashEntry) -> Result<(), String> {
@@ -1521,12 +1594,169 @@ mod tests {
         let confirmed = vec![one.id.clone(), two.id.clone()];
         let later = backend.add("later.txt", None, b"later");
         backend.failed_purges.borrow_mut().insert(two.id.clone());
-        let result = purge_with(&backend, confirmed, &AtomicBool::new(false), |_, _, _| {});
+        let result = purge_with(
+            &backend,
+            confirmed,
+            Arc::new(AtomicBool::new(false)),
+            |_, _, _| {},
+        );
         assert_eq!(result.completed, vec![one.id]);
         assert_eq!(result.failed, vec![two.id]);
         assert_eq!(fs::read(later.payload).unwrap(), b"later");
         assert_eq!(fs::read(two.payload).unwrap(), b"two");
         assert!(result.undo.paths.is_empty());
+    }
+    #[test]
+    fn purge_hundreds_of_items_enumerates_twice_and_finishes_progress() {
+        let backend = FakeBackend::new();
+        let ids: Vec<_> = (0..300)
+            .map(|index| {
+                backend
+                    .add(&format!("file-{index}.txt"), None, b"fixture")
+                    .id
+            })
+            .collect();
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let reports = progress.clone();
+        let result = purge_with(
+            &backend,
+            ids.clone(),
+            Arc::new(AtomicBool::new(false)),
+            move |done, total, _| {
+                reports.lock().unwrap().push((done, total));
+            },
+        );
+        assert_eq!(result.completed, ids);
+        assert!(result.failures.is_empty());
+        assert!(result.undo.paths.is_empty());
+        assert_eq!(backend.list_calls.get(), 2);
+        assert!(backend.items.borrow().is_empty());
+        let progress = progress.lock().unwrap();
+        assert_eq!(progress.last(), Some(&(300, 300)));
+        assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    }
+
+    #[test]
+    fn purge_missing_and_failed_items_advance_progress_and_preserve_originals() {
+        let backend = FakeBackend::new();
+        let original = backend.root.path().join("original.txt");
+        fs::write(&original, b"unrelated replacement").unwrap();
+        let missing = backend.add("missing.txt", Some(original.clone()), b"missing");
+        let failed = backend.add("failed.txt", None, b"failed");
+        let complete = backend.add("complete.txt", None, b"complete");
+        backend
+            .items
+            .borrow_mut()
+            .retain(|item| item.id != missing.id);
+        backend.failed_purges.borrow_mut().insert(failed.id.clone());
+        let done = Arc::new(AtomicUsize::new(0));
+        let reported = done.clone();
+        let result = purge_with(
+            &backend,
+            vec![missing.id.clone(), failed.id.clone(), complete.id.clone()],
+            Arc::new(AtomicBool::new(false)),
+            move |count, _, _| {
+                reported.store(count, Ordering::Relaxed);
+            },
+        );
+        assert_eq!(result.skipped, vec![missing.id]);
+        assert_eq!(result.failed, vec![failed.id]);
+        assert_eq!(result.completed, vec![complete.id]);
+        assert_eq!(done.load(Ordering::Relaxed), 3);
+        assert_eq!(fs::read(original).unwrap(), b"unrelated replacement");
+        assert_eq!(fs::read(failed.payload).unwrap(), b"failed");
+        assert_eq!(backend.list_calls.get(), 2);
+    }
+
+    #[test]
+    fn purge_cancel_before_start_retains_every_item_and_refreshes() {
+        let backend = FakeBackend::new();
+        let item = backend.add("file.txt", None, b"fixture");
+        let result = purge_with(
+            &backend,
+            vec![item.id.clone()],
+            Arc::new(AtomicBool::new(true)),
+            |_, _, _| {},
+        );
+        assert!(result.cancelled);
+        assert_eq!(result.cancelled_items, vec![item.id]);
+        assert!(result.completed.is_empty());
+        assert!(result.failed.is_empty());
+        assert!(item.payload.exists());
+        assert_eq!(backend.list_calls.get(), 2);
+    }
+
+    #[test]
+    fn purge_cancel_during_execution_preserves_completed_and_remaining_items() {
+        let backend = FakeBackend::new();
+        let items: Vec<_> = (0..3)
+            .map(|index| backend.add(&format!("file-{index}"), None, b"fixture"))
+            .collect();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let request_cancel = cancel.clone();
+        let result = purge_with(
+            &backend,
+            items.iter().map(|item| item.id.clone()).collect(),
+            cancel,
+            move |done, _, _| {
+                if done == 1 {
+                    request_cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        assert!(result.cancelled);
+        assert_eq!(result.completed, vec![items[0].id.clone()]);
+        assert_eq!(
+            result.cancelled_items,
+            vec![items[1].id.clone(), items[2].id.clone()]
+        );
+        assert!(result.failed.is_empty());
+        assert!(!items[0].payload.exists());
+        assert!(items[1..].iter().all(|item| item.payload.exists()));
+        assert_eq!(backend.list_calls.get(), 2);
+    }
+
+    #[test]
+    fn purge_revalidates_payload_identity_after_initial_listing() {
+        let backend = FakeBackend::new();
+        let item = backend.add("changed.txt", None, b"original");
+        let payload = item.payload.clone();
+        let original_identity = item.fingerprint.clone();
+        // Replace just before deletion, after the single enumeration. Keep the
+        // old inode alive so filesystems cannot reuse it for the replacement.
+        let old_payload = backend.root.path().join("old-payload");
+        let result = purge_with(
+            &backend,
+            vec![item.id.clone()],
+            Arc::new(AtomicBool::new(false)),
+            move |_, _, name| {
+                if name == "changed.txt" && fingerprint(&payload).unwrap() == original_identity {
+                    fs::rename(&payload, &old_payload).unwrap();
+                    fs::write(&payload, b"replacement").unwrap();
+                }
+            },
+        );
+        assert_eq!(result.failed, vec![item.id]);
+        assert!(result.completed.is_empty());
+        assert_eq!(fs::read(item.payload).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn purge_enumeration_failure_does_not_delete_anything() {
+        let backend = FakeBackend::new();
+        let item = backend.add("file.txt", None, b"fixture");
+        backend.fail_list.set(true);
+        let result = purge_with(
+            &backend,
+            vec![item.id.clone()],
+            Arc::new(AtomicBool::new(false)),
+            |_, _, _| {},
+        );
+        assert_eq!(result.failed, vec![item.id]);
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.completed.is_empty());
+        assert!(item.payload.exists());
+        assert_eq!(backend.list_calls.get(), 2);
     }
     #[test]
     fn unavailable_identity_does_not_touch_original_replacement() {
@@ -1884,7 +2114,11 @@ mod tests {
         let outcome = trash_paths_batch(&[disposable]).unwrap();
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
         assert_eq!(outcome.ids.len(), 1);
-        let result = purge(outcome.ids.clone(), &AtomicBool::new(false), |_, _, _| {});
+        let result = purge(
+            outcome.ids.clone(),
+            Arc::new(AtomicBool::new(false)),
+            |_, _, _| {},
+        );
         assert!(result.failures.is_empty(), "{:?}", result.failures);
         assert_eq!(result.completed, outcome.ids);
         #[cfg(any(target_os = "windows", target_os = "linux"))]

@@ -2,6 +2,8 @@
 
 ## 2
 
+- Recycle bin empty is very slow. Also move the sidebar button to the very last one (below Network/WSL)
+
 ## 3
 
 - Settings UI

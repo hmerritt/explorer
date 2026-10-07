@@ -380,8 +380,9 @@ impl ExplorerView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let report = |done, total, name: &str| {
-                        let mut state = progress.lock().unwrap();
+                    let reported_progress = progress.clone();
+                    let report = move |done, total, name: &str| {
+                        let mut state = reported_progress.lock().unwrap();
                         state.done = done;
                         state.total = total;
                         state.name = name.into();
@@ -389,7 +390,7 @@ impl ExplorerView {
                     let result = if let Some((request, choice)) = recovery {
                         trash::recover(request, choice, &cancel, report)
                     } else {
-                        trash::purge(purge, &cancel, report)
+                        trash::purge(purge, cancel, report)
                     };
                     progress.lock().unwrap().finished = true;
                     result

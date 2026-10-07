@@ -39,6 +39,13 @@ App mutations are serialized across windows. Open bin views refresh after app
 operations, activation, Refresh/F5, and every five seconds while visible. Every
 mutation resolves bin identities again; original paths are destinations only.
 
+Empty and selected-item permanent deletion resolve the confirmed identities from
+one fresh listing and refresh once after completion or cancellation. Windows
+queues those items in one Shell operation, retaining per-item outcomes and
+checking payload identity immediately before deletion. Cancel stops pending
+operations; an identity change retains the replacement and resumes untouched
+items in a new Shell operation. Items arriving after confirmation remain intact.
+
 ## Platform behavior
 
 Linux uses the trash crate's Freedesktop enumeration and native ordinary restore
@@ -71,6 +78,31 @@ skip conflicts and undo:
 ```sh
 cargo test --locked --lib native_bin_paste_destination_formats -- --ignored --test-threads=1 --nocapture
 ```
+
+Windows batch deletion checks use only owned fixtures. The callback test uses
+temporary files to exercise cancellation, locked-file failure, and replacement
+identity handling. The performance test moves 16 baseline files, 256 batch
+files, a nested folder, and an unselected sentinel into the bin; it purges only
+their explicit identities and verifies a single batch Shell execution:
+
+```sh
+cargo test --locked --lib native_batch_cancellation_and_identity_changes -- --ignored --test-threads=1 --nocapture
+cargo test --locked --lib native_bin_batch_purge_performance -- --ignored --test-threads=1 --nocapture
+```
+
+On this Windows workspace, the original purge loop took 34.05 seconds for 16
+files (2,128 ms/item), while the batch path took 3.52 seconds for 257 items
+(13.7 ms/item), including a nested folder. The unselected sentinel survived and
+progress reached 257 of 257. Timings include enumeration and final refresh;
+the differing fixture counts make these per-item figures indicative rather
+than a same-size benchmark.
+
+Batch purge validation: Windows `cargo check --locked` and the serial
+`cargo test --locked --all-targets -- --test-threads=1` pass (2,183 tests;
+six native tests remain ignored in the standard suite). Both new native tests
+pass when explicitly run. Linux (WSL) cross-target checking and all 37 focused
+Trash tests pass. GPUI tests cover dialog progress and cancellation; manual
+visual checks and native macOS validation have not been repeated for this change.
 
 Before a release, use disposable files to manually exercise each platform:
 
