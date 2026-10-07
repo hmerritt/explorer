@@ -3276,9 +3276,6 @@ fn prepare_file_operation(
     kind: FileOperationKind,
     copy_name_policy: CopyNamePolicy,
 ) -> Result<FileOperationJob, String> {
-    if crate::explorer::operation_control::current_checkpoint() {
-        return Err("Operation cancelled.".into());
-    }
     if paths.is_empty() {
         return Err("No items were selected for drag-and-drop.".to_owned());
     }
@@ -3452,7 +3449,7 @@ pub(super) fn remove_remote_paths_permanently_with_progress(
     on_progress(progress.clone());
 
     for path in paths {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             progress.phase = RemoteDeletePhase::Cancelled;
             on_progress(progress);
             return Err(RemoteDeleteError::Cancelled { deleted_any: false });
@@ -3478,7 +3475,7 @@ pub(super) fn remove_remote_paths_permanently_with_progress(
     let mut deleted_any = false;
 
     for path in paths {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             progress.phase = RemoteDeletePhase::Cancelled;
             on_progress(progress);
             return Err(RemoteDeleteError::Cancelled { deleted_any });
@@ -3565,9 +3562,6 @@ fn plan_path_operation(
     steps: &mut Vec<FileOperationStep>,
     stats: &mut FileOperationStats,
 ) -> Result<(), String> {
-    if crate::explorer::operation_control::current_checkpoint() {
-        return Err("Operation cancelled.".into());
-    }
     let metadata =
         fs::metadata(source).map_err(|error| format_path_error("read", source, error))?;
 
@@ -3637,9 +3631,6 @@ fn prepare_link_operation(
     paths: &[PathBuf],
     destination: &Path,
 ) -> Result<FileOperationJob, String> {
-    if crate::explorer::operation_control::current_checkpoint() {
-        return Err("Operation cancelled.".into());
-    }
     if paths.is_empty() {
         return Err("No items were selected for drag-and-drop.".to_owned());
     }
@@ -3710,9 +3701,6 @@ fn prepare_link_operation(
 }
 
 fn prepare_compress_operation(paths: &[PathBuf]) -> Result<FileOperationJob, String> {
-    if crate::explorer::operation_control::current_checkpoint() {
-        return Err("Operation cancelled.".into());
-    }
     let Some(parent) = paths.first().and_then(|path| path.parent()) else {
         return Err("No items were selected to compress.".to_owned());
     };
@@ -3774,14 +3762,8 @@ fn collect_compression_entries(
     archive_root: String,
     entries: &mut Vec<ArchiveCompressionEntry>,
 ) -> Result<(), String> {
-    if crate::explorer::operation_control::current_checkpoint() {
-        return Err("Operation cancelled.".into());
-    }
     let mut pending = vec![(root.to_path_buf(), archive_root)];
     while let Some((source, archive_name)) = pending.pop() {
-        if crate::explorer::operation_control::current_checkpoint() {
-            return Err("Operation cancelled.".into());
-        }
         let metadata = fs::symlink_metadata(&source)
             .map_err(|error| compression_operation_error("read", &source, error))?;
         let file_type = metadata.file_type();
@@ -3865,9 +3847,6 @@ fn prepare_extract_archive_operation(
     archives: &[PathBuf],
     destination: &Path,
 ) -> Result<FileOperationJob, String> {
-    if crate::explorer::operation_control::current_checkpoint() {
-        return Err("Operation cancelled.".into());
-    }
     let archive_diagnostics = ArchiveDiagnostics::start();
     let mut total_timing = crate::debug_options::ArchiveTiming::start(
         "prepare.total",
@@ -4090,7 +4069,7 @@ fn execute_copy_move_operation_with_progress_impl(
         progress.phase = FileOperationPhase::Preparing;
         on_progress(progress.clone());
         for path in &create_directories {
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 return Err(FileOperationError::Cancelled);
             }
             match fs::create_dir(path) {
@@ -4163,7 +4142,7 @@ fn execute_copy_move_operation_with_progress_impl(
     }
 
     for step in &job.steps {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             progress.phase = FileOperationPhase::Cancelled;
             progress.cancellable = false;
             on_progress(progress);
@@ -4194,7 +4173,7 @@ fn execute_copy_move_operation_with_progress_impl(
     }
 
     for step in &job.steps {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             progress.phase = FileOperationPhase::Cancelled;
             progress.cancellable = false;
             on_progress(progress);
@@ -4254,7 +4233,7 @@ fn run_parallel_file_tasks(
                             event_tx.clone(),
                         );
                         if result.is_err() {
-                            crate::explorer::operation_control::request_cancel(&cancel_for_workers);
+                            cancel_for_workers.store(true, Ordering::Relaxed);
                         }
                         result
                     })
@@ -4264,7 +4243,6 @@ fn run_parallel_file_tasks(
         });
 
         loop {
-            crate::explorer::operation_control::cancelled(&cancel);
             match result_rx.recv_timeout(Duration::from_millis(25)) {
                 Ok(result) => {
                     drain_parallel_file_task_events(&event_rx, progress, on_progress);
@@ -4283,7 +4261,7 @@ fn run_parallel_file_tasks(
     })
 }
 
-pub(super) fn resumable_copy_cleanup_targets(
+fn resumable_copy_cleanup_targets(
     job: &FileOperationJob,
     conflict_choice: ConflictChoice,
 ) -> Vec<(PathBuf, PathBuf)> {
@@ -4325,7 +4303,7 @@ fn run_single_file_task(
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) -> Result<ParallelFileTaskResult, FileOperationError> {
-    if crate::explorer::operation_control::cancelled(&cancel) {
+    if cancel.load(Ordering::Relaxed) {
         return Err(FileOperationError::Cancelled);
     }
 
@@ -4406,8 +4384,7 @@ fn run_parallel_file_task(
     cancel: Arc<AtomicBool>,
     event_tx: mpsc::Sender<ParallelFileTaskEvent>,
 ) -> Result<ParallelFileTaskResult, FileOperationError> {
-    let _worker = crate::explorer::operation_control::enter_for_cancel(&cancel);
-    if crate::explorer::operation_control::cancelled(&cancel) {
+    if cancel.load(Ordering::Relaxed) {
         return Err(FileOperationError::Cancelled);
     }
 
@@ -4771,7 +4748,7 @@ fn write_zip_entries(
 ) -> Result<(), FileOperationError> {
     let mut buffer = vec![0; COPY_BUFFER_SIZE];
     for entry in entries {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             progress.phase = FileOperationPhase::Cancelled;
             progress.cancellable = false;
             on_progress(progress.clone());
@@ -4799,7 +4776,7 @@ fn write_zip_entries(
                     ))
                 })?;
                 loop {
-                    if crate::explorer::operation_control::cancelled(&cancel) {
+                    if cancel.load(Ordering::Relaxed) {
                         progress.phase = FileOperationPhase::Cancelled;
                         progress.cancellable = false;
                         on_progress(progress.clone());
@@ -4865,7 +4842,6 @@ pub(super) fn execute_file_operation_with_progress(
     terminate: Arc<AtomicBool>,
     mut on_progress: impl FnMut(FileOperationProgress),
 ) -> Result<FileOperationSummary, FileOperationError> {
-    let _worker = crate::explorer::operation_control::enter_for_cancel(&cancel);
     let mut changed_paths = Vec::new();
     for root in &job.roots {
         changed_paths.push(root.destination.clone());
@@ -4915,7 +4891,7 @@ pub(super) fn execute_file_operation_with_progress(
     on_progress(progress.clone());
 
     for step in &job.steps {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             progress.phase = FileOperationPhase::Cancelled;
             progress.cancellable = false;
             on_progress(progress);
@@ -5372,13 +5348,12 @@ fn extract_archive_with_entry_progress(
 
         let diagnostics = diagnostics.cloned();
         let handle = std::thread::spawn(move || {
-            let _worker = crate::explorer::operation_control::enter_for_cancel(&cancel_filter);
             let observer = diagnostics.map(|handle| {
                 Arc::new(DecompressDiagnosticsObserver::new(handle))
                     as Arc<dyn decompress::Observer>
             });
             let mut builder = decompress::ExtractOptsBuilder::default().filter(move |path| {
-                if crate::explorer::operation_control::cancelled(&cancel_filter) {
+                if cancel_filter.load(Ordering::Relaxed) {
                     return false;
                 }
 
@@ -5410,13 +5385,7 @@ fn extract_archive_with_entry_progress(
             Ok::<(), FileOperationError>(())
         });
 
-        loop {
-            crate::explorer::operation_control::cancelled(cancel);
-            let index = match rx.recv_timeout(Duration::from_millis(25)) {
-                Ok(index) => index,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            };
+        while let Ok(index) = rx.recv() {
             let entry = &plan.entries[index];
             progress.current_item = Some(entry.display_path.clone());
             progress.add_copied_bytes(entry.byte_weight);
@@ -5440,7 +5409,7 @@ fn extract_archive_with_entry_progress(
             .collect::<HashMap<_, _>>();
         let cancel_filter = cancel.clone();
         let mut builder = decompress::ExtractOptsBuilder::default().filter(move |path| {
-            if crate::explorer::operation_control::cancelled(&cancel_filter) {
+            if cancel_filter.load(Ordering::Relaxed) {
                 return false;
             }
             entry_details
@@ -5529,7 +5498,7 @@ fn extract_7z_archive_from_reader(
     let mut prepared_parents = HashSet::new();
     reader
         .for_each_entries(|entry, reader| {
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 return Ok(false);
             }
 
@@ -5604,7 +5573,7 @@ fn extract_7z_archive_from_reader(
             operation_error("extract", archive, io::Error::other(error.to_string()))
         })?;
 
-    if crate::explorer::operation_control::cancelled(&cancel) {
+    if cancel.load(Ordering::Relaxed) {
         return Err(FileOperationError::Cancelled);
     }
 
@@ -5661,7 +5630,7 @@ fn extract_ar_archive_from_reader(
     let mut prepared_parents = HashSet::new();
 
     while let Some(entry) = reader.next_entry() {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             return Err(FileOperationError::Cancelled);
         }
         let mut archive_entry =
@@ -5799,7 +5768,7 @@ fn extract_rar_archive_to_temp(
             break;
         };
 
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             return Err(FileOperationError::Cancelled);
         }
         if let Some(entry) = plan.entries.get(index) {
@@ -6353,7 +6322,7 @@ fn copy_source_file_to_temp(
     let mut buffer = vec![0; COPY_BUFFER_SIZE];
 
     loop {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "file operation cancelled",
@@ -6557,7 +6526,7 @@ fn copy_verified_temp_to_destination(
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
 ) -> std::io::Result<()> {
-    if crate::explorer::operation_control::cancelled(&cancel) {
+    if cancel.load(Ordering::Relaxed) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "file operation cancelled",

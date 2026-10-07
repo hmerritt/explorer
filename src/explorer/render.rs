@@ -3561,25 +3561,6 @@ impl ExplorerView {
                 )
             })
             .child(div().flex_1().min_w(px(12.0)))
-            .child(
-                div()
-                    .id("file-operations-status")
-                    .debug_selector(|| "file-operations-status".to_owned())
-                    .tab_index(0)
-                    .on_key_down(|event, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            super::operations::show(cx);
-                            cx.stop_propagation();
-                        }
-                    })
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .child(format!(
-                        "Operations ({})",
-                        super::operations::outstanding(cx)
-                    ))
-                    .on_click(|_, _, cx| super::operations::show(cx)),
-            )
             .when_some(codebase_summary, |this, codebase_summary| {
                 this.child(render_codebase_makeup_status(codebase_summary))
             })
@@ -8480,7 +8461,7 @@ mod tests {
                 (target, scroll_top)
             })
         });
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
 
         // Repeat from the replacement selection to cover consecutive deletions.
         for target in [target, target - 1] {
@@ -8502,7 +8483,7 @@ mod tests {
                     (deleted, previous)
                 })
             });
-            super::super::operations::settle_for_test(cx);
+            cx.run_until_parked();
             assert!(!deleted.exists());
             cx.read_entity(&view, |view, _| {
                 assert_eq!(view.selected_paths(), vec![previous]);
@@ -8544,7 +8525,7 @@ mod tests {
                 cx.notify();
             });
         });
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
         let previous = cx.update(|_, app| {
             view.update(app, |view, cx| {
                 let layout = view.large_icon_layout.as_ref().unwrap();
@@ -8561,7 +8542,7 @@ mod tests {
                 previous
             })
         });
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.selected_paths(), vec![previous]);
             let metrics = view.scrollbar_metrics().unwrap();
@@ -8574,7 +8555,7 @@ mod tests {
     fn large_icon_delete_only_item_clears_selection(cx: &mut gpui::TestAppContext) {
         let (_temp, view, cx) =
             test_view_entity_with_mode(cx, &["only.txt"], FileViewMode::LargeIcons);
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
         cx.update(|_, app| {
             view.update(app, |view, cx| {
                 view.select_single_index(0);
@@ -8586,7 +8567,7 @@ mod tests {
                 cx.notify();
             });
         });
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
         cx.read_entity(&view, |view, _| {
             assert!(view.entries.is_empty());
             assert!(view.selected_paths().is_empty());

@@ -1086,15 +1086,30 @@ impl ExplorerView {
             return;
         }
 
-        self.enqueue_operation(
-            super::operations::Request::Drop {
-                dragged: dragged.clone(),
-                destination: destination.clone(),
-                directory: self.path.clone(),
-                modifiers,
-            },
-            cx,
-        );
+        let dragged = dragged.clone();
+        let current_directory = self.path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    prepare_internal_file_drop(
+                        &dragged,
+                        &destination,
+                        &current_directory,
+                        modifiers,
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.pending_drop_task = None;
+                if let Some(result) = result {
+                    explorer.handle_prepared_file_command_result_and_open_dialog(result, cx);
+                }
+                cx.notify();
+            });
+        });
+        self.pending_drop_task = Some(task);
     }
 
     #[cfg(test)]
@@ -1221,33 +1236,24 @@ impl ExplorerView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let kind = match resolve_drop_operation_for_paths(
-            modifiers,
-            drop_destination_is_dir(destination),
-            paths,
-            destination,
-        ) {
-            ResolvedDrop::Move => super::filesystem::FileOperationKind::Move,
-            ResolvedDrop::Copy => super::filesystem::FileOperationKind::Copy,
-            ResolvedDrop::Link => super::filesystem::FileOperationKind::Link,
-            ResolvedDrop::Invalid => {
-                self.set_error_notice("This drop target is not valid.");
-                return;
-            }
-        };
-        self.enqueue_operation(
-            super::operations::Request::Files {
-                sources: paths.to_vec(),
-                destination: destination.to_owned(),
-                kind,
-                paste: false,
-            },
-            cx,
-        );
+        let valid_target = drop_destination_is_dir(destination);
+        let result =
+            match resolve_drop_operation_for_paths(modifiers, valid_target, paths, destination) {
+                ResolvedDrop::Move => prepare_move_paths_to_directory(paths, destination),
+                ResolvedDrop::Copy => {
+                    prepare_copy_paths_to_directory_with_copy_names(paths, destination)
+                }
+                ResolvedDrop::Link => prepare_create_links_to_directory(paths, destination),
+                ResolvedDrop::Invalid => {
+                    self.set_error_notice("This drop target is not valid.".to_owned());
+                    return;
+                }
+            };
+        self.handle_prepared_file_command_result_and_open_dialog(result, cx);
     }
 }
 
-pub(super) fn prepare_internal_file_drop(
+fn prepare_internal_file_drop(
     dragged: &DraggedEntries,
     destination: &DropDestination,
     current_directory: &Path,
@@ -2618,7 +2624,7 @@ mod tests {
         let dragged =
             DraggedEntries::test_from_parts(vec![source.clone()], source_dir, "file.txt", 0);
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
@@ -2631,11 +2637,12 @@ mod tests {
                     Modifiers::default(),
                     cx,
                 );
-                assert_eq!(super::super::operations::outstanding(cx), 1);
+                assert!(view.pending_drop_task.is_some());
+                assert!(source.exists());
             });
         });
 
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
 
         assert!(!source.exists());
         assert_eq!(fs::read(target.join("file.txt")).unwrap(), b"data");

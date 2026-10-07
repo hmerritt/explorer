@@ -108,7 +108,6 @@ pub struct ExplorerView {
     pub(super) all_entries: Vec<FileEntry>,
     pub(super) directory_load_generation: u64,
     pub(super) directory_load_task: Option<Task<()>>,
-    operation_refresh_pending: bool,
     pub(super) loading_path: Option<PathBuf>,
     pub(super) hide_live_entries_during_load: bool,
     pub(super) selection: SelectionState,
@@ -468,7 +467,6 @@ impl ExplorerView {
                 view.observe_icon_caches(cx);
                 view.observe_image_thumbnail_cache(cx);
                 view.observe_clipboard_summary(cx);
-                view.observe_operations(cx);
                 return view;
             }
         }
@@ -481,30 +479,7 @@ impl ExplorerView {
         view.observe_icon_caches(cx);
         view.observe_image_thumbnail_cache(cx);
         view.observe_clipboard_summary(cx);
-        view.observe_operations(cx);
         view
-    }
-
-    fn observe_operations(&mut self, cx: &mut Context<Self>) {
-        super::operations::manager(cx);
-        let mut revision = cx
-            .global::<super::operations::OperationsRevision>()
-            .filesystem;
-        cx.observe_global::<super::operations::OperationsRevision>(move |view, cx| {
-            let current = cx
-                .global::<super::operations::OperationsRevision>()
-                .filesystem;
-            if current != revision {
-                revision = current;
-                if view.directory_load_task.is_none() {
-                    view.refresh_with_entry_metadata_resolution(cx);
-                } else {
-                    view.operation_refresh_pending = true;
-                }
-            }
-            cx.notify();
-        })
-        .detach();
     }
 
     pub(super) fn observe_clipboard_summary(&mut self, cx: &mut Context<Self>) {
@@ -603,7 +578,6 @@ impl ExplorerView {
             all_entries: Vec::new(),
             directory_load_generation: 0,
             directory_load_task: None,
-            operation_refresh_pending: false,
             loading_path: None,
             hide_live_entries_during_load: false,
             selection: SelectionState::default(),
@@ -1583,12 +1557,6 @@ impl ExplorerView {
             }
         }
 
-        // A job can complete while navigation is loading an older directory
-        // snapshot. Apply its selection first, then refresh the current location.
-        if std::mem::take(&mut self.operation_refresh_pending) {
-            self.refresh_with_entry_metadata_resolution(cx);
-            changed = true;
-        }
         changed || self.content_branch() != previous_content_branch
     }
 
@@ -4466,63 +4434,6 @@ mod tests {
             assert_eq!(view.entries[0].name, "file.txt");
             assert!(view.loading_path.is_none());
             assert!(view.directory_load_task.is_none());
-        });
-    }
-
-    #[gpui::test]
-    fn operation_change_during_navigation_refreshes_after_applying_selection(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let temp = crate::explorer::test_support::TempDir::new();
-        let selected = temp.path().join("original.txt");
-        std::fs::write(&selected, b"original").unwrap();
-        let path = temp.path().to_path_buf();
-        let (view, cx) = cx.add_window_view(move |window, cx| {
-            let focus = cx.focus_handle();
-            focus.focus(window);
-            ExplorerView::new_with_focus_handle_for_test(path, focus)
-        });
-        cx.update(|_, app| {
-            view.update(app, |view, cx| {
-                let stale_entries = view.entries.clone();
-                std::fs::write(view.path.join("new.txt"), b"new").unwrap();
-                let state = DirectoryLoadState {
-                    path: view.path.clone(),
-                    generation: view.directory_load_generation,
-                    selected_paths: Vec::new(),
-                    select_after_load: vec![selected.clone()],
-                    rename_after_load: None,
-                    mode: ReloadMode {
-                        cache_policy:
-                            crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
-                        preserve_selection: true,
-                        rebuild_sidebar: false,
-                        preserve_context_menu: false,
-                    },
-                    schedule_metadata: false,
-                    refresh_search: false,
-                    restart_watcher: false,
-                    preserve_live_selection: true,
-                };
-                view.operation_refresh_pending = true;
-                view.apply_directory_load_result(
-                    state,
-                    DirectoryLoadResult {
-                        entries: Ok(stale_entries),
-                        sidebar_sections: None,
-                    },
-                    None,
-                    cx,
-                );
-                assert!(!view.operation_refresh_pending);
-                assert!(view.directory_load_task.is_some());
-                assert_eq!(view.selected_paths(), [selected.clone()]);
-            })
-        });
-        cx.run_until_parked();
-        cx.read_entity(&view, |view, _| {
-            assert!(view.entries.iter().any(|entry| entry.name == "new.txt"));
-            assert_eq!(view.selected_paths(), [selected.clone()]);
         });
     }
 

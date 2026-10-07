@@ -469,14 +469,11 @@ impl ExplorerView {
                 let completed_server_ids = view
                     .remote_transfer_snapshots
                     .iter()
-                    .filter(|job| {
-                        job.auto_dismiss && !super::operations::manages_server(job.id, cx)
-                    })
+                    .filter(|job| job.auto_dismiss)
                     .map(|job| job.id)
                     .collect::<Vec<_>>();
-                view.remote_transfer_snapshots.retain(|job| {
-                    !job.auto_dismiss || super::operations::manages_server(job.id, cx)
-                });
+                view.remote_transfer_snapshots
+                    .retain(|job| !job.auto_dismiss);
                 super::remote_transfer::forget_clean_completions(&completed_server_ids);
                 cx.notify();
             });
@@ -490,11 +487,11 @@ impl ExplorerView {
         move_sources: bool,
         cx: &mut Context<Self>,
     ) {
-        super::operations::manager(cx);
         let sftp = cx.global::<SettingsState>().value.sftp;
         match super::remote_transfer::enqueue(paths, destination, move_sources, sftp) {
-            Ok(id) => {
-                self.enqueue_operation(super::operations::Request::Server(id), cx);
+            Ok(_) => {
+                self.cancel_transfer_completion_cleanup();
+                self.request_transfer_panel_expansion(cx);
                 self.clear_operation_notice();
             }
             Err(error) => self.set_error_notice(error),
@@ -623,7 +620,6 @@ impl ExplorerView {
                 self.remote_transfer_snapshots
                     .clone()
                     .into_iter()
-                    .filter(|job| !super::operations::manages_server(job.id, cx))
                     .map(TransferPanelJob::from_server),
             );
         }
@@ -647,11 +643,7 @@ impl ExplorerView {
             .try_global::<SettingsState>()
             .map(|settings| settings.value.sftp)
             .unwrap_or_default();
-        if super::operations::manages_server(id, cx) {
-            super::operations::control_server(id, action, cx);
-        } else {
-            remote_transfer::control(id, action, sftp);
-        }
+        remote_transfer::control(id, action, sftp);
         if action == "dismiss" {
             self.remote_transfer_snapshots.retain(|job| job.id != id);
         }

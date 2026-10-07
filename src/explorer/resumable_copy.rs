@@ -397,10 +397,6 @@ pub(super) fn copy_with_delta_progress_with_options(
     )
 }
 
-pub(super) fn has_saved_progress(destination: &Path) -> bool {
-    partial_path_for(destination).exists()
-}
-
 pub(super) fn cleanup_resumable_copy_progress(_source: &Path, destination: &Path) {
     remove_partial_file(&partial_path_for(destination));
 }
@@ -653,7 +649,7 @@ fn validate_partial_prefix(
     let mut valid_prefix = 0u64;
 
     while valid_prefix < compare_len {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
 
@@ -717,7 +713,7 @@ fn append_source_remainder_to_partial(
     let mut offset = start_offset;
     let mut buffer = vec![0; RSYNC_IO_BUFFER_SIZE];
     while offset < source_len {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             if options.should_sync() {
                 let _ = output.sync_all();
             }
@@ -817,13 +813,10 @@ fn build_basis_signatures(
     let len = file.metadata()?.len();
     let block_size_u64 = block_size as u64;
     let block_count = len.div_ceil(block_size_u64);
-    // The caller waits for Rayon; its workers own pause acknowledgment here.
-    let handoff = crate::explorer::operation_control::suspend_current();
     let signatures = (0..block_count)
         .into_par_iter()
         .map(|block_index| {
-            let _participant = crate::explorer::operation_control::enter_for_cancel(cancel);
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
 
@@ -841,9 +834,8 @@ fn build_basis_signatures(
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
-    drop(handoff);
 
-    if crate::explorer::operation_control::cancelled(&cancel) {
+    if cancel.load(Ordering::Relaxed) {
         return Err(cancelled_error());
     }
 
@@ -874,7 +866,7 @@ fn scan_source_to_output(
         let mut weak = RollingChecksum::new(&window.to_vec());
 
         while window.len() == block_size {
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 flush_literal(output, &mut pending_literal, progress, on_progress, stats)?;
                 return Err(cancelled_error());
             }
@@ -938,7 +930,7 @@ fn copy_source_literals_buffered(
     let mut buffer = vec![0; RSYNC_IO_BUFFER_SIZE];
 
     loop {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
 
@@ -1146,7 +1138,7 @@ fn verify_repair_pass_sequential(
     let mut offset = 0u64;
 
     while offset < source_len {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
 
@@ -1191,7 +1183,6 @@ fn verify_repair_pass_parallel(
 
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _coordinator = crate::explorer::operation_control::enter_for_cancel(cancel);
             let result = verify_repair_pass_impl(
                 source,
                 scratch,
@@ -1204,8 +1195,6 @@ fn verify_repair_pass_parallel(
         });
 
         loop {
-            // Participate while polling; scoped workers retain ownership until they finish.
-            let _ = crate::explorer::operation_control::cancelled(cancel);
             match result_rx.recv_timeout(PARALLEL_COPY_PROGRESS_POLL_INTERVAL) {
                 Ok(result) => {
                     drain_parallel_copy_progress(&progress_rx, &mut on_chunk_verified);
@@ -1243,12 +1232,10 @@ fn verify_repair_pass_impl(
     let batch_count = source_len.div_ceil(batch_size_u64);
     let repaired = Mutex::new(Vec::new());
 
-    let handoff = crate::explorer::operation_control::suspend_current();
     (0..batch_count).into_par_iter().try_for_each_init(
         || (vec![0; batch_size], vec![0; batch_size]),
         |(source_block, scratch_block), batch_index| {
-            let _participant = crate::explorer::operation_control::enter_for_cancel(cancel);
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
 
@@ -1284,10 +1271,6 @@ fn verify_repair_pass_impl(
         },
     )?;
 
-    drop(handoff);
-    if crate::explorer::operation_control::cancelled(cancel) {
-        return Err(cancelled_error());
-    }
     scratch_file.set_len(source_len)?;
     repaired
         .into_inner()
@@ -1309,12 +1292,10 @@ fn verify_offsets(
     let scratch = Arc::new(File::open(scratch)?);
     let verified = std::sync::atomic::AtomicBool::new(true);
 
-    let _handoff = crate::explorer::operation_control::suspend_current();
     offsets.par_iter().try_for_each_init(
         || (Vec::new(), Vec::new()),
         |(source_block, scratch_block), (offset, len)| {
-            let _participant = crate::explorer::operation_control::enter_for_cancel(cancel);
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
 
@@ -1345,15 +1326,12 @@ pub(super) fn copy_file_contents_parallel_with_progress(
 
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _coordinator = crate::explorer::operation_control::enter_for_cancel(cancel);
             let result =
                 copy_file_contents_parallel_impl(source, output, source_len, cancel, progress_tx);
             let _ = result_tx.send(result);
         });
 
         loop {
-            // Participate while polling; scoped workers retain ownership until they finish.
-            let _ = crate::explorer::operation_control::cancelled(cancel);
             match result_rx.recv_timeout(PARALLEL_COPY_PROGRESS_POLL_INTERVAL) {
                 Ok(result) => {
                     drain_parallel_copy_progress(&progress_rx, &mut on_chunk_copied);
@@ -1387,12 +1365,10 @@ fn copy_file_contents_parallel_impl(
     let chunk_size = PARALLEL_COPY_CHUNK_SIZE as u64;
     let chunk_count = source_len.div_ceil(chunk_size);
 
-    let _handoff = crate::explorer::operation_control::suspend_current();
     (0..chunk_count).into_par_iter().try_for_each_with(
         progress_tx,
         |progress_tx, chunk_index| {
-            let _participant = crate::explorer::operation_control::enter_for_cancel(cancel);
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
 
@@ -1484,7 +1460,7 @@ fn files_equal_sequential(
     let mut offset = 0u64;
 
     while offset < len {
-        if crate::explorer::operation_control::cancelled(&cancel) {
+        if cancel.load(Ordering::Relaxed) {
             return Err(cancelled_error());
         }
 
@@ -1514,7 +1490,6 @@ fn files_equal_parallel_with_progress(
 
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let _coordinator = crate::explorer::operation_control::enter_for_cancel(cancel);
             let result = files_equal_parallel_impl(
                 source,
                 destination,
@@ -1527,8 +1502,6 @@ fn files_equal_parallel_with_progress(
         });
 
         loop {
-            // Participate while polling; scoped workers retain ownership until they finish.
-            let _ = crate::explorer::operation_control::cancelled(cancel);
             match result_rx.recv_timeout(PARALLEL_COPY_PROGRESS_POLL_INTERVAL) {
                 Ok(result) => {
                     drain_parallel_copy_progress(&progress_rx, &mut on_block_verified);
@@ -1567,12 +1540,10 @@ fn files_equal_parallel_impl(
     let batch_count = len.div_ceil(batch_size_u64);
     let equal = std::sync::atomic::AtomicBool::new(true);
 
-    let handoff = crate::explorer::operation_control::suspend_current();
     (0..batch_count).into_par_iter().try_for_each_init(
         || (vec![0; batch_size], vec![0; batch_size]),
         |(source_block, destination_block), batch_index| {
-            let _participant = crate::explorer::operation_control::enter_for_cancel(cancel);
-            if crate::explorer::operation_control::cancelled(&cancel) {
+            if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled_error());
             }
             if !equal.load(Ordering::Relaxed) {
@@ -1592,7 +1563,6 @@ fn files_equal_parallel_impl(
         },
     )?;
 
-    drop(handoff);
     Ok(equal.load(Ordering::Relaxed))
 }
 

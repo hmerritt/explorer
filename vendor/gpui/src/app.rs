@@ -592,6 +592,7 @@ pub struct App {
     #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub(crate) name: Option<&'static str>,
     quitting: bool,
+    #[cfg(target_os = "windows")]
     quit_on_last_window_closed: bool,
 }
 
@@ -666,6 +667,7 @@ impl App {
                 #[cfg(any(feature = "inspector", debug_assertions))]
                 inspector_element_registry: InspectorElementRegistry::default(),
                 quitting: false,
+                #[cfg(target_os = "windows")]
                 quit_on_last_window_closed: true,
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
@@ -757,14 +759,19 @@ impl App {
         self.platform.quit();
     }
 
-    /// Controls whether the platform exits automatically when its final native window closes.
+    /// Controls whether Windows exits automatically when its final native window closes.
     /// Explicit calls to [`App::quit`] are unaffected. The default is `true`.
+    #[cfg(target_os = "windows")]
     pub fn set_quit_on_last_window_closed(&mut self, quit: bool) {
         self.quit_on_last_window_closed = quit;
         self.platform.set_quit_on_last_window_closed(quit);
     }
 
-    /// Returns the last-window lifecycle policy for tests and diagnostics.
+    /// Returns the Windows last-window lifecycle policy for tests and diagnostics.
+    #[cfg(all(
+        target_os = "windows",
+        any(test, feature = "test-support", debug_assertions)
+    ))]
     pub fn quit_on_last_window_closed(&self) -> bool {
         self.quit_on_last_window_closed
     }

@@ -1381,9 +1381,6 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
             }
         }
 
-        // Capture the final tray lifecycle policy before importing recovered jobs.
-        crate::explorer::initialize_operations(cx);
-
         if let Some(primary) = single_instance_primary {
             install_single_instance_server(primary, cx);
         }

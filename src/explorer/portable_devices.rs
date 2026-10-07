@@ -790,30 +790,15 @@ pub(super) fn transfer_paths(
             return Err("The portable-device destination is not a folder.".to_owned());
         }
         let mut completed = Vec::new();
-        for (index, source) in sources.iter().enumerate() {
-            if crate::explorer::operation_control::current_checkpoint() {
-                return Err("Portable transfer cancelled.".into());
-            }
-            crate::explorer::operation_control::report_items(
-                index,
-                sources.len(),
-                &source.display().to_string(),
-            );
-            let copied = transfer_item(source, destination, move_sources)?;
+        for source in sources {
+            let copied = copy_item(source, destination, move_sources)?;
             completed.push(copied);
         }
         Ok(completed)
     })())
 }
 
-pub(super) fn transfer_item(
-    source: &Path,
-    destination: &Path,
-    move_source: bool,
-) -> Result<PathBuf, String> {
-    if crate::explorer::operation_control::current_checkpoint() {
-        return Err("Portable transfer cancelled.".into());
-    }
+fn copy_item(source: &Path, destination: &Path, move_source: bool) -> Result<PathBuf, String> {
     let name = item_name(source)?;
     if destination_child(destination, &name)?.is_some() {
         return Err(format!(
@@ -841,9 +826,8 @@ pub(super) fn transfer_item(
                 .filter_map(|entry| FileEntry::from_path(entry.path()))
                 .collect()
         };
-        let _boundaries = crate::explorer::operation_control::boundaries_available();
         for child in children {
-            transfer_item(&child.path, &folder, false)?;
+            copy_item(&child.path, &folder, false)?;
         }
         folder
     } else if is_portable_path(destination) {
@@ -868,9 +852,6 @@ pub(super) fn transfer_item(
     };
 
     if move_source {
-        if crate::explorer::operation_control::current_checkpoint() {
-            return Err("Portable transfer cancelled; source retained.".into());
-        }
         delete_transfer_source(source)?;
     }
     Ok(copied)
@@ -1301,66 +1282,6 @@ mod tests {
         unregister_virtual_device(info.location_id);
         portable_device_roots();
         assert!(!exists(&root));
-        reset_service();
-    }
-
-    #[test]
-    fn virtual_transfer_pauses_at_item_boundaries_and_cancel_preserves_remaining_sources() {
-        use crate::explorer::operation_control::OperationControl;
-        let _guard = virtual_test_lock();
-        reset_service();
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let config = virtual_config(
-            "explorer-operation-pause",
-            first.path(),
-            second.path(),
-            false,
-        );
-        let info = register_virtual_device(&config);
-        portable_device_roots();
-        let root = device_root(stable_device_id(&info));
-        let storage = list_dir(&root).unwrap()[0].path.clone();
-        let sources: Vec<_> = (0..3)
-            .map(|index| {
-                let path = second.path().join(format!("local-{index}.txt"));
-                std::fs::write(&path, b"data").unwrap();
-                path
-            })
-            .collect();
-        let control = OperationControl::new();
-        let worker_control = control.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let pause_control = control.clone();
-        control.set_items_report(std::sync::Arc::new(move |done, _, _| {
-            if done == 1 {
-                pause_control.pause();
-                tx.send(()).unwrap();
-            }
-        }));
-        std::thread::scope(|scope| {
-            let worker = scope.spawn(|| {
-                let _participant = worker_control.enter();
-                transfer_paths(&sources, &storage, true).unwrap()
-            });
-            rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while !control.paused() {
-                if std::time::Instant::now() > deadline {
-                    control.cancel();
-                    panic!("device worker did not pause");
-                }
-                std::thread::yield_now();
-            }
-            assert!(!sources[0].exists());
-            assert!(sources[1].exists());
-            control.cancel();
-            assert!(worker.join().unwrap().is_err());
-        });
-        assert!(sources[1].exists());
-        assert!(sources[2].exists());
-        unregister_virtual_device(info.location_id);
-        portable_device_roots();
         reset_service();
     }
 

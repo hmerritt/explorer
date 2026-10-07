@@ -28,8 +28,10 @@ use crate::explorer::{
         PreparedFileOperation, RemoteDeleteError, RemoteDeletePhase, RemoteDeleteProgress,
         RemoteDeleteSummary, archive_path_is_supported, cleanup_copy_undo_backups,
         execute_file_operation, execute_file_operation_with_progress,
-        mountable_image_path_is_supported, prepare_move_paths_to_directory,
-        remove_existing_paths_permanently, remove_remote_paths_permanently_with_progress,
+        mountable_image_path_is_supported, prepare_compress_paths,
+        prepare_copy_paths_to_directory_for_paste, prepare_extract_archives_to_directory,
+        prepare_move_paths_to_directory, remove_existing_paths_permanently,
+        remove_paths_permanently, remove_remote_paths_permanently_with_progress,
         restore_replaced_file_from_copy_undo,
     },
     view::{
@@ -40,7 +42,7 @@ use crate::explorer::{
 #[cfg(test)]
 use crate::explorer::filesystem::{
     FileConflictBatch, FileOperationOutcome, copy_paths_to_directory, create_links_to_directory,
-    move_paths_to_directory, prepare_compress_paths, resolve_file_conflicts,
+    move_paths_to_directory, resolve_file_conflicts,
 };
 
 const FILE_OPERATION_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -353,19 +355,18 @@ impl ExplorerView {
             );
             return;
         }
-        self.enqueue_operation(
-            super::operations::Request::Files {
-                sources: clipboard.paths,
-                destination: self.path.clone(),
-                kind: if clipboard.operation == FileClipboardOperation::Cut {
-                    FileOperationKind::Move
-                } else {
-                    FileOperationKind::Copy
-                },
-                paste: true,
-            },
-            cx,
-        );
+        match clipboard.operation {
+            FileClipboardOperation::Copy => {
+                self.handle_prepared_file_command_result_and_open_dialog(
+                    prepare_copy_paths_to_directory_for_paste(&clipboard.paths, &self.path),
+                    cx,
+                );
+            }
+            FileClipboardOperation::Cut => {
+                let result = prepare_move_paths_to_directory(&clipboard.paths, &self.path);
+                self.handle_prepared_file_command_result_and_open_dialog(result, cx);
+            }
+        }
     }
 
     pub(super) fn start_portable_transfer(
@@ -375,14 +376,43 @@ impl ExplorerView {
         move_sources: bool,
         cx: &mut Context<Self>,
     ) {
-        self.enqueue_operation(
-            super::operations::Request::Portable {
-                sources,
-                destination,
-                moving: move_sources,
-            },
-            cx,
-        );
+        if self.pending_drop_task.is_some() || self.has_active_mutating_operation() {
+            self.set_error_notice("Another file operation is already running.".to_owned());
+            return;
+        }
+        let sources_for_cleanup = sources.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::explorer::portable_devices::transfer_paths(
+                        &sources,
+                        &destination,
+                        move_sources,
+                    )
+                    .unwrap_or_else(|| Err("Portable transfer was not required.".to_owned()))
+                })
+                .await;
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.pending_drop_task = None;
+                match result {
+                    Ok(_paths) => {
+                        explorer.clear_operation_notice();
+                        if move_sources {
+                            explorer.remove_cut_paths(&sources_for_cleanup);
+                        }
+                        explorer.reload_with_entry_metadata_resolution(cx);
+                        explorer.emit_filesystem_changed(cx);
+                    }
+                    Err(error) => {
+                        explorer.set_error_notice(error);
+                        explorer.reload_with_entry_metadata_resolution(cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.pending_drop_task = Some(task);
     }
 
     fn paste_clipboard_image(
@@ -474,11 +504,8 @@ impl ExplorerView {
             return;
         };
 
-        self.enqueue_operation(
-            super::operations::Request::Extract {
-                sources: paths,
-                destination: self.path.clone(),
-            },
+        self.handle_prepared_file_command_result_and_open_dialog(
+            prepare_extract_archives_to_directory(&paths, &self.path),
             cx,
         );
     }
@@ -487,7 +514,10 @@ impl ExplorerView {
         if paths.is_empty() {
             return;
         }
-        self.enqueue_operation(super::operations::Request::Compress(paths), cx);
+        self.handle_prepared_file_command_result_and_open_dialog(
+            prepare_compress_paths(&paths),
+            cx,
+        );
     }
 
     pub(super) fn trash_selected_paths(&mut self, cx: &mut Context<Self>) {
@@ -569,9 +599,40 @@ impl ExplorerView {
     }
 
     fn start_trash_operation(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        if !paths.is_empty() {
-            self.enqueue_operation(super::operations::Request::Trash(paths), cx);
+        debug_assert!(!paths.is_empty());
+        debug_assert!(self.pending_trash_task.is_none());
+
+        let selection_after_delete = self.selection_after_removing_paths(&paths);
+        let operation_path = self.path.clone();
+        self.pending_deleted_paths = paths.clone();
+        self.filter_pending_deleted_entries();
+        if let Some(path) = selection_after_delete.as_ref() {
+            self.restore_selection_from_paths(std::slice::from_ref(path));
+            self.reveal_selection_after_delete();
+        } else {
+            self.clear_selection();
         }
+        self.clear_operation_notice();
+        cx.notify();
+
+        let paths_for_operation = paths.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result: Result<Option<FileOperationUndo>, String> = cx
+                .background_executor()
+                .spawn(async move { run_trash_operation(paths_for_operation) })
+                .await;
+
+            let _ = this.update(cx, move |explorer, cx| {
+                explorer.complete_trash_operation(
+                    operation_path,
+                    paths,
+                    selection_after_delete,
+                    result,
+                    cx,
+                );
+            });
+        });
+        self.pending_trash_task = Some(task);
     }
 
     fn complete_trash_operation(
@@ -647,7 +708,28 @@ impl ExplorerView {
             return;
         };
 
-        self.enqueue_operation(super::operations::Request::Delete(pending.paths), cx);
+        if pending
+            .paths
+            .iter()
+            .all(|path| super::remote_fs::is_remote(path))
+        {
+            self.start_remote_delete_operation(pending.paths, cx);
+            return;
+        }
+
+        let selection_after_delete = self.selection_after_removing_paths(&pending.paths);
+        match remove_paths_permanently(&pending.paths) {
+            Ok(()) => {
+                self.remove_cut_paths(&pending.paths);
+                self.reload_after_successful_delete(selection_after_delete, cx);
+                self.clear_operation_notice();
+                self.emit_filesystem_changed(cx);
+            }
+            Err(error) => {
+                self.set_error_notice(error);
+                self.reload_with_entry_metadata_resolution(cx);
+            }
+        }
     }
 
     pub(super) fn cancel_pending_permanent_delete(&mut self) {
@@ -1174,131 +1256,8 @@ impl ExplorerView {
         self.file_operation_undo_stack.push(undo);
     }
 
-    pub(super) fn enqueue_operation(
-        &mut self,
-        request: super::operations::Request,
-        cx: &mut Context<Self>,
-    ) {
-        let sources = request.locations().0;
-        let after = if matches!(
-            request,
-            super::operations::Request::Delete(_) | super::operations::Request::Trash(_)
-        ) {
-            self.selection_after_removing_paths(&sources)
-        } else {
-            None
-        };
-        super::operations::submit(
-            request,
-            cx.entity(),
-            self.path.clone(),
-            self.copy_verify,
-            &self.entries,
-            self.selected_paths(),
-            after,
-            cx,
-        );
-    }
-
-    pub(super) fn complete_queued_operation(
-        &mut self,
-        outcome: super::operations::Outcome,
-        operation_path: &Path,
-        sources: &[PathBuf],
-        selection_before: &[PathBuf],
-        after_delete: Option<PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        use super::operations::Outcome;
-        let mut selection = Vec::new();
-        let mut completed_deletions = Vec::new();
-        let deleting = matches!(outcome, Outcome::Trash(_) | Outcome::Deleted { .. });
-        let preserve_delete_selection = self.path == operation_path
-            && (self.selected_paths() == selection_before
-                || self
-                    .selected_paths()
-                    .iter()
-                    .all(|path| sources.contains(path)));
-        match outcome {
-            Outcome::Files(summary) => {
-                self.record_file_operation_undo(&summary);
-                self.remove_cut_paths(&summary.moved_source_paths);
-                selection = if summary.kind == FileOperationKind::Extract {
-                    self.selected_paths()
-                } else {
-                    summary.destination_paths
-                };
-            }
-            Outcome::Trash(undo) => {
-                if let Some(FileOperationUndo::Trash(TrashUndo::Native {
-                    original_paths, ..
-                })) = &undo
-                {
-                    self.remove_cut_paths(original_paths);
-                    completed_deletions = original_paths.clone();
-                }
-                self.push_file_operation_undo(undo);
-            }
-            Outcome::Deleted { paths, .. } => {
-                self.remove_cut_paths(&paths);
-                completed_deletions = paths;
-            }
-            Outcome::Portable {
-                destinations,
-                moved,
-                ..
-            } => {
-                self.remove_cut_paths(&moved);
-                selection = destinations;
-            }
-            Outcome::Bin(result) => {
-                if !result.undo.paths.is_empty() {
-                    self.push_file_operation_undo(Some(FileOperationUndo::Recovery(result.undo)));
-                }
-                self.reconcile_bin_clipboard(cx);
-                self.reconcile_bin_undo();
-            }
-            Outcome::Cancelled | Outcome::Cleaned => {}
-        }
-        if deleting && preserve_delete_selection {
-            let remaining_selection: Vec<_> = selection_before
-                .iter()
-                .filter(|path| !completed_deletions.contains(path))
-                .cloned()
-                .collect();
-            if remaining_selection.is_empty() {
-                self.reload_after_successful_delete(after_delete, cx);
-            } else {
-                self.reload_after_failed_delete(remaining_selection, cx);
-            }
-            self.emit_filesystem_changed(cx);
-            cx.notify();
-            return;
-        }
-        selection.retain(|path| path.parent() == Some(self.path.as_path()));
-        if self.path == operation_path && !selection.is_empty() {
-            self.reload_async_with_options_preserving_live_selection(
-                super::view::ReloadMode {
-                    cache_policy: super::remote_directory_cache::DirectoryLoadPolicy::Fresh,
-                    preserve_selection: true,
-                    rebuild_sidebar: true,
-                    preserve_context_menu: false,
-                },
-                selection,
-                true,
-                false,
-                false,
-                cx,
-            );
-        } else {
-            self.refresh_with_entry_metadata_resolution(cx);
-        }
-        self.emit_filesystem_changed(cx);
-        cx.notify();
-    }
-
     pub(super) fn undo_file_operation(&mut self, cx: &mut Context<Self>) {
-        if self.has_background_operation() || super::operations::outstanding(cx) > 0 {
+        if self.has_background_operation() {
             return;
         }
         if let Some(FileOperationUndo::Trash(TrashUndo::Native {
@@ -1553,9 +1512,7 @@ fn preflight_move_undo(paths: &[FileOperationMove]) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn run_trash_operation(
-    paths: Vec<PathBuf>,
-) -> Result<Option<FileOperationUndo>, String> {
+fn run_trash_operation(paths: Vec<PathBuf>) -> Result<Option<FileOperationUndo>, String> {
     let outcome = super::trash::trash_paths_batch(&paths)?;
     if outcome.paths.is_empty() && !outcome.failures.is_empty() {
         return Err(outcome.failures.join("\n"));
@@ -2290,54 +2247,36 @@ mod tests {
     }
 
     #[gpui::test]
-    fn file_clipboard_paste_conflicts_hold_the_shared_queue_for_copy_and_cut(
-        cx: &mut TestAppContext,
-    ) {
+    fn file_clipboard_paste_conflicts_open_dialog_for_copy_and_cut(cx: &mut TestAppContext) {
         let temp = TempDir::new();
         let source_dir = temp.path().join("source");
         let destination = temp.path().join("destination");
-        fs::create_dir(&source_dir).unwrap();
-        fs::create_dir(&destination).unwrap();
+        fs::create_dir(&source_dir).expect("create source");
+        fs::create_dir(&destination).expect("create destination");
         let source = source_dir.join("file.txt");
-        fs::write(&source, b"source").unwrap();
-        fs::write(destination.join("file.txt"), b"destination").unwrap();
-        let (view, cx) = test_view_entity_at_path(cx, destination.clone());
+        fs::write(&source, b"source").expect("create source file");
+        fs::write(destination.join("file.txt"), b"destination").expect("create destination file");
+        let (view, cx) = test_view_entity_at_path(cx, destination);
+
         cx.update(|_, app| {
             view.update(app, |view, cx| {
-                for operation in [FileClipboardOperation::Copy, FileClipboardOperation::Cut] {
-                    view.paste_file_clipboard(
-                        FileClipboard::new(operation, vec![source.clone()]),
-                        cx,
-                    );
-                }
-                assert!(view.pending_file_conflict.is_none());
-            })
+                view.paste_file_clipboard(
+                    FileClipboard::new(FileClipboardOperation::Copy, vec![source.clone()]),
+                    cx,
+                );
+                assert!(view.pending_file_conflict.is_some());
+                assert!(view.operation_notice.is_none());
+
+                view.pending_file_conflict = None;
+                view.clear_active_dialog_window();
+                view.paste_file_clipboard(
+                    FileClipboard::new(FileClipboardOperation::Cut, vec![source.clone()]),
+                    cx,
+                );
+                assert!(view.pending_file_conflict.is_some());
+                assert!(view.operation_notice.is_none());
+            });
         });
-        super::super::operations::settle_for_test(cx);
-        cx.update(|_, app| {
-            assert_eq!(
-                super::super::operations::states_for_test(app),
-                vec![
-                    super::super::operations::State::Attention,
-                    super::super::operations::State::Queued
-                ]
-            );
-            super::super::operations::control_for_test(1, "cancel", app);
-        });
-        super::super::operations::settle_for_test(cx);
-        cx.update(|_, app| {
-            assert_eq!(
-                super::super::operations::states_for_test(app)[1],
-                super::super::operations::State::Attention
-            );
-            super::super::operations::control_for_test(2, "cancel", app);
-        });
-        super::super::operations::settle_for_test(cx);
-        assert!(source.exists());
-        assert_eq!(
-            fs::read(destination.join("file.txt")).unwrap(),
-            b"destination"
-        );
     }
 
     #[gpui::test]
@@ -2369,68 +2308,77 @@ mod tests {
                 view.confirm_pending_permanent_delete(cx);
                 assert!(view.pending_permanent_delete.is_none());
                 assert!(view.operation_notice.is_none());
-                assert!(view.entry_is_cut(&file));
+                assert!(!view.entry_is_cut(&file));
             });
         });
 
-        super::super::operations::settle_for_test(cx);
         assert!(!file.exists());
-        cx.read_entity(&view, |view, _| assert!(!view.entry_is_cut(&file)));
     }
 
     #[gpui::test]
-    fn multiple_trash_requests_are_queued(cx: &mut TestAppContext) {
+    fn duplicate_trash_request_is_ignored_while_delete_is_pending(cx: &mut TestAppContext) {
         let temp = TempDir::new();
         let first = temp.path().join("first.txt");
         let second = temp.path().join("second.txt");
         fs::write(&first, b"first").expect("create first file");
         fs::write(&second, b"second").expect("create second file");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
                 view.restore_selection_from_paths(std::slice::from_ref(&first));
                 view.trash_selected_paths(cx);
-                assert!(super::super::operations::outstanding(cx) > 0);
+                assert!(view.pending_trash_task.is_some());
 
                 view.restore_selection_from_paths(std::slice::from_ref(&second));
                 view.trash_selected_paths(cx);
-                assert!(super::super::operations::outstanding(cx) > 0);
+                assert!(view.pending_trash_task.is_some());
             });
         });
 
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
 
         assert!(!first.exists());
-        assert!(!second.exists());
+        assert!(second.exists());
         cx.read_entity(&view, |view, _| {
             assert!(view.pending_trash_task.is_none());
-            assert_eq!(view.file_operation_undo_stack.len(), 2);
+            assert_eq!(view.file_operation_undo_stack.len(), 1);
         });
     }
 
     #[gpui::test]
-    fn failed_trash_operation_survives_tab_close_and_holds_the_queue(cx: &mut TestAppContext) {
+    fn failed_trash_operation_survives_tab_close_and_clears_pending_state(cx: &mut TestAppContext) {
         let temp = TempDir::new();
+        let missing = temp.path().join("missing.txt");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+
         cx.update(|_, app| {
             view.update(app, |view, cx| {
-                view.start_trash_operation(vec![temp.path().join("missing.txt")], cx);
+                view.start_trash_operation(vec![missing.clone()], cx);
+                assert!(view.pending_trash_task.is_some());
+                assert_eq!(view.pending_deleted_paths, vec![missing.clone()]);
+                assert!(view.has_background_operation());
+
                 view.prepare_for_tab_close(cx);
-            })
+                assert!(view.pending_trash_task.is_some());
+                assert_eq!(view.pending_deleted_paths, vec![missing.clone()]);
+                assert!(view.has_background_operation());
+            });
         });
-        super::super::operations::settle_for_test(cx);
-        cx.update(|_, app| {
-            assert_eq!(
-                super::super::operations::states_for_test(app),
-                vec![super::super::operations::State::Attention]
-            );
-            assert_eq!(super::super::operations::outstanding(app), 1);
-            super::super::operations::control_for_test(1, "cancel", app);
-        });
+
+        cx.run_until_parked();
+
         cx.read_entity(&view, |view, _| {
-            assert!(view.file_operation_undo_stack.is_empty())
+            assert!(view.pending_trash_task.is_none());
+            assert!(view.pending_deleted_paths.is_empty());
+            assert!(!view.has_background_operation());
+            assert!(view.file_operation_undo_stack.is_empty());
+            assert!(
+                view.operation_notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.text.contains(super::super::trash::label()))
+            );
         });
     }
 
@@ -3080,7 +3028,7 @@ mod tests {
         let deleted = temp.path().join("item-040.txt");
         let previous = temp.path().join("item-039.txt");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
@@ -3091,7 +3039,7 @@ mod tests {
                 view.confirm_pending_permanent_delete(cx);
             });
         });
-        super::super::operations::settle_for_test(cx);
+        cx.run_until_parked();
 
         assert!(!deleted.exists());
         cx.read_entity(&view, |view, _| {
