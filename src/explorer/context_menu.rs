@@ -24,6 +24,58 @@ use crate::settings::{
     SidebarHiddenItem, resolve_context_menu_only_filter,
 };
 
+fn bin_context_menu_items(selected: bool) -> Vec<ContextMenuItem> {
+    let action = |id: &str, label: String, command, icon| ContextMenuItem::Action {
+        id: id.into(),
+        label,
+        command,
+        icon,
+        enabled: true,
+    };
+    if selected {
+        vec![
+            action(
+                "context-menu-bin-restore",
+                "Restore".into(),
+                ContextMenuCommand::RestoreBinSelected,
+                None,
+            ),
+            action(
+                "context-menu-bin-restore-to",
+                "Restore to…".into(),
+                ContextMenuCommand::RestoreBinToFolder,
+                None,
+            ),
+            ContextMenuItem::Separator,
+            action(
+                "context-menu-bin-cut",
+                "Cut".into(),
+                ContextMenuCommand::CutSelected,
+                Some(ContextMenuIcon::Cut),
+            ),
+            action(
+                "context-menu-bin-delete",
+                "Delete".into(),
+                ContextMenuCommand::DeleteSelected,
+                Some(ContextMenuIcon::Delete),
+            ),
+            action(
+                "context-menu-bin-properties",
+                "Properties".into(),
+                ContextMenuCommand::PropertiesSelected,
+                Some(ContextMenuIcon::Properties),
+            ),
+        ]
+    } else {
+        vec![action(
+            "context-menu-bin-empty",
+            format!("Empty {}", super::trash::label()),
+            ContextMenuCommand::EmptyBin,
+            Some(ContextMenuIcon::Delete),
+        )]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ContextMenuState {
     pub(super) origin: Point<Pixels>,
@@ -104,6 +156,9 @@ pub(super) enum ContextMenuIcon {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuCommand {
+    RestoreBinSelected,
+    RestoreBinToFolder,
+    EmptyBin,
     OpenDirectory {
         path: PathBuf,
     },
@@ -227,6 +282,10 @@ impl ExplorerView {
             .try_global::<crate::settings::SettingsState>()
             .map(|settings| settings.value.contextmenu.items.clone())
             .unwrap_or_default();
+        if self.is_trash_view() {
+            self.context_menu = Some(ContextMenuState::new(origin, bin_context_menu_items(false)));
+            return true;
+        }
         self.context_menu = Some(ContextMenuState::new(
             origin,
             folder_context_menu_items_with_custom(
@@ -260,6 +319,30 @@ impl ExplorerView {
         self.cancel_address_bar_edit();
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
+        if super::trash::is_root(&path) {
+            let mut items = vec![ContextMenuItem::Action {
+                id: "context-menu-bin-open".into(),
+                icon: None,
+                label: "Open".into(),
+                command: ContextMenuCommand::OpenDirectory {
+                    path: super::trash::root(),
+                },
+                enabled: true,
+            }];
+            items.push(ContextMenuItem::Action {
+                id: "context-menu-bin-empty".into(),
+                icon: Some(ContextMenuIcon::Delete),
+                label: format!("Empty {}", super::trash::label()),
+                command: ContextMenuCommand::EmptyBin,
+                enabled: true,
+            });
+            self.context_menu = Some(ContextMenuState::new_with_source(
+                origin,
+                items,
+                ContextMenuSource::SidebarItem { row_id },
+            ));
+            return true;
+        }
         self.context_menu = Some(ContextMenuState::new_with_source(
             origin,
             sidebar_context_menu_items(
@@ -296,6 +379,10 @@ impl ExplorerView {
         self.cancel_address_bar_edit();
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
+        if self.is_trash_view() {
+            self.context_menu = Some(ContextMenuState::new(origin, bin_context_menu_items(true)));
+            return true;
+        }
         let selected_context = self.selected_entry_context();
         if self.is_sidebar_group_view() {
             self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
@@ -354,6 +441,10 @@ impl ExplorerView {
         self.cancel_address_bar_edit();
         self.cancel_pending_click_rename();
         self.open_utility_menu = None;
+        if self.is_trash_view() {
+            self.context_menu = Some(ContextMenuState::new(origin, bin_context_menu_items(true)));
+            return true;
+        }
         let selected_context = self.selected_entry_context();
         if self.is_sidebar_group_view() {
             self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
@@ -419,6 +510,9 @@ impl ExplorerView {
         }
 
         match command {
+            ContextMenuCommand::RestoreBinSelected => self.restore_bin_selected(cx),
+            ContextMenuCommand::RestoreBinToFolder => self.restore_bin_to_folder(cx),
+            ContextMenuCommand::EmptyBin => self.empty_bin(cx),
             ContextMenuCommand::OpenDirectory { path } => {
                 self.navigate_to_directory_with_watcher(path, HistoryMode::Record, cx);
             }
@@ -2214,6 +2308,26 @@ mod tests {
     use crate::settings::{ContextMenuAction, CustomContextMenuItem};
     use gpui::AppContext;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn bin_background_menu_only_offers_empty_and_selected_menu_keeps_properties() {
+        let background = bin_context_menu_items(false);
+        assert_eq!(background.len(), 1);
+        assert!(matches!(
+            &background[0],
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::EmptyBin,
+                ..
+            }
+        ));
+        assert!(bin_context_menu_items(true).iter().any(|item| matches!(
+            item,
+            ContextMenuItem::Action {
+                command: ContextMenuCommand::PropertiesSelected,
+                ..
+            }
+        )));
+    }
 
     fn configured_executable_path() -> PathBuf {
         let dir = unique_temp_dir("configured-executable");

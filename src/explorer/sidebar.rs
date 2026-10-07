@@ -168,6 +168,10 @@ fn sidebar_sections_from_roots_internal(
         network_drives,
         wsl_drives: wsl_drive_items_from_roots(wsl_roots),
     };
+    sections.user_directories.retain(|item| {
+        item.kind != SidebarItemKind::Directory(DirectoryKind::Bin)
+            && !super::trash::is_root(&item.path)
+    });
     sections
         .drives
         .retain(|item| !sidebar_item_is_hidden(item, settings));

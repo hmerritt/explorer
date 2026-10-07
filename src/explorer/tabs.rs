@@ -2366,6 +2366,12 @@ fn tab_context_menu_row(
 impl Render for ExplorerTabs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.cleanup_completed_background_operations(cx);
+        for tab in &self.tabs {
+            for pane in &tab.panes {
+                pane.view
+                    .update(cx, |view, _| view.pane_visible = tab.id == self.active_tab);
+            }
+        }
         let app_font = crate::settings::current_app_font(cx);
         let active_workspace = self.active_tab().cloned();
         let split_key_context = active_workspace
@@ -2678,6 +2684,15 @@ fn observe_window_activation(window: &mut Window, cx: &mut Context<ExplorerTabs>
                 tab.view
                     .read(cx)
                     .restore_focus_after_window_activation(window);
+            }
+            if let Some(tab) = this.active_tab() {
+                for pane in &tab.panes {
+                    pane.view.update(cx, |view, cx| {
+                        if view.is_trash_view() && !view.has_background_operation() {
+                            view.reload_async_with_entry_metadata_resolution(cx);
+                        }
+                    });
+                }
             }
             crate::explorer::clipboard::refresh_clipboard_summary(cx);
         }
@@ -3453,7 +3468,8 @@ mod tests {
                 crate::explorer::view::NavigationLocation::Directory(path) => {
                     !path.starts_with(&ejected_root)
                 }
-                crate::explorer::view::NavigationLocation::SidebarGroup(_) => true,
+                crate::explorer::view::NavigationLocation::SidebarGroup(_)
+                | crate::explorer::view::NavigationLocation::Trash => true,
             }));
         });
         cx.read_entity(&affected_views[1], |view, _| {
@@ -3463,7 +3479,8 @@ mod tests {
                 crate::explorer::view::NavigationLocation::Directory(path) => {
                     !path.starts_with(&ejected_root)
                 }
-                crate::explorer::view::NavigationLocation::SidebarGroup(_) => true,
+                crate::explorer::view::NavigationLocation::SidebarGroup(_)
+                | crate::explorer::view::NavigationLocation::Trash => true,
             }));
         });
     }

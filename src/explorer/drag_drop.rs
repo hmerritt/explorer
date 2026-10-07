@@ -31,6 +31,11 @@ use crate::explorer::filesystem::{
     copy_paths_to_directory_with_copy_names, create_links_to_directory, move_paths_to_directory,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExplorerDragPayload {
+    Files,
+    Bin(Vec<super::trash::TrashItemId>),
+}
 #[derive(Clone, Debug)]
 pub(super) struct DraggedEntries {
     pub(super) paths: Vec<PathBuf>,
@@ -40,6 +45,7 @@ pub(super) struct DraggedEntries {
     pub(super) folder_count: usize,
     pub(super) file_count: usize,
     source_facts: Arc<InternalDragSourceFacts>,
+    payload: ExplorerDragPayload,
 }
 
 impl PartialEq for DraggedEntries {
@@ -465,7 +471,11 @@ fn source_volume_probe_paths(paths: &[PathBuf], source_dir: &Path) -> Vec<PathBu
 impl DraggedEntries {
     fn new(entries: Vec<&FileEntry>, source_dir: PathBuf) -> Option<Self> {
         let first = entries.first()?;
-        let display_name = path_display_name(&first.path);
+        let display_name = if super::trash::is_item(&first.path) {
+            first.name.clone()
+        } else {
+            path_display_name(&first.path)
+        };
         let count = entries.len();
         let folder_count = entries
             .iter()
@@ -487,7 +497,13 @@ impl DraggedEntries {
             &source_dir,
         ));
 
+        let payload = if paths.iter().all(|path| super::trash::is_item(path)) {
+            ExplorerDragPayload::Bin(super::trash::ids(&paths))
+        } else {
+            ExplorerDragPayload::Files
+        };
         Some(Self {
+            payload,
             paths,
             source_dir,
             display_name,
@@ -499,8 +515,12 @@ impl DraggedEntries {
     }
 
     pub(super) fn external_paths(&self) -> gpui::ExternalPaths {
+        if matches!(self.payload, ExplorerDragPayload::Bin(_)) {
+            return gpui::ExternalPaths::internal();
+        }
         if self.paths.iter().any(|path| {
-            super::remote_fs::is_remote(path)
+            super::trash::is_item(path)
+                || super::remote_fs::is_remote(path)
                 || crate::explorer::portable_devices::is_portable_path(path)
         }) {
             return gpui::ExternalPaths::new(Vec::new());
@@ -662,7 +682,13 @@ impl DraggedEntries {
             directory_paths,
             &source_dir,
         ));
+        let payload = if paths.iter().all(|path| super::trash::is_item(path)) {
+            ExplorerDragPayload::Bin(super::trash::ids(&paths))
+        } else {
+            ExplorerDragPayload::Files
+        };
         Self {
+            payload,
             paths,
             source_dir,
             display_name: display_name.to_owned(),
@@ -682,6 +708,21 @@ impl ExplorerView {
         modifiers: Modifiers,
     ) -> DraggedValueDropResolution {
         let resolved_destination = destination.resolve(&self.path);
+        if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>()
+            && dragged.paths.iter().any(|p| super::trash::is_item(p))
+        {
+            return DraggedValueDropResolution {
+                resolved: if !modifiers.control
+                    && !modifiers.alt
+                    && super::trash::local_destination(&resolved_destination)
+                {
+                    ResolvedDrop::Move
+                } else {
+                    ResolvedDrop::Invalid
+                },
+                explicit_operation_required: false,
+            };
+        }
         resolve_dragged_value_drop(
             dragged_value,
             destination,
@@ -781,6 +822,12 @@ impl ExplorerView {
         if self.is_sidebar_group_view() || !ExplorerFs::new().can_mutate(&self.path) {
             return false;
         }
+        if dragged_value
+            .downcast_ref::<DraggedEntries>()
+            .is_some_and(|d| d.paths.iter().any(|p| super::trash::is_item(p)))
+        {
+            return self.can_drop_value(dragged_value, destination, modifiers);
+        }
         if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
             return dragged
                 .provisional_drop_resolution(destination, &self.path, modifiers)
@@ -794,7 +841,11 @@ impl ExplorerView {
 
     pub(super) fn can_trash_drop_value(&self, dragged_value: &dyn Any) -> bool {
         if let Some(dragged) = dragged_value.downcast_ref::<DraggedEntries>() {
-            return !dragged.paths.is_empty();
+            return !dragged.paths.is_empty()
+                && dragged
+                    .paths
+                    .iter()
+                    .all(|p| !super::trash::is_item(p) && !super::trash::is_root(p));
         }
 
         dragged_value
@@ -841,6 +892,9 @@ impl ExplorerView {
     ) -> (CursorStyle, Option<DropIndicator>) {
         if self.is_sidebar_group_view() {
             return (CursorStyle::OperationNotAllowed, None);
+        }
+        if dragged.paths.iter().any(|p| super::trash::is_item(p)) {
+            return self.drop_feedback_for_value(dragged, destination, modifiers, mouse_position);
         }
         let current_directory = self.path.clone();
         let provisional =
@@ -973,6 +1027,23 @@ impl ExplorerView {
         }
 
         let resolved_destination = destination.resolve(&self.path);
+        if let ExplorerDragPayload::Bin(ids) = &dragged.payload {
+            if !modifiers.control
+                && !modifiers.alt
+                && super::trash::local_destination(&resolved_destination)
+            {
+                self.prepare_bin_recovery(
+                    super::trash::RecoveryRequest {
+                        ids: ids.clone(),
+                        directory: Some(resolved_destination),
+                    },
+                    cx,
+                );
+            } else {
+                self.set_error_notice("Recover items by moving them into a local folder.");
+            }
+            return;
+        }
         if super::remote_fs::is_remote(&resolved_destination)
             || dragged.paths.iter().any(|p| super::remote_fs::is_remote(p))
         {

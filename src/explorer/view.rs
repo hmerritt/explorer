@@ -79,6 +79,7 @@ pub(super) enum ViewModeSelection {
 pub(super) enum NavigationLocation {
     Directory(PathBuf),
     SidebarGroup(SidebarGroupKind),
+    Trash,
 }
 
 impl From<PathBuf> for NavigationLocation {
@@ -95,6 +96,11 @@ impl PartialEq<PathBuf> for NavigationLocation {
 
 pub struct ExplorerView {
     pub(super) path: PathBuf,
+    pub(super) trash_view: Option<super::trash_ui::TrashViewState>,
+    pub(super) trash_operation: Option<super::trash_ui::TrashOperation>,
+    pub(super) trash_preferences: Option<super::trash_ui::TrashPreferences>,
+    pub(super) trash_dialog_serial: u64,
+    pub(super) pane_visible: bool,
     pub(super) entries: Vec<FileEntry>,
     // GPUI's replayable scene does not own the decoded images it references.
     pub(super) rendered_image_leases: RefCell<HashMap<gpui::ImageId, Arc<gpui::RenderImage>>>,
@@ -474,7 +480,19 @@ impl ExplorerView {
         view
     }
 
-    fn observe_clipboard_summary(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn observe_clipboard_summary(&mut self, cx: &mut Context<Self>) {
+        cx.observe_global::<super::trash_ui::TrashRevision>(|view, cx| {
+            let _revision = cx.global::<super::trash_ui::TrashRevision>().0;
+            view.reconcile_bin_undo();
+            view.reconcile_bin_clipboard(cx);
+            if view.is_trash_view()
+                && !view.has_background_operation()
+                && view.directory_load_task.is_none()
+            {
+                view.reload_async_with_entry_metadata_resolution(cx);
+            }
+        })
+        .detach();
         cx.observe_global::<crate::explorer::clipboard::ClipboardSummaryState>(|_, cx| {
             cx.notify();
         })
@@ -547,6 +565,11 @@ impl ExplorerView {
         let filesystem_name = crate::settings::filesystem_name(settings);
         Self {
             path: initial_path,
+            trash_view: None,
+            trash_operation: None,
+            trash_preferences: None,
+            trash_dialog_serial: 0,
+            pane_visible: true,
             entries: Vec::new(),
             rendered_image_leases: RefCell::new(HashMap::new()),
             resource_image_leases: RefCell::new(HashMap::new()),
@@ -696,6 +719,9 @@ impl ExplorerView {
     }
 
     pub(super) fn apply_settings(&mut self, settings: &ExplorerSettings, cx: &mut Context<Self>) {
+        let bin_preferences = self
+            .is_trash_view()
+            .then(|| (self.file_columns.clone(), self.file_sort, self.view_mode));
         let visibility_changed = self.show_dotfiles != settings.view.show_dotfiles
             || self.show_hidden_files != settings.view.show_hidden;
         let folder_size_changed = self.show_folder_size != settings.view.show_folder_sizes;
@@ -817,6 +843,18 @@ impl ExplorerView {
                 self.rebuild_fast_sidebar_sections();
             }
         }
+        if let Some((columns, sort, mode)) = bin_preferences {
+            if let Some(state) = self.trash_view.as_mut() {
+                state.columns = settings.view.file_columns.clone();
+                state.sort = settings.view.sort;
+                state.view_mode = settings.view.mode;
+            }
+            self.file_columns = columns;
+            self.file_sort = sort;
+            self.view_mode = mode;
+            self.apply_file_sort_preserving_selection();
+            self.apply_trash_location_sort();
+        }
         cx.notify();
     }
 
@@ -904,6 +942,7 @@ impl ExplorerView {
         mode: ReloadMode,
         clear_entries: bool,
     ) -> Vec<PathBuf> {
+        self.sync_trash_view_settings();
         self.cancel_folder_size_task();
         self.directory_is_remote = path_is_remote_drive(&self.path);
         self.thumbnail_source_policy =
@@ -1005,6 +1044,7 @@ impl ExplorerView {
             ),
         );
 
+        self.apply_trash_location_sort();
         had_read_error
             || self.all_entries != previous_all_entries
             || self.entries != previous_entries
@@ -1343,6 +1383,9 @@ impl ExplorerView {
     }
 
     pub(super) fn current_navigation_location(&self) -> NavigationLocation {
+        if self.is_trash_view() {
+            return NavigationLocation::Trash;
+        }
         self.active_sidebar_group()
             .map(NavigationLocation::SidebarGroup)
             .unwrap_or_else(|| NavigationLocation::Directory(self.path.clone()))
@@ -1431,6 +1474,16 @@ impl ExplorerView {
         if self.directory_load_generation != state.generation || self.path != state.path {
             return false;
         }
+        if self.is_trash_view()
+            && result
+                .entries
+                .as_ref()
+                .is_ok_and(|entries| !super::trash::listing_is_current(entries))
+        {
+            self.directory_load_task = None;
+            self.reload_async_with_entry_metadata_resolution(cx);
+            return false;
+        }
 
         let previous_content_branch = self.content_branch();
         let mut changed = false;
@@ -1482,6 +1535,17 @@ impl ExplorerView {
         }
         if state.restart_watcher {
             self.restart_directory_watcher(cx);
+        }
+        if self.is_trash_view() {
+            self.reconcile_bin_clipboard(cx);
+            self.reconcile_bin_undo();
+            let revision = super::trash::revision();
+            if cx
+                .try_global::<super::trash_ui::TrashRevision>()
+                .is_none_or(|value| value.0 != revision)
+            {
+                cx.set_global(super::trash_ui::TrashRevision(revision));
+            }
         }
 
         changed || self.content_branch() != previous_content_branch
@@ -1585,6 +1649,9 @@ impl ExplorerView {
     }
 
     pub(super) fn schedule_entry_metadata_resolution(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_trash_view() {
+            return false;
+        }
         self.schedule_pending_shell_shortcut_resolution(cx);
         let mut changed = self.schedule_folder_sizes(cx);
         changed |= self.schedule_codebase_summary(cx);
@@ -1815,6 +1882,9 @@ impl ExplorerView {
     }
 
     pub(super) fn schedule_folder_sizes(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_trash_view() {
+            return false;
+        }
         self.cancel_folder_size_task();
         if !self.show_folder_size {
             return false;
@@ -2051,6 +2121,7 @@ impl ExplorerView {
     }
 
     pub(super) fn emit_filesystem_changed(&self, cx: &mut Context<Self>) {
+        cx.set_global(super::trash_ui::TrashRevision(super::trash::revision()));
         cx.emit(ExplorerViewEvent::FilesystemChanged);
     }
 
@@ -2149,6 +2220,9 @@ impl ExplorerView {
     }
 
     pub(super) fn tab_label(&self) -> String {
+        if self.is_trash_view() {
+            return super::trash::label().into();
+        }
         self.active_sidebar_group()
             .map(sidebar_group_label)
             .map(str::to_owned)
@@ -2157,7 +2231,9 @@ impl ExplorerView {
     }
 
     pub(super) fn has_active_mutating_operation(&self) -> bool {
-        self.active_file_operation.is_some() || self.active_remote_delete.is_some()
+        self.trash_operation.is_some()
+            || self.active_file_operation.is_some()
+            || self.active_remote_delete.is_some()
     }
 
     pub(super) fn has_background_operation(&self) -> bool {
@@ -2209,10 +2285,14 @@ impl ExplorerView {
 
     pub(super) fn minimum_file_columns_width(&self) -> f32 {
         crate::explorer::columns::minimum_file_columns_width(&self.file_columns)
+            + if self.is_trash_view() { 250.0 } else { 0.0 }
     }
 
     pub(super) fn effective_name_column_width(&self, viewport_width: f32) -> f32 {
-        crate::explorer::columns::effective_name_column_width(viewport_width, &self.file_columns)
+        crate::explorer::columns::effective_name_column_width(
+            viewport_width - if self.is_trash_view() { 250.0 } else { 0.0 },
+            &self.file_columns,
+        )
     }
 
     pub(super) fn name_column_is_manual_width(&self) -> bool {
@@ -2220,6 +2300,13 @@ impl ExplorerView {
     }
 
     pub(super) fn header_file_sort(&self) -> Option<FileSortSettings> {
+        if self
+            .trash_view
+            .as_ref()
+            .is_some_and(|s| s.location_sort.is_some())
+        {
+            return None;
+        }
         if self.search.recursive_results_active {
             self.recursive_file_sort_override
         } else {
@@ -2233,6 +2320,9 @@ impl ExplorerView {
             _ => SortDirection::Ascending,
         };
         let sort = FileSortSettings { column, direction };
+        if let Some(state) = self.trash_view.as_mut() {
+            state.location_sort = None;
+        }
         self.file_sort = sort;
 
         if self.search.recursive_results_active {
@@ -2516,6 +2606,9 @@ pub(super) struct ReloadMode {
 }
 
 pub(super) fn tab_label_for_path(path: &Path) -> String {
+    if super::trash::is_root(path) {
+        return super::trash::label().into();
+    }
     if let Some(location) = super::remote_fs::RemoteLocation::from_provider(path) {
         return location.tab_label();
     }
@@ -2595,6 +2688,11 @@ impl ExplorerView {
 impl ExplorerView {
     pub(super) fn select_view_mode(&mut self, view_mode: FileViewMode, cx: &mut Context<Self>) {
         self.view_mode_selection = ViewModeSelection::Manual;
+        if self.is_trash_view() {
+            self.set_active_view_mode(view_mode);
+            cx.notify();
+            return;
+        }
         self.base_view_mode = view_mode;
         self.set_active_view_mode(view_mode);
         crate::settings::set_view_mode(view_mode, cx);

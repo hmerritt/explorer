@@ -77,6 +77,80 @@ pub(crate) fn should_start_external_paths_drag(
 mod tests {
     use super::*;
 
+    struct DragTestView;
+    impl Render for DragTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::div()
+        }
+    }
+
+    #[crate::test]
+    fn internal_drag_keeps_typed_payload_across_windows(cx: &mut crate::TestAppContext) {
+        let first = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| DragTestView))
+                .unwrap()
+        });
+        let second = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| DragTestView))
+                .unwrap()
+        });
+        let paths = crate::ExternalPaths::internal();
+        let view = first.root(cx).unwrap();
+        cx.update(|cx| {
+            cx.internal_native_drag = Some(AnyDrag {
+                value: Arc::new(vec![11u64, 22]),
+                view: view.into(),
+                cursor_offset: point(px(0.), px(0.)),
+                cursor_style: None,
+                external_paths: Some(paths.clone()),
+                external_paths_callback: None,
+            });
+        });
+        for target in [second, first] {
+            cx.update(|cx| {
+                cx.update_window(*target, |_, window, cx| {
+                    window.dispatch_event(
+                        PlatformInput::FileDrop(FileDropEvent::Entered {
+                            position: point(px(10.), px(10.)),
+                            paths: paths.clone(),
+                        }),
+                        cx,
+                    );
+                    assert_eq!(
+                        cx.active_drag
+                            .as_ref()
+                            .unwrap()
+                            .value
+                            .downcast_ref::<Vec<u64>>()
+                            .unwrap(),
+                        &[11, 22]
+                    );
+                    assert!(cx.active_drag.as_ref().unwrap().external_paths.is_none());
+                    window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Exited), cx);
+                    assert!(cx.active_drag.is_none());
+                    assert!(cx.internal_native_drag.is_some());
+                })
+            })
+            .unwrap();
+        }
+        cx.update(|cx| {
+            cx.update_window(*second, |_, window, cx| {
+                let rejected = window.dispatch_event(
+                    PlatformInput::FileDrop(FileDropEvent::Entered {
+                        position: point(px(10.), px(10.)),
+                        paths: crate::ExternalPaths::internal(),
+                    }),
+                    cx,
+                );
+                assert!(rejected.default_prevented);
+                assert!(cx.active_drag.is_none());
+                cx.complete_external_paths_drag(crate::ExternalPathsDragResult::Cancelled);
+                assert!(cx.internal_native_drag.is_none());
+            })
+        })
+        .unwrap();
+    }
+
     #[test]
     fn external_paths_drag_handoff_stays_inside_window() {
         assert!(!should_start_external_paths_drag(
@@ -3689,49 +3763,73 @@ impl Window {
             }
             // Translate dragging and dropping of external files from the operating system
             // to internal drag and drop events.
-            PlatformInput::FileDrop(file_drop) => match file_drop {
-                FileDropEvent::Entered { position, paths } => {
-                    self.mouse_position = position;
-                    if cx.active_drag.is_none() {
-                        cx.active_drag = Some(AnyDrag {
-                            value: Arc::new(paths.clone()),
-                            view: cx.new(|_| paths).into(),
-                            cursor_offset: position,
-                            cursor_style: None,
-                            external_paths: None,
-                            external_paths_callback: None,
-                        });
+            PlatformInput::FileDrop(file_drop) => {
+                self.modifiers = self.platform_window.modifiers();
+                match file_drop {
+                    FileDropEvent::Entered { position, paths } => {
+                        self.mouse_position = position;
+                        if let Some(token) = paths.internal_token() {
+                            let Some(drag) = cx.internal_native_drag.as_ref().filter(|drag| {
+                                drag.external_paths
+                                    .as_ref()
+                                    .and_then(|paths| paths.internal_token())
+                                    == Some(token)
+                            }) else {
+                                cx.active_drag = None;
+                                return DispatchEventResult {
+                                    propagate: false,
+                                    default_prevented: true,
+                                };
+                            };
+                            cx.active_drag = Some(AnyDrag {
+                                value: drag.value.clone(),
+                                view: drag.view.clone(),
+                                cursor_offset: drag.cursor_offset,
+                                cursor_style: drag.cursor_style,
+                                external_paths: None,
+                                external_paths_callback: None,
+                            });
+                        } else if cx.active_drag.is_none() {
+                            cx.active_drag = Some(AnyDrag {
+                                value: Arc::new(paths.clone()),
+                                view: cx.new(|_| paths).into(),
+                                cursor_offset: position,
+                                cursor_style: None,
+                                external_paths: None,
+                                external_paths_callback: None,
+                            });
+                        }
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position,
+                            pressed_button: Some(MouseButton::Left),
+                            modifiers: self.modifiers,
+                        })
                     }
-                    PlatformInput::MouseMove(MouseMoveEvent {
-                        position,
-                        pressed_button: Some(MouseButton::Left),
-                        modifiers: Modifiers::default(),
-                    })
+                    FileDropEvent::Pending { position } => {
+                        self.mouse_position = position;
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position,
+                            pressed_button: Some(MouseButton::Left),
+                            modifiers: self.modifiers,
+                        })
+                    }
+                    FileDropEvent::Submit { position } => {
+                        cx.activate(true);
+                        self.mouse_position = position;
+                        PlatformInput::MouseUp(MouseUpEvent {
+                            button: MouseButton::Left,
+                            position,
+                            modifiers: self.modifiers,
+                            click_count: 1,
+                        })
+                    }
+                    FileDropEvent::Exited => {
+                        cx.active_drag.take();
+                        present_after_file_drop_exit = true;
+                        PlatformInput::FileDrop(FileDropEvent::Exited)
+                    }
                 }
-                FileDropEvent::Pending { position } => {
-                    self.mouse_position = position;
-                    PlatformInput::MouseMove(MouseMoveEvent {
-                        position,
-                        pressed_button: Some(MouseButton::Left),
-                        modifiers: Modifiers::default(),
-                    })
-                }
-                FileDropEvent::Submit { position } => {
-                    cx.activate(true);
-                    self.mouse_position = position;
-                    PlatformInput::MouseUp(MouseUpEvent {
-                        button: MouseButton::Left,
-                        position,
-                        modifiers: Modifiers::default(),
-                        click_count: 1,
-                    })
-                }
-                FileDropEvent::Exited => {
-                    cx.active_drag.take();
-                    present_after_file_drop_exit = true;
-                    PlatformInput::FileDrop(FileDropEvent::Exited)
-                }
-            },
+            }
             PlatformInput::ExternalPathsDragFinished(result) => {
                 cx.complete_external_paths_drag(result);
                 self.refresh();
@@ -3799,7 +3897,9 @@ impl Window {
 
         if cx.has_active_drag() {
             if let Some(event) = event.downcast_ref::<MouseMoveEvent>() {
-                if should_start_external_paths_drag(event.position, self.bounds().size) {
+                if cx.internal_native_drag.is_none()
+                    && should_start_external_paths_drag(event.position, self.bounds().size)
+                {
                     self.cancel_window_drag_and_start_external_paths_drag(cx);
                     return;
                 }
@@ -3807,7 +3907,7 @@ impl Window {
                 // If this was a mouse move event, redraw the window so that the
                 // active drag can follow the mouse cursor.
                 self.refresh();
-            } else if event.is::<MouseExitEvent>() {
+            } else if event.is::<MouseExitEvent>() && cx.internal_native_drag.is_none() {
                 self.cancel_window_drag_and_start_external_paths_drag(cx);
             } else if event.is::<MouseUpEvent>() {
                 // If this was a mouse up event, cancel the active drag and redraw
@@ -3819,11 +3919,17 @@ impl Window {
     }
 
     fn cancel_window_drag_and_start_external_paths_drag(&mut self, cx: &mut App) -> bool {
-        let Some(drag) = cx.active_drag.take() else {
+        let Some(mut drag) = cx.active_drag.take() else {
             return false;
         };
-        let external_paths = drag.external_paths;
-        let external_paths_callback = drag.external_paths_callback;
+        let external_paths = drag.external_paths.clone();
+        let external_paths_callback = drag.external_paths_callback.take();
+        if external_paths
+            .as_ref()
+            .is_some_and(|paths| paths.internal_token().is_some())
+        {
+            cx.internal_native_drag = Some(drag);
+        }
 
         let arena_clear_needed = self.draw(cx);
         self.present();

@@ -621,6 +621,7 @@ pub enum ExternalPathsDragStartResult {
 pub struct ExternalPaths {
     paths: SmallVec<[PathBuf; 2]>,
     operations: ExternalPathDragOperations,
+    internal_token: Option<String>,
 }
 
 impl ExternalPaths {
@@ -632,6 +633,7 @@ impl ExternalPaths {
                 .filter(|path| !path.as_os_str().is_empty())
                 .collect(),
             operations: ExternalPathDragOperations::default(),
+            internal_token: None,
         }
     }
 
@@ -646,7 +648,29 @@ impl ExternalPaths {
                 .filter(|path| !path.as_os_str().is_empty())
                 .collect(),
             operations,
+            internal_token: None,
         }
+    }
+
+    /// Carry an opaque in-process drag between native windows without offering files.
+    pub fn internal() -> Self {
+        Self::from_internal_token(uuid::Uuid::new_v4().to_string())
+    }
+    pub(crate) fn from_internal_token(token: String) -> Self {
+        Self {
+            paths: SmallVec::new(),
+            operations: ExternalPathDragOperations::MOVE,
+            internal_token: Some(token),
+        }
+    }
+    pub(crate) fn internal_token(&self) -> Option<&str> {
+        self.internal_token.as_deref()
+    }
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn from_internal_uri_list(value: &str) -> Option<Self> {
+        let token = value.trim().strip_prefix("# gpui-internal-drag:")?;
+        uuid::Uuid::parse_str(token).ok()?;
+        Some(Self::from_internal_token(token.to_owned()))
     }
 
     /// Convert this collection of paths into a slice.
@@ -666,6 +690,9 @@ impl ExternalPaths {
 
     /// Encode the paths as a freedesktop-compatible `text/uri-list` payload.
     pub fn to_uri_list(&self) -> String {
+        if let Some(token) = &self.internal_token {
+            return format!("# gpui-internal-drag:{token}\r\n");
+        }
         uri_list_for_paths(&self.paths)
     }
 }
@@ -856,6 +883,16 @@ mod test {
             .unwrap();
     }
 
+    #[test]
+    fn internal_drag_transport_offers_no_file_urls_or_paths() {
+        let paths = ExternalPaths::internal();
+        assert!(paths.paths().is_empty());
+        assert!(!paths.to_uri_list().contains("file:"));
+        let decoded = ExternalPaths::from_internal_uri_list(&paths.to_uri_list()).unwrap();
+        assert_eq!(decoded.internal_token(), paths.internal_token());
+        assert!(decoded.paths().is_empty());
+        assert!(ExternalPaths::from_internal_uri_list("# gpui-internal-drag:../../live").is_none());
+    }
     #[test]
     fn external_paths_default_to_copy() {
         let paths = ExternalPaths::new([PathBuf::from("/tmp/a.txt")]);

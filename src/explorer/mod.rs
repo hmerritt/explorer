@@ -58,6 +58,8 @@ mod text_hover_preview;
 mod text_input;
 mod thumbnail_io;
 mod tooltip;
+mod trash;
+mod trash_ui;
 mod video;
 mod video_hover_preview;
 mod video_thumbnails;

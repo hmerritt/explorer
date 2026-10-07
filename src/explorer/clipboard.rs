@@ -44,6 +44,15 @@ pub(super) struct FileClipboard {
     pub(super) paths: Vec<PathBuf>,
 }
 
+/// Private Explorer recovery payload. It never advertises bin rows as native files.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BinClipboard {
+    kind: String,
+    version: u8,
+    ids: Vec<super::trash::TrashItemId>,
+}
+const BIN_CLIPBOARD_KIND: &str = "explorer.trash-clipboard";
+
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct ClipboardDownload {
     pub(super) url: Url,
@@ -464,6 +473,42 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
     if let Some(clipboard) = file_clipboard_from_item(item)
         && !clipboard.paths.is_empty()
     {
+        if clipboard
+            .paths
+            .iter()
+            .all(|path| super::trash::is_item(path))
+        {
+            let items: Vec<_> = clipboard
+                .paths
+                .iter()
+                .filter_map(|path| super::trash::cached(path))
+                .collect();
+            let preview_paths: Vec<_> =
+                items.iter().map(|item| PathBuf::from(&item.name)).collect();
+            let folders = items.iter().filter(|item| item.directory).count();
+            let summary = ClipboardSummary {
+                label: format!("{} items to restore", clipboard.paths.len()),
+                details: ClipboardSummaryDetails::Files {
+                    operation: FileClipboardOperation::Cut,
+                    source_preview: ClipboardFileSourcePreview::new(&preview_paths),
+                    folder_count: ClipboardMetric::Ready(folders),
+                    file_count: ClipboardMetric::Ready(items.len() - folders),
+                    total_size: if items.iter().all(|item| item.size.is_some()) {
+                        ClipboardMetric::Ready(items.iter().filter_map(|item| item.size).sum())
+                    } else {
+                        ClipboardMetric::Unavailable
+                    },
+                },
+            };
+            return Some(ClipboardInspection {
+                fingerprint: ClipboardFingerprint::Files {
+                    operation: clipboard.operation,
+                    paths: clipboard.paths,
+                },
+                summary,
+                file_paths: None,
+            });
+        }
         let summary = ClipboardSummary {
             label: clipboard_count_label(clipboard.paths.len(), "item", "items"),
             details: ClipboardSummaryDetails::Files {
@@ -805,6 +850,34 @@ fn update_clipboard_summary_if_current(
 }
 
 pub(super) fn clipboard_item_for_files(clipboard: &FileClipboard) -> Result<ClipboardItem, String> {
+    if clipboard
+        .paths
+        .iter()
+        .any(|path| super::trash::is_item(path))
+    {
+        if clipboard.operation != FileClipboardOperation::Cut
+            || !clipboard
+                .paths
+                .iter()
+                .all(|path| super::trash::is_item(path))
+        {
+            return Err("Bin items can only be cut for recovery within Explorer.".into());
+        }
+        let payload = BinClipboard {
+            kind: BIN_CLIPBOARD_KIND.into(),
+            version: 1,
+            ids: super::trash::ids(&clipboard.paths),
+        };
+        let metadata = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+        let text = clipboard
+            .paths
+            .iter()
+            .filter_map(|path| super::trash::cached(path))
+            .map(|item| item.name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(ClipboardItem::new_string_with_metadata(text, metadata));
+    }
     let metadata = FileClipboardMetadata {
         kind: CLIPBOARD_KIND.to_owned(),
         version: CLIPBOARD_VERSION,
@@ -815,7 +888,8 @@ pub(super) fn clipboard_item_for_files(clipboard: &FileClipboard) -> Result<Clip
         .map_err(|error| format!("Could not write Explorer clipboard data: {error}"))?;
 
     if clipboard.paths.iter().any(|path| {
-        super::remote_fs::is_remote(path)
+        super::trash::is_item(path)
+            || super::remote_fs::is_remote(path)
             || crate::explorer::portable_devices::is_portable_path(path)
     }) {
         // Synthetic portable locations are meaningful only inside Explorer. Keep
@@ -845,9 +919,29 @@ pub(super) fn file_clipboard_from_item(item: &ClipboardItem) -> Option<FileClipb
     }
 
     let metadata = item.metadata()?;
+    if let Ok(payload) = serde_json::from_str::<BinClipboard>(metadata) {
+        if payload.kind != BIN_CLIPBOARD_KIND || payload.version != 1 || payload.ids.is_empty() {
+            return None;
+        }
+        let paths: Vec<_> = payload
+            .ids
+            .into_iter()
+            .map(|id| PathBuf::from(format!("{}items/{}", super::trash::ADDRESS, id.0)))
+            .collect();
+        if !paths.iter().all(|path| super::trash::is_item(path)) {
+            return None;
+        }
+        return Some(FileClipboard::new(FileClipboardOperation::Cut, paths));
+    }
     let metadata = serde_json::from_str::<FileClipboardMetadata>(metadata).ok()?;
 
-    if metadata.kind != CLIPBOARD_KIND || metadata.version != CLIPBOARD_VERSION {
+    if metadata.kind != CLIPBOARD_KIND
+        || metadata.version != CLIPBOARD_VERSION
+        || metadata
+            .paths
+            .iter()
+            .any(|path| super::trash::is_item(path))
+    {
         return None;
     }
 
@@ -1325,6 +1419,52 @@ fn explorer_clipboard_operation(operation: ClipboardFileOperation) -> FileClipbo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bin_clipboard_is_typed_cut_only_and_has_no_native_files() {
+        let path = PathBuf::from(format!(
+            "{}items/{}",
+            super::super::trash::ADDRESS,
+            "a".repeat(64)
+        ));
+        let clipboard = FileClipboard::new(FileClipboardOperation::Cut, vec![path.clone()]);
+        let item = clipboard_item_for_files(&clipboard).unwrap();
+        assert!(item.files().is_none());
+        assert!(!item.text().unwrap_or_default().contains("trash:"));
+        assert!(
+            item.metadata()
+                .unwrap()
+                .contains("explorer.trash-clipboard")
+        );
+        assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
+        assert!(
+            clipboard_item_for_files(&FileClipboard::new(
+                FileClipboardOperation::Copy,
+                vec![path]
+            ))
+            .is_err()
+        );
+    }
+    #[test]
+    fn bin_clipboard_rejects_path_traversal_and_unsupported_versions() {
+        for (version, id) in [
+            (1, "../../live"),
+            (
+                2,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        ] {
+            let payload = BinClipboard {
+                kind: BIN_CLIPBOARD_KIND.into(),
+                version,
+                ids: vec![super::super::trash::TrashItemId(id.into())],
+            };
+            let item = ClipboardItem::new_string_with_metadata(
+                String::new(),
+                serde_json::to_string(&payload).unwrap(),
+            );
+            assert!(file_clipboard_from_item(&item).is_none());
+        }
+    }
     use super::*;
     use crate::explorer::{
         constants::{KB_BYTES, MB_BYTES},

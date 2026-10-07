@@ -789,6 +789,10 @@ impl ExplorerView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        if paths.iter().any(|p| super::trash::is_item(p)) {
+            self.open_bin_properties(&paths, cx);
+            return;
+        }
         self.close_context_menu();
         self.open_utility_menu = None;
         match open_properties_window(

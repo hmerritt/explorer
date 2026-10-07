@@ -667,12 +667,140 @@ impl ExplorerView {
             .into_any_element()
     }
 
+    fn render_bin_utility_bar(
+        &self,
+        sidebar_auto_hide_active: bool,
+        sidebar_visible: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let selected = !self.selection.selected_indices.is_empty();
+        let idle = !self.has_background_operation();
+        let entries = !self.all_entries.is_empty();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(UTILITY_BAR_HEIGHT))
+            .w_full()
+            .flex_shrink_0()
+            .bg(rgb(0xf8f8f8))
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(0xe9e9e9))
+            .child(
+                div()
+                    .id("bin-utility-bar-actions")
+                    .w_full()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .overflow_x_scroll()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px(px(UTILITY_BAR_HORIZONTAL_PADDING))
+                    .gap(px(UTILITY_BAR_ITEM_GAP))
+                    .when(sidebar_auto_hide_active, |bar| {
+                        bar.child(utility_icon_button(
+                            "utility-sidebar-toggle",
+                            HAMBURGER_ICON.clone(),
+                            if sidebar_visible {
+                                "Hide navigation pane"
+                            } else {
+                                "Show navigation pane"
+                            },
+                            true,
+                            cx.listener(|this, _, _, cx| {
+                                this.sidebar_auto_hide_expanded = !this.sidebar_auto_hide_expanded;
+                                cx.notify();
+                            }),
+                        ))
+                        .child(utility_separator())
+                    })
+                    .child(utility_icon_button(
+                        "utility-bin-cut",
+                        CUT_ICON.clone(),
+                        "Cut",
+                        selected && idle,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.close_context_menu();
+                            this.open_utility_menu = None;
+                            this.cut_selected_to_clipboard(cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(utility_icon_button(
+                        "utility-bin-delete",
+                        DELETE_ICON.clone(),
+                        "Delete",
+                        selected && idle,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.close_context_menu();
+                            this.open_utility_menu = None;
+                            this.request_bin_delete(cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(utility_separator())
+                    .child(self.render_view_utility_button(true, cx))
+                    .child(utility_separator())
+                    .child(bin_action_button(
+                        "utility-bin-restore",
+                        "Restore",
+                        selected && idle,
+                        cx.listener(|this, _, _, cx| this.restore_bin_selected(cx)),
+                    ))
+                    .child(bin_action_button(
+                        "utility-bin-restore-to",
+                        "Restore to…",
+                        selected && idle,
+                        cx.listener(|this, _, _, cx| this.restore_bin_to_folder(cx)),
+                    ))
+                    .child(utility_separator())
+                    .child(bin_action_button(
+                        "utility-bin-empty",
+                        if cfg!(target_os = "windows") {
+                            "Empty Recycle Bin"
+                        } else {
+                            "Empty Trash"
+                        },
+                        entries && idle,
+                        cx.listener(|this, _, _, cx| this.empty_bin(cx)),
+                    )),
+            )
+    }
+
+    fn render_view_utility_button(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
+        utility_text_button(
+            "utility-view",
+            Some(utility_view_icon().into_any_element()),
+            "View",
+            self.open_utility_menu == Some(UtilityMenu::View),
+            enabled,
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.close_context_menu();
+                this.cancel_pending_click_rename();
+                this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::View) {
+                    None
+                } else {
+                    Some(UtilityMenu::View)
+                };
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+    }
+
     fn render_utility_bar(
         &self,
         sidebar_auto_hide_active: bool,
         sidebar_visible: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        if self.is_trash_view() {
+            return self.render_bin_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx);
+        }
         let has_selection = !self.selection.selected_indices.is_empty();
         let can_rename = self.can_start_selected_rename();
         let can_extract = self.selected_archive_paths().is_some();
@@ -835,24 +963,7 @@ impl ExplorerView {
                 }),
             ))
             .child(utility_separator())
-            .child(utility_text_button(
-                "utility-view",
-                Some(utility_view_icon().into_any_element()),
-                "View",
-                self.open_utility_menu == Some(UtilityMenu::View),
-                !read_only_group,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.close_context_menu();
-                    this.cancel_pending_click_rename();
-                    this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::View) {
-                        None
-                    } else {
-                        Some(UtilityMenu::View)
-                    };
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            ))
+            .child(self.render_view_utility_button(!read_only_group, cx))
             .when(can_extract, |this| {
                 this.child(utility_separator()).child(utility_action_button(
                     "utility-extract",
@@ -947,7 +1058,7 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let menu = self.open_utility_menu?;
-        let left = utility_menu_left(menu, sidebar_auto_hide_active);
+        let left = utility_menu_left(menu, sidebar_auto_hide_active, self.is_trash_view());
 
         let menu = match menu {
             UtilityMenu::New => utility_dropdown()
@@ -1637,6 +1748,22 @@ impl ExplorerView {
                 active_sort,
             ));
 
+        if self.is_trash_view() {
+            header_row = header_row.child(
+                div()
+                    .id("trash-header-original-location")
+                    .debug_selector(|| "trash-header-original-location".into())
+                    .w(px(250.0))
+                    .flex_shrink_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .px(px(12.0))
+                    .cursor_pointer()
+                    .child("Original location")
+                    .on_click(cx.listener(|this, _, _, cx| this.sort_trash_locations(cx))),
+            );
+        }
         for kind in self.file_columns.order.iter().copied() {
             header_row =
                 header_row.child(self.render_file_column_header_cell(kind, active_sort, cx));
@@ -1671,7 +1798,11 @@ impl ExplorerView {
     ) -> AnyElement {
         let entity = cx.entity();
         let width = self.file_column_width(kind);
-        let label = file_column_label(kind);
+        let label = if self.is_trash_view() && kind == FileColumnKind::DateModified {
+            "Date deleted"
+        } else {
+            file_column_label(kind)
+        };
         let sort_column = file_column_sort_column(kind);
         let mut cell = header_cell(label, width, sort_column, active_sort)
             .id(file_column_header_element_id(kind))
@@ -1700,7 +1831,9 @@ impl ExplorerView {
 
                 let _ = entity.update(cx, |this, cx| {
                     if this.reorder_file_column(dragged, kind, before) {
-                        crate::settings::reorder_file_column(dragged, kind, before, cx);
+                        if !this.is_trash_view() {
+                            crate::settings::reorder_file_column(dragged, kind, before, cx);
+                        }
                         cx.notify();
                     }
                 });
@@ -1731,6 +1864,11 @@ impl ExplorerView {
 
             if expanded {
                 for (index, item) in sections.user_directories.iter().cloned().enumerate() {
+                    if item.kind == SidebarItemKind::Directory(DirectoryKind::Bin)
+                        || super::trash::is_root(&item.path)
+                    {
+                        continue;
+                    }
                     children.push(
                         self.render_sidebar_insertion_zone(
                             item.configured_index
@@ -1765,6 +1903,22 @@ impl ExplorerView {
             previous_group_expanded = Some(expanded);
         }
 
+        if let Some(expanded) = previous_group_expanded {
+            children.push(sidebar_group_gap(expanded).into_any_element());
+        }
+        children.push(self.render_sidebar_row(
+            1_000_000,
+            SidebarItem {
+                label: super::trash::label().into(),
+                path: super::trash::root(),
+                kind: SidebarItemKind::Directory(DirectoryKind::Bin),
+                configured_index: None,
+            },
+            SidebarGroupKind::Pinned,
+            0.0,
+            cx,
+        ));
+        previous_group_expanded = Some(false);
         if !sections.drives.is_empty()
             && !sidebar_group_is_hidden(&self.sidebar_settings, SidebarGroupKind::Drives)
         {
@@ -2200,18 +2354,19 @@ impl ExplorerView {
             });
         let is_dragging =
             sidebar_item_is_dragging(&drag_identity, self.dragging_sidebar_item.as_ref());
-        let accepts_directory_drop = matches!(
-            item.kind,
-            SidebarItemKind::Directory(_)
-                | SidebarItemKind::CustomDirectory
-                | SidebarItemKind::Drive
-                | SidebarItemKind::DriveWindows
-                | SidebarItemKind::DriveNetwork(NetworkDriveState::Connected)
-                | SidebarItemKind::Remote(NetworkDriveState::Connected)
-                | SidebarItemKind::GoogleDrive
-                | SidebarItemKind::OneDrive
-                | SidebarItemKind::DriveWsl
-        );
+        let accepts_directory_drop = !super::trash::is_root(&path)
+            && matches!(
+                item.kind,
+                SidebarItemKind::Directory(_)
+                    | SidebarItemKind::CustomDirectory
+                    | SidebarItemKind::Drive
+                    | SidebarItemKind::DriveWindows
+                    | SidebarItemKind::DriveNetwork(NetworkDriveState::Connected)
+                    | SidebarItemKind::Remote(NetworkDriveState::Connected)
+                    | SidebarItemKind::GoogleDrive
+                    | SidebarItemKind::OneDrive
+                    | SidebarItemKind::DriveWsl
+            );
         let is_bin = matches!(item.kind, SidebarItemKind::Directory(DirectoryKind::Bin));
         let destination = DropDestination::Directory {
             item_path: path.clone(),
@@ -2575,7 +2730,7 @@ impl ExplorerView {
             cx,
         );
 
-        let non_name_cells = self
+        let mut non_name_cells = self
             .file_columns
             .order
             .iter()
@@ -2601,7 +2756,27 @@ impl ExplorerView {
                 }
             })
             .collect::<Vec<_>>();
-
+        if self.is_trash_view() {
+            let cell = text_cell(
+                super::trash::cached(&entry.path)
+                    .map(|e| e.original_location())
+                    .unwrap_or_else(|| "Unknown".into()),
+                250.0,
+                false,
+                &self.font,
+                window,
+            )
+            .id(("trash-original-location", ix));
+            non_name_cells.insert(
+                0,
+                if can_start_selected_drag {
+                    add_selected_entry_drag(cell, true, ix, entity.clone()).into_any_element()
+                } else {
+                    add_individual_entry_drag(cell, can_start_individual_drag, ix, entity.clone())
+                        .into_any_element()
+                },
+            );
+        }
         let name_cell = if self.rename_is_active_for_path(&entry.path) {
             rename_name_cell(
                 &entry,
@@ -5117,6 +5292,20 @@ fn add_current_folder_drop_handlers(
     }))
 }
 
+fn bin_action_button(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .child(utility_text_button_base(
+            id, None, label, false, false, enabled, on_click,
+        ))
+        .into_any_element()
+}
+
 fn utility_text_button(
     id: &'static str,
     left_icon: Option<AnyElement>,
@@ -5189,9 +5378,15 @@ fn utility_text_button_base(
         .into_any_element()
 }
 
-fn utility_menu_left(menu: UtilityMenu, sidebar_toggle_visible: bool) -> f32 {
+fn utility_menu_left(menu: UtilityMenu, sidebar_toggle_visible: bool, bin: bool) -> f32 {
     let left = match menu {
         UtilityMenu::New => UTILITY_NEW_MENU_LEFT,
+        UtilityMenu::View if bin => {
+            UTILITY_BAR_HORIZONTAL_PADDING
+                + UTILITY_ICON_BUTTON_SIZE * 2.0
+                + UTILITY_SEPARATOR_WIDTH
+                + UTILITY_BAR_ITEM_GAP * 3.0
+        }
         UtilityMenu::View => UTILITY_VIEW_MENU_LEFT,
     };
 
@@ -6576,7 +6771,9 @@ fn add_header_sort_click(
         let _ = entity.update(cx, |this, cx| {
             this.close_context_menu();
             let sort = this.sort_entries_from_header(column);
-            crate::settings::set_file_sort(sort, cx);
+            if !this.is_trash_view() {
+                crate::settings::set_file_sort(sort, cx);
+            }
             cx.notify();
         });
         cx.stop_propagation();
@@ -6728,10 +6925,16 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
 
                                     match result {
                                         FileColumnResizeResult::Name(width) => {
-                                            crate::settings::set_name_column_width(width, cx);
+                                            if !this.is_trash_view() {
+                                                crate::settings::set_name_column_width(width, cx);
+                                            }
                                         }
                                         FileColumnResizeResult::Column(kind, width) => {
-                                            crate::settings::set_file_column_width(kind, width, cx);
+                                            if !this.is_trash_view() {
+                                                crate::settings::set_file_column_width(
+                                                    kind, width, cx,
+                                                );
+                                            }
                                         }
                                     }
                                     cx.stop_propagation();
@@ -6744,7 +6947,9 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
                                 let _ = entity.update(cx, |this, cx| {
                                     this.close_context_menu();
                                     let (kind, width) = this.reset_file_column_width(kind);
-                                    crate::settings::set_file_column_width(kind, width, cx);
+                                    if !this.is_trash_view() {
+                                        crate::settings::set_file_column_width(kind, width, cx);
+                                    }
                                     cx.stop_propagation();
                                     cx.notify();
                                 });
@@ -6861,10 +7066,16 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
 
                                     match result {
                                         FileColumnResizeResult::Name(width) => {
-                                            crate::settings::set_name_column_width(width, cx);
+                                            if !this.is_trash_view() {
+                                                crate::settings::set_name_column_width(width, cx);
+                                            }
                                         }
                                         FileColumnResizeResult::Column(kind, width) => {
-                                            crate::settings::set_file_column_width(kind, width, cx);
+                                            if !this.is_trash_view() {
+                                                crate::settings::set_file_column_width(
+                                                    kind, width, cx,
+                                                );
+                                            }
                                         }
                                     }
                                     cx.stop_propagation();
@@ -6877,7 +7088,9 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
                                 let _ = entity.update(cx, |this, cx| {
                                     this.close_context_menu();
                                     this.reset_name_column_width();
-                                    crate::settings::clear_name_column_width(cx);
+                                    if !this.is_trash_view() {
+                                        crate::settings::clear_name_column_width(cx);
+                                    }
                                     cx.stop_propagation();
                                     cx.notify();
                                 });
@@ -7476,7 +7689,14 @@ fn file_column_cell(
     window: &Window,
 ) -> Div {
     let (text, right) = match kind {
-        FileColumnKind::DateModified => (format_timestamp(entry.modified, date_format), false),
+        FileColumnKind::DateModified => (
+            if super::trash::is_item(&entry.path) && entry.modified.is_none() {
+                "Unknown".into()
+            } else {
+                format_timestamp(entry.modified, date_format)
+            },
+            false,
+        ),
         FileColumnKind::Type => (entry.type_label(), false),
         FileColumnKind::Size => (format_size(entry.size), true),
     };
@@ -9678,8 +9898,8 @@ mod tests {
         let drive_group_top_offset = f32::from(drive_group.origin.y) - f32::from(sidebar.origin.y);
 
         assert!(
-            (drive_group_top_offset - 8.0).abs() <= 1.0,
-            "drive group should start after sidebar top padding, got {drive_group_top_offset}"
+            (drive_group_top_offset - 42.0).abs() <= 1.0,
+            "drive group should follow the bin row, got {drive_group_top_offset}"
         );
         assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
         assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_none());
@@ -9831,8 +10051,8 @@ mod tests {
             .debug_bounds("explorer-sidebar-row-0")
             .expect("pinned row bounds");
         let drive_group = cx
-            .debug_bounds("explorer-sidebar-group-drives")
-            .expect("drive group bounds");
+            .debug_bounds("explorer-sidebar-row-1000000")
+            .expect("bin row bounds");
         let header_gap = f32::from(pinned_row.origin.y)
             - (f32::from(pinned_group.origin.y) + f32::from(pinned_group.size.height));
         let trailing_gap = f32::from(drive_group.origin.y)
@@ -9890,8 +10110,8 @@ mod tests {
             .debug_bounds("explorer-sidebar-group-pinned")
             .expect("pinned group bounds");
         let drive_group = cx
-            .debug_bounds("explorer-sidebar-group-drives")
-            .expect("drive group bounds");
+            .debug_bounds("explorer-sidebar-row-1000000")
+            .expect("bin row bounds");
         let group_gap = f32::from(drive_group.origin.y)
             - (f32::from(pinned_group.origin.y) + f32::from(pinned_group.size.height));
 
@@ -10312,7 +10532,8 @@ mod tests {
 
         assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_some());
         assert!(cx.debug_bounds("explorer-sidebar-row-0").is_some());
-        assert!(cx.debug_bounds("explorer-sidebar-row-1").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-1").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-row-1000000").is_some());
         assert!(cx.debug_bounds("explorer-sidebar-group-macos").is_none());
     }
 

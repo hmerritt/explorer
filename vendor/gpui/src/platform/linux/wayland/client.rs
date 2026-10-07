@@ -336,7 +336,7 @@ impl WaylandClientStatePtr {
         window: &WaylandWindowStatePtr,
         paths: ExternalPaths,
     ) -> ExternalPathsDragStartResult {
-        if paths.is_empty() {
+        if paths.is_empty() && paths.internal_token().is_none() {
             return ExternalPathsDragStartResult::Failed;
         }
 
@@ -2013,8 +2013,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                         return;
                     };
 
-                    const ACTIONS: DndAction = DndAction::Copy;
-                    data_offer.set_actions(ACTIONS, ACTIONS);
+                    data_offer.set_actions(DndAction::Copy | DndAction::Move, DndAction::Copy);
 
                     let pipe = Pipe::new().unwrap();
                     data_offer.receive(FILE_LIST_MIME_TYPE.to_string(), unsafe {
@@ -2049,15 +2048,19 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 .collect();
                             let position = Point::new(x.into(), y.into());
 
-                            // Prevent dropping text from other programs.
-                            if paths.is_empty() {
+                            let internal = crate::ExternalPaths::from_internal_uri_list(&file_list);
+                            if internal.is_some() {
+                                data_offer.set_actions(DndAction::Move, DndAction::Move);
+                            }
+                            // Prevent dropping arbitrary text from other programs.
+                            if paths.is_empty() && internal.is_none() {
                                 data_offer.destroy();
                                 return;
                             }
 
                             let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                                 position,
-                                paths: crate::ExternalPaths::new(paths),
+                                paths: internal.unwrap_or_else(|| crate::ExternalPaths::new(paths)),
                             });
 
                             let client = this.get_client();

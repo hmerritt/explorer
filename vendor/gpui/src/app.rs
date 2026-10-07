@@ -545,6 +545,7 @@ pub struct App {
     pub(crate) actions: Rc<ActionRegistry>,
     pub(crate) active_drag: Option<AnyDrag>,
     pub(crate) external_paths_drag_callback: Option<ExternalPathsDragCallback>,
+    pub(crate) internal_native_drag: Option<AnyDrag>,
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
@@ -624,6 +625,7 @@ impl App {
                 pending_updates: 0,
                 active_drag: None,
                 external_paths_drag_callback: None,
+                internal_native_drag: None,
                 background_executor: executor,
                 foreground_executor,
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
@@ -1997,6 +1999,9 @@ impl App {
     }
 
     pub(crate) fn complete_external_paths_drag(&mut self, result: ExternalPathsDragResult) {
+        if self.internal_native_drag.take().is_some() {
+            self.active_drag = None;
+        }
         if let Some(callback) = self.external_paths_drag_callback.take() {
             callback(result, self);
         }

@@ -46,7 +46,12 @@ impl DirectoryWatcher {
                 cx.background_executor().timer(POLL_REFRESH_INTERVAL).await;
                 let should_continue = this
                     .update(cx, |explorer, cx| {
-                        if explorer.path() == path {
+                        if explorer.path() == path
+                            && (!explorer.is_trash_view()
+                                || (explorer.pane_visible
+                                    && !explorer.has_background_operation()
+                                    && explorer.directory_load_task.is_none()))
+                        {
                             explorer.reload_async_with_entry_metadata_resolution(cx);
                             cx.notify();
                         }

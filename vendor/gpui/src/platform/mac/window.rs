@@ -702,7 +702,7 @@ impl MacWindow {
             let () = msg_send![
                 native_window,
                 registerForDraggedTypes:
-                    NSArray::arrayWithObject(nil, NSFilenamesPboardType)
+                    NSArray::arrayWithObjects(nil, &[NSFilenamesPboardType, ns_string("dev.gpui.internal-drag")])
             ];
             let () = msg_send![
                 native_window,
@@ -2507,12 +2507,19 @@ extern "C" fn dragging_entered(this: &Object, _: Sel, dragging_info: id) -> NSDr
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
     let paths = external_paths_from_event(dragging_info);
+    let internal = paths
+        .as_ref()
+        .is_some_and(|paths| paths.internal_token().is_some());
     if let Some(event) =
         paths.map(|paths| PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }))
         && send_new_event(&window_state, event)
     {
         window_state.lock().external_files_dragged = true;
-        return NSDragOperationCopy;
+        return if internal {
+            NSDragOperationMove
+        } else {
+            NSDragOperationCopy
+        };
     }
     NSDragOperationNone
 }
@@ -2524,7 +2531,13 @@ extern "C" fn dragging_updated(this: &Object, _: Sel, dragging_info: id) -> NSDr
         &window_state,
         PlatformInput::FileDrop(FileDropEvent::Pending { position }),
     ) {
-        NSDragOperationCopy
+        if external_paths_from_event(dragging_info)
+            .is_some_and(|paths| paths.internal_token().is_some())
+        {
+            NSDragOperationMove
+        } else {
+            NSDragOperationCopy
+        }
     } else {
         NSDragOperationNone
     }
@@ -2552,6 +2565,15 @@ extern "C" fn perform_drag_operation(this: &Object, _: Sel, dragging_info: id) -
 fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths> {
     let mut paths = SmallVec::<[PathBuf; 2]>::new();
     let pasteboard: id = unsafe { msg_send![dragging_info, draggingPasteboard] };
+    let internal: id =
+        unsafe { msg_send![pasteboard, stringForType: ns_string("dev.gpui.internal-drag")] };
+    if internal != nil {
+        let token = unsafe { CStr::from_ptr(NSString::UTF8String(internal)) }
+            .to_str()
+            .ok()?;
+        uuid::Uuid::parse_str(token).ok()?;
+        return Some(ExternalPaths::from_internal_token(token.into()));
+    }
     let filenames = unsafe { NSPasteboard::propertyListForType(pasteboard, NSFilenamesPboardType) };
     if filenames == nil {
         return None;
@@ -2576,6 +2598,21 @@ fn start_macos_external_paths_drag(
         let window_state = get_window_state(&*native_view);
         window_state.lock().external_paths_drag_operations = paths.operations();
 
+        if let Some(token) = paths.internal_token() {
+            let writer: id = msg_send![class!(NSPasteboardItem), new];
+            let _: BOOL = msg_send![writer, setString: ns_string(token) forType: ns_string("dev.gpui.internal-drag")];
+            let item: id = msg_send![class!(NSDraggingItem), alloc];
+            let item: id = msg_send![item, initWithPasteboardWriter: writer];
+            let _: () = msg_send![writer, release];
+            if item != nil {
+                let image: id = msg_send![class!(NSImage), alloc];
+                let image: id = msg_send![image, initWithSize: NSSize::new(32., 32.)];
+                let _: () = msg_send![item, setDraggingFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(32., 32.)) contents: image];
+                let _: () = msg_send![image, release];
+                let item: id = msg_send![item, autorelease];
+                dragging_items.push(item);
+            }
+        }
         for path in paths.paths() {
             let Some(path) = path.to_str().filter(|path| !path.is_empty()) else {
                 continue;

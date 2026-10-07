@@ -572,6 +572,9 @@ impl ExplorerView {
     }
 
     pub(super) fn address_text_for_path(&self, path: &Path) -> String {
+        if super::trash::is_root(path) {
+            return super::trash::ADDRESS.into();
+        }
         if let Some(address) = crate::explorer::archive_fs::display_address(path) {
             return address;
         }
@@ -927,6 +930,11 @@ fn resolve_address_input_with_env(
     env_var: impl FnMut(&str) -> Option<OsString>,
 ) -> Result<PathBuf, String> {
     let cleaned = cleaned_address_input(input);
+    if super::trash::is_root(Path::new(&cleaned))
+        || cleaned.eq_ignore_ascii_case(super::trash::label())
+    {
+        return Ok(super::trash::root());
+    }
     if cleaned.starts_with("sftp://") {
         return super::remote_fs::RemoteLocation::parse(&cleaned).map(|l| l.provider_path());
     }

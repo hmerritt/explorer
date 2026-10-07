@@ -1739,6 +1739,9 @@ pub(super) fn load_entries(
     visibility: impl Into<EntryVisibility>,
 ) -> std::io::Result<Vec<FileEntry>> {
     let visibility = visibility.into();
+    if super::trash::is_root(path) {
+        return super::trash::list_entries();
+    }
     if super::remote_fs::is_remote(path) {
         return super::remote_fs::list_dir(path, visibility);
     }
@@ -3369,6 +3372,7 @@ fn prepare_file_operation(
     })
 }
 
+#[cfg(test)]
 pub(super) fn trash_paths(paths: &[PathBuf]) -> Result<(), String> {
     let _cache_invalidation =
         crate::explorer::remote_directory_cache::DirectoryMutation::new(paths.iter().cloned());
@@ -3376,8 +3380,14 @@ pub(super) fn trash_paths(paths: &[PathBuf]) -> Result<(), String> {
         return Err("No items were selected to delete.".to_owned());
     }
 
-    trash::delete_all(paths)
-        .map_err(|error| format!("Could not move selected items to the Recycle Bin: {error}"))
+    super::trash::trash_paths(paths)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "Could not move selected items to {}: {error}",
+                super::trash::label()
+            )
+        })
 }
 
 pub(super) fn remove_paths_permanently(paths: &[PathBuf]) -> Result<(), String> {

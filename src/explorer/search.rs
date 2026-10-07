@@ -185,7 +185,7 @@ impl ExplorerView {
     }
 
     pub(super) fn recursive_search_is_enabled(&self) -> bool {
-        self.search.recursive_enabled
+        self.search.recursive_enabled && !self.is_trash_view()
     }
 
     pub(super) fn recursive_search_is_working(&self) -> bool {
@@ -262,8 +262,22 @@ impl ExplorerView {
         }
         self.search.recursive_results_active = false;
         self.recursive_file_sort_override = None;
-        self.entries = filtered_entries(&self.all_entries, &self.search.content);
+        self.entries = if self.is_trash_view() {
+            let matcher = SearchMatcher::new(&self.search.content);
+            self.all_entries
+                .iter()
+                .filter(|entry| {
+                    matcher.matches(&entry.name)
+                        || super::trash::cached(&entry.path)
+                            .is_some_and(|item| matcher.matches(&item.original_location()))
+                })
+                .cloned()
+                .collect()
+        } else {
+            filtered_entries(&self.all_entries, &self.search.content)
+        };
         sort_entries(&mut self.entries, self.file_sort);
+        self.apply_trash_location_sort();
         self.filter_pending_deleted_entries();
         self.restore_selection_from_paths(selected_paths);
     }
@@ -273,6 +287,7 @@ impl ExplorerView {
         self.recursive_file_sort_override = None;
         self.entries = self.all_entries.clone();
         sort_entries(&mut self.entries, self.file_sort);
+        self.apply_trash_location_sort();
         self.filter_pending_deleted_entries();
         self.restore_selection_from_paths(selected_paths);
     }

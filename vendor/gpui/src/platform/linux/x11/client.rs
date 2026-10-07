@@ -147,6 +147,7 @@ pub struct Xdnd {
     other_window: xproto::Window,
     drag_type: u32,
     retrieved: bool,
+    internal: bool,
     position: Point<Pixels>,
 }
 
@@ -269,7 +270,7 @@ impl X11ClientStatePtr {
         window: &X11WindowStatePtr,
         paths: ExternalPaths,
     ) -> ExternalPathsDragStartResult {
-        if paths.is_empty() {
+        if paths.is_empty() && paths.internal_token().is_none() {
             return ExternalPathsDragStartResult::Failed;
         }
 
@@ -1110,6 +1111,11 @@ impl X11Client {
                         &state.atoms,
                         event.window,
                         state.xdnd_state.other_window,
+                        if state.xdnd_state.internal {
+                            state.atoms.XdndActionMove
+                        } else {
+                            state.atoms.XdndActionCopy
+                        },
                     );
                     let position = state.xdnd_state.position;
                     drop(state);
@@ -1153,9 +1159,11 @@ impl X11Client {
                         .filter_map(|path| Url::parse(path).log_err())
                         .filter_map(|url| url.to_file_path().log_err())
                         .collect();
+                    let internal = crate::ExternalPaths::from_internal_uri_list(file_list);
+                    state.xdnd_state.internal = internal.is_some();
                     let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                         position: state.xdnd_state.position,
-                        paths: crate::ExternalPaths::new(paths),
+                        paths: internal.unwrap_or_else(|| crate::ExternalPaths::new(paths)),
                     });
                     drop(state);
                     window.handle_input(input);
@@ -2659,12 +2667,13 @@ fn xdnd_send_finished(
     atoms: &XcbAtoms,
     source: xproto::Window,
     target: xproto::Window,
+    action: u32,
 ) {
     let message = ClientMessageEvent {
         format: 32,
         window: target,
         type_: atoms.XdndFinished,
-        data: ClientMessageData::from([source, 1, atoms.XdndActionCopy, 0, 0]),
+        data: ClientMessageData::from([source, 1, action, 0, 0]),
         sequence: 0,
         response_type: xproto::CLIENT_MESSAGE_EVENT,
     };

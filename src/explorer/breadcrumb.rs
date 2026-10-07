@@ -31,6 +31,12 @@ pub(super) fn path_breadcrumb_segments(
     path: &Path,
     filesystem_name: &str,
 ) -> Vec<BreadcrumbSegment> {
+    if super::trash::is_root(path) {
+        return vec![BreadcrumbSegment {
+            label: super::trash::label().into(),
+            target: super::trash::root(),
+        }];
+    }
     if let Some(segments) = super::remote_fs::breadcrumb_segments(path) {
         return segments
             .into_iter()

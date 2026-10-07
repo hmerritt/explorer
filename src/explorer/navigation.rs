@@ -40,6 +40,9 @@ pub(super) enum DirectoryOpenMode {
 }
 
 fn navigation_parent(path: &Path) -> Option<PathBuf> {
+    if super::trash::is_root(path) {
+        return None;
+    }
     if super::remote_fs::is_remote(path) {
         return super::remote_fs::parent(path);
     }
@@ -183,6 +186,15 @@ impl ExplorerView {
         rebuild_sidebar: bool,
         select_after_load: Vec<PathBuf>,
     ) {
+        let path = if super::trash::is_root(&path)
+            || super::filesystem::macos_bin_dir(super::filesystem::user_home_dir().as_deref())
+                .as_ref()
+                == Some(&path)
+        {
+            super::trash::root()
+        } else {
+            path
+        };
         if path != self.path {
             self.cancel_pending_remote_transfer_reveal();
         }
@@ -279,8 +291,11 @@ impl ExplorerView {
         }
         self.sidebar_group_view = None;
         self.path = path;
+        self.sync_trash_view_settings();
         self.clear_git_entry_status();
-        self.reset_view_mode_for_navigation();
+        if !self.is_trash_view() {
+            self.reset_view_mode_for_navigation();
+        }
         self.reset_search_for_navigation();
         self.clear_selection();
         self.read_error = None;
@@ -391,6 +406,7 @@ impl ExplorerView {
         self.clear_git_entry_status();
         self.scroll_to_top();
         self.sidebar_group_view = Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
+        self.sync_trash_view_settings();
         self.rebuild_sidebar_group_entries(&[]);
         self.schedule_sidebar_group_capacities(cx);
     }
@@ -541,7 +557,7 @@ impl ExplorerView {
 
         let retain_location = |location: &NavigationLocation| match location {
             NavigationLocation::Directory(path) => !path_is_same_or_descendant(path, ejected_root),
-            NavigationLocation::SidebarGroup(_) => true,
+            NavigationLocation::SidebarGroup(_) | NavigationLocation::Trash => true,
         };
         self.back_stack.retain(retain_location);
         self.forward_stack.retain(retain_location);
@@ -563,6 +579,9 @@ impl ExplorerView {
         if let Some(location) = self.back_stack.pop() {
             self.forward_stack.push(self.current_navigation_location());
             match location {
+                NavigationLocation::Trash => {
+                    self.navigate_to_directory(super::trash::root(), HistoryMode::Preserve)
+                }
                 NavigationLocation::Directory(path) => {
                     self.navigate_to_directory(path, HistoryMode::Preserve)
                 }
@@ -588,6 +607,9 @@ impl ExplorerView {
         if let Some(location) = self.forward_stack.pop() {
             self.back_stack.push(self.current_navigation_location());
             match location {
+                NavigationLocation::Trash => {
+                    self.navigate_to_directory(super::trash::root(), HistoryMode::Preserve)
+                }
                 NavigationLocation::Directory(path) => {
                     self.navigate_to_directory(path, HistoryMode::Preserve)
                 }
@@ -614,6 +636,11 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         match location {
+            NavigationLocation::Trash => self.navigate_to_directory_with_watcher(
+                super::trash::root(),
+                HistoryMode::Preserve,
+                cx,
+            ),
             NavigationLocation::Directory(path) => {
                 self.navigate_to_directory_with_watcher(path, HistoryMode::Preserve, cx)
             }
@@ -628,6 +655,7 @@ impl ExplorerView {
                 self.clear_operation_notice();
                 self.sidebar_group_view =
                     Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
+                self.sync_trash_view_settings();
                 self.rebuild_sidebar_group_entries(&[]);
                 self.schedule_sidebar_group_capacities(cx);
             }
@@ -768,6 +796,12 @@ impl ExplorerView {
         if click_count != 2 {
             return None;
         }
+        if super::trash::is_item(&entry.path) {
+            if let Some(cx) = cx {
+                self.open_bin_properties(std::slice::from_ref(&entry.path), cx);
+            }
+            return None;
+        }
 
         self.entry_click_sequence = None;
 
@@ -852,6 +886,9 @@ impl ExplorerView {
         modifiers: SelectionModifiers,
     ) -> Option<PathBuf> {
         self.cancel_pending_click_rename();
+        if super::trash::is_item(&entry.path) {
+            return None;
+        }
 
         let target = if crate::explorer::archive_fs::is_supported_archive_file(&entry.path) {
             match crate::explorer::archive_fs::mount(&entry.path) {
@@ -912,6 +949,12 @@ impl ExplorerView {
     ) -> Option<EntryAction> {
         let entry = self.focused_entry()?.clone();
         self.clear_operation_notice();
+        if super::trash::is_item(&entry.path) {
+            if let Some(cx) = cx {
+                self.open_bin_properties(std::slice::from_ref(&entry.path), cx);
+            }
+            return None;
+        }
 
         if crate::explorer::archive_fs::is_supported_archive_file(&entry.path) {
             Some(match directory_open_mode {

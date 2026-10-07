@@ -32,7 +32,7 @@ use crate::explorer::{
         prepare_copy_paths_to_directory_for_paste, prepare_extract_archives_to_directory,
         prepare_move_paths_to_directory, remove_existing_paths_permanently,
         remove_paths_permanently, remove_remote_paths_permanently_with_progress,
-        restore_replaced_file_from_copy_undo, trash_paths,
+        restore_replaced_file_from_copy_undo,
     },
     view::{
         ExplorerView, FileOperationState, PendingPermanentDelete, PendingTrash, RemoteDeleteState,
@@ -53,14 +53,17 @@ pub(super) enum FileOperationUndo {
     Copy { undo: FileOperationCopyUndo },
     Move { paths: Vec<FileOperationMove> },
     Trash(TrashUndo),
+    Recovery(super::trash::RecoveryUndo),
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum TrashUndo {
-    Restorable {
-        items: Vec<trash::TrashItem>,
+    Native {
+        ids: Vec<super::trash::TrashItemId>,
         original_paths: Vec<PathBuf>,
+        failures: Vec<String>,
     },
+    #[cfg(test)]
     Unsupported {
         original_paths: Vec<PathBuf>,
         reason: String,
@@ -172,6 +175,9 @@ impl ExplorerView {
     }
 
     pub(super) fn copy_selected_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        if self.is_trash_view() {
+            return;
+        }
         let selected_paths = self.selected_paths();
         if selected_paths
             .iter()
@@ -303,6 +309,24 @@ impl ExplorerView {
     }
 
     fn paste_file_clipboard(&mut self, clipboard: FileClipboard, cx: &mut Context<Self>) {
+        if clipboard.paths.iter().any(|p| super::trash::is_item(p)) {
+            if clipboard.operation == FileClipboardOperation::Cut
+                && clipboard.paths.iter().all(|p| super::trash::is_item(p))
+            {
+                self.prepare_bin_recovery(
+                    super::trash::RecoveryRequest {
+                        ids: super::trash::ids(&clipboard.paths),
+                        directory: Some(self.path.clone()),
+                    },
+                    cx,
+                );
+            } else {
+                self.set_error_notice(
+                    "Bin items can only be recovered with Cut and Paste.".to_owned(),
+                );
+            }
+            return;
+        }
         if super::remote_fs::is_remote(&self.path)
             || clipboard
                 .paths
@@ -497,6 +521,10 @@ impl ExplorerView {
     }
 
     pub(super) fn trash_selected_paths(&mut self, cx: &mut Context<Self>) {
+        if self.is_trash_view() {
+            self.request_bin_delete(cx);
+            return;
+        }
         if self.is_sidebar_group_view()
             || !crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path)
         {
@@ -620,13 +648,26 @@ impl ExplorerView {
 
         match result {
             Ok(trash_undo) => {
+                let (completed_paths, failures) = match &trash_undo {
+                    Some(FileOperationUndo::Trash(TrashUndo::Native {
+                        original_paths,
+                        failures,
+                        ..
+                    })) => (original_paths.clone(), failures.clone()),
+                    _ => (paths.clone(), Vec::new()),
+                };
                 self.push_file_operation_undo(trash_undo);
-                self.remove_cut_paths(&paths);
+                self.remove_cut_paths(&completed_paths);
                 self.reload_after_successful_delete(selection_after_delete, cx);
-                self.clear_operation_notice();
+                if failures.is_empty() {
+                    self.clear_operation_notice();
+                } else {
+                    self.set_error_notice(failures.join("\n"));
+                }
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
+                self.emit_filesystem_changed(cx);
                 if self.path == operation_path {
                     self.reload_after_failed_delete(paths, cx);
                 }
@@ -637,6 +678,10 @@ impl ExplorerView {
     }
 
     pub(super) fn request_permanent_delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.is_trash_view() {
+            self.request_bin_delete(cx);
+            return;
+        }
         if self.is_sidebar_group_view()
             || !crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path)
         {
@@ -851,6 +896,11 @@ impl ExplorerView {
         result: ExternalPathsDragResult,
         cx: &mut Context<Self>,
     ) {
+        // Native handoff only transports the private token. Recovery owns source
+        // cleanup and clipboard reconciliation, even when the OS reports a move.
+        if source_paths.iter().any(|path| super::trash::is_item(path)) {
+            return;
+        }
         let ExternalPathsDragResult::Completed {
             operation,
             cleanup_source,
@@ -1190,7 +1240,7 @@ impl ExplorerView {
         }
     }
 
-    fn push_file_operation_undo(&mut self, undo: Option<FileOperationUndo>) {
+    pub(super) fn push_file_operation_undo(&mut self, undo: Option<FileOperationUndo>) {
         let Some(undo) = undo else {
             return;
         };
@@ -1203,6 +1253,24 @@ impl ExplorerView {
     }
 
     pub(super) fn undo_file_operation(&mut self, cx: &mut Context<Self>) {
+        if self.has_background_operation() {
+            return;
+        }
+        if let Some(FileOperationUndo::Trash(TrashUndo::Native {
+            ids,
+            original_paths,
+            ..
+        })) = self.file_operation_undo_stack.last().cloned()
+        {
+            self.undo_bin_delete(ids, original_paths, cx);
+            return;
+        }
+        if let Some(FileOperationUndo::Recovery(undo)) =
+            self.file_operation_undo_stack.last().cloned()
+        {
+            self.undo_bin_recovery(undo, cx);
+            return;
+        }
         let Some(undo) = self.file_operation_undo_stack.last().cloned() else {
             return;
         };
@@ -1242,12 +1310,16 @@ impl ExplorerView {
                 Ok(UndoSelection::Paths(restored_paths))
             }
             FileOperationUndo::Trash(trash) => undo_trash_paths(trash).map(UndoSelection::Paths),
+            FileOperationUndo::Recovery(_) => unreachable!("recovery undo runs in the background"),
         }
     }
 }
 
 impl Drop for ExplorerView {
     fn drop(&mut self) {
+        if let Some(operation) = &self.trash_operation {
+            operation.cancel.store(true, Ordering::Relaxed);
+        }
         for undo in self.file_operation_undo_stack.drain(..) {
             cleanup_file_operation_undo(undo);
         }
@@ -1437,48 +1509,43 @@ fn preflight_move_undo(paths: &[FileOperationMove]) -> Result<(), String> {
 }
 
 fn run_trash_operation(paths: Vec<PathBuf>) -> Result<Option<FileOperationUndo>, String> {
-    run_trash_worker(move || {
-        let trash_undo = TrashUndoCapture::before_delete(&paths);
-        trash_paths(&paths)?;
-        Ok(trash_undo.after_delete())
-    })?
-}
-
-#[cfg(target_os = "windows")]
-fn run_trash_worker<T, F>(worker: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    std::thread::Builder::new()
-        .name("explorer-trash".to_owned())
-        .spawn(worker)
-        .map_err(|error| format!("Could not start the Recycle Bin worker: {error}"))?
-        .join()
-        .map_err(|_| "The Recycle Bin worker stopped unexpectedly.".to_owned())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_trash_worker<T, F>(worker: F) -> Result<T, String>
-where
-    F: FnOnce() -> T,
-{
-    Ok(worker())
+    let outcome = super::trash::trash_paths_batch(&paths)?;
+    if outcome.paths.is_empty() && !outcome.failures.is_empty() {
+        return Err(outcome.failures.join("\n"));
+    }
+    Ok(Some(FileOperationUndo::Trash(TrashUndo::Native {
+        ids: outcome.ids,
+        original_paths: outcome.paths,
+        failures: outcome.failures,
+    })))
 }
 
 fn undo_trash_paths(trash: TrashUndo) -> Result<Vec<PathBuf>, String> {
     match trash {
-        TrashUndo::Restorable {
-            items,
+        TrashUndo::Native {
+            ids,
             original_paths,
+            ..
         } => {
-            let _cache_invalidation =
-                crate::explorer::remote_directory_cache::DirectoryMutation::new(
-                    original_paths.iter().cloned(),
-                );
-            restore_trash_items(items)?;
+            let result = super::trash::recover(
+                super::trash::RecoveryRequest {
+                    ids,
+                    directory: None,
+                },
+                super::trash::RecoveryChoice::Skip,
+                &AtomicBool::new(false),
+                |_, _, _| {},
+            );
+            super::trash::cleanup_undo(result.undo);
+            if !result.failures.is_empty() || !result.skipped.is_empty() {
+                return Err(format!(
+                    "Some items could not be restored. {}",
+                    result.failures.join("\n")
+                ));
+            }
             Ok(original_paths)
         }
+        #[cfg(test)]
         TrashUndo::Unsupported {
             original_paths,
             reason,
@@ -1486,137 +1553,6 @@ fn undo_trash_paths(trash: TrashUndo) -> Result<Vec<PathBuf>, String> {
             let _ = original_paths;
             Err(reason)
         }
-    }
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-fn restore_trash_items(items: Vec<trash::TrashItem>) -> Result<(), String> {
-    trash::os_limited::restore_all(items)
-        .map_err(|error| format!("Could not restore deleted items from the Recycle Bin: {error}"))
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn restore_trash_items(items: Vec<trash::TrashItem>) -> Result<(), String> {
-    let _ = items;
-    Err("Undo for Trash delete is not supported on this platform yet.".to_owned())
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-struct TrashUndoCapture {
-    original_paths: Vec<PathBuf>,
-    original_keys: BTreeSet<String>,
-    before_ids: Result<BTreeSet<std::ffi::OsString>, String>,
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-impl TrashUndoCapture {
-    fn before_delete(paths: &[PathBuf]) -> Self {
-        let original_paths = paths.to_vec();
-        let original_keys = trash_undo_path_keys(paths);
-        let before_ids = trash::os_limited::list()
-            .map(|items| items.into_iter().map(|item| item.id).collect())
-            .map_err(|error| format!("Could not inspect the Recycle Bin for undo: {error}"));
-        Self {
-            original_paths,
-            original_keys,
-            before_ids,
-        }
-    }
-
-    fn after_delete(self) -> Option<FileOperationUndo> {
-        let trash = match self.before_ids {
-            Ok(before_ids) => match trash::os_limited::list() {
-                Ok(items) => restorable_trash_undo_from_items(
-                    self.original_paths,
-                    self.original_keys,
-                    before_ids,
-                    items,
-                ),
-                Err(error) => TrashUndo::Unsupported {
-                    original_paths: self.original_paths,
-                    reason: format!("Could not inspect the Recycle Bin for undo: {error}"),
-                },
-            },
-            Err(reason) => TrashUndo::Unsupported {
-                original_paths: self.original_paths,
-                reason,
-            },
-        };
-        Some(FileOperationUndo::Trash(trash))
-    }
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-fn restorable_trash_undo_from_items(
-    original_paths: Vec<PathBuf>,
-    original_keys: BTreeSet<String>,
-    before_ids: BTreeSet<std::ffi::OsString>,
-    items: Vec<trash::TrashItem>,
-) -> TrashUndo {
-    let items = items
-        .into_iter()
-        .filter(|item| {
-            original_keys.contains(&trash_undo_path_key(&item.original_path()))
-                && !before_ids.contains(&item.id)
-        })
-        .collect::<Vec<_>>();
-
-    if items.is_empty() {
-        TrashUndo::Unsupported {
-            original_paths,
-            reason: "Could not find deleted items in the Recycle Bin for undo.".to_owned(),
-        }
-    } else {
-        TrashUndo::Restorable {
-            items,
-            original_paths,
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-struct TrashUndoCapture {
-    original_paths: Vec<PathBuf>,
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-impl TrashUndoCapture {
-    fn before_delete(paths: &[PathBuf]) -> Self {
-        Self {
-            original_paths: paths.to_vec(),
-        }
-    }
-
-    fn after_delete(self) -> Option<FileOperationUndo> {
-        Some(FileOperationUndo::Trash(TrashUndo::Unsupported {
-            original_paths: self.original_paths,
-            reason: "Undo for Trash delete is not supported on this platform yet.".to_owned(),
-        }))
-    }
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-fn trash_undo_path_keys(paths: &[PathBuf]) -> BTreeSet<String> {
-    paths
-        .iter()
-        .map(|path| {
-            fs::canonicalize(path)
-                .unwrap_or_else(|_| path.clone())
-                .as_path()
-                .to_owned()
-        })
-        .map(|path| trash_undo_path_key(&path))
-        .collect()
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-fn trash_undo_path_key(path: &Path) -> String {
-    if cfg!(target_os = "windows") {
-        let key = path.to_string_lossy().replace('/', "\\");
-        let key = key.strip_prefix(r"\\?\").unwrap_or(&key);
-        key.trim_end_matches('\\').to_ascii_lowercase()
-    } else {
-        path.to_string_lossy().into_owned()
     }
 }
 
@@ -2437,7 +2373,7 @@ mod tests {
             assert!(
                 view.operation_notice
                     .as_ref()
-                    .is_some_and(|notice| notice.text.contains("Recycle Bin"))
+                    .is_some_and(|notice| notice.text.contains(super::super::trash::label()))
             );
         });
     }
@@ -2951,89 +2887,6 @@ mod tests {
             .expect("undo compression");
         assert!(!archive.exists());
         assert!(source.exists());
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    #[test]
-    fn trash_undo_capture_selects_new_matching_trash_items() {
-        let temp = TempDir::new();
-        let deleted = temp.path().join("deleted.txt");
-        let before_ids = std::collections::BTreeSet::from([std::ffi::OsString::from("before")]);
-        let original_keys = trash_undo_path_keys(std::slice::from_ref(&deleted));
-        let items = vec![
-            trash::TrashItem {
-                id: std::ffi::OsString::from("before"),
-                name: std::ffi::OsString::from("deleted.txt"),
-                original_parent: temp.path().to_path_buf(),
-                time_deleted: 1,
-            },
-            trash::TrashItem {
-                id: std::ffi::OsString::from("after"),
-                name: std::ffi::OsString::from("deleted.txt"),
-                original_parent: temp.path().to_path_buf(),
-                time_deleted: 2,
-            },
-        ];
-
-        let undo =
-            restorable_trash_undo_from_items(vec![deleted], original_keys, before_ids, items);
-
-        match undo {
-            TrashUndo::Restorable { items, .. } => {
-                assert_eq!(items.len(), 1);
-                assert_eq!(items[0].id, std::ffi::OsString::from("after"));
-            }
-            TrashUndo::Unsupported { reason, .. } => {
-                panic!("expected restorable trash undo, got {reason}");
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_trash_worker_uses_fresh_com_apartment_when_caller_is_mta() {
-        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-
-        let worker_result = std::thread::spawn(|| {
-            assert!(
-                unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok(),
-                "initialize MTA caller thread"
-            );
-
-            let result = run_trash_worker(|| {
-                trash::os_limited::is_empty()
-                    .map_err(|error| format!("Could not inspect the Recycle Bin: {error}"))
-            });
-
-            unsafe { CoUninitialize() };
-            result
-        })
-        .join()
-        .expect("MTA caller thread should not panic");
-
-        worker_result
-            .expect("start dedicated trash worker")
-            .expect("query Recycle Bin from dedicated trash worker");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_trash_undo_capture_records_unsupported_entry() {
-        let path = PathBuf::from("/tmp/deleted.txt");
-        let undo = TrashUndoCapture::before_delete(std::slice::from_ref(&path))
-            .after_delete()
-            .expect("undo record");
-
-        match undo {
-            FileOperationUndo::Trash(TrashUndo::Unsupported {
-                original_paths,
-                reason,
-            }) => {
-                assert_eq!(original_paths, vec![path]);
-                assert!(reason.contains("not supported"));
-            }
-            _ => panic!("expected unsupported trash undo"),
-        }
     }
 
     #[gpui::test]

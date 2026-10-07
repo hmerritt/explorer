@@ -48,6 +48,9 @@ impl ExplorerFs {
     }
 
     pub(super) fn can_mutate(&self, path: &Path) -> bool {
+        if super::trash::is_root(path) || super::trash::is_item(path) {
+            return false;
+        }
         match self.classify(path) {
             ExplorerLocation::Remote(_) => true,
             ExplorerLocation::Local(_) => true,
@@ -66,6 +69,12 @@ impl ExplorerFs {
     }
 
     pub(super) fn exists(&self, path: &Path) -> Result<bool, String> {
+        if super::trash::is_root(path) {
+            return Ok(true);
+        }
+        if super::trash::is_item(path) {
+            return Ok(super::trash::cached(path).is_some());
+        }
         match self.classify(path) {
             ExplorerLocation::Remote(_) => super::remote_fs::exists(path),
             ExplorerLocation::Local(_) => Ok(path.exists()),
@@ -77,6 +86,12 @@ impl ExplorerFs {
     }
 
     pub(super) fn is_dir(&self, path: &Path) -> Result<bool, String> {
+        if super::trash::is_root(path) {
+            return Ok(true);
+        }
+        if super::trash::is_item(path) {
+            return Ok(false);
+        }
         match self.classify(path) {
             ExplorerLocation::Remote(_) => super::remote_fs::cached_is_dir(path),
             ExplorerLocation::Local(_) => Ok(path.is_dir()),
@@ -91,6 +106,9 @@ impl ExplorerFs {
         path: &Path,
         visibility: EntryVisibility,
     ) -> io::Result<Vec<FileEntry>> {
+        if super::trash::is_root(path) {
+            return super::trash::list_entries();
+        }
         match self.classify(path) {
             ExplorerLocation::Remote(_) => super::remote_fs::list_dir(path, visibility),
             ExplorerLocation::Local(_) => list_local_dir(path, visibility),
@@ -153,6 +171,9 @@ impl ExplorerFs {
     }
 
     pub(super) fn refresh_driver(&self, path: &Path) -> ExplorerRefreshDriver {
+        if super::trash::is_root(path) {
+            return ExplorerRefreshDriver::Poll;
+        }
         match self.classify(path) {
             ExplorerLocation::Remote(_) => ExplorerRefreshDriver::Poll,
             ExplorerLocation::Local(_) => ExplorerRefreshDriver::Notify,

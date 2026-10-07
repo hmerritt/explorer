@@ -305,6 +305,11 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_trash_view() {
+            self.open_selected_properties(window, cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = self.activate_focused_entry_with_watcher(false, cx) {
             self.perform_entry_action(action, window, cx);
         }
@@ -317,6 +322,11 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_trash_view() {
+            self.open_selected_properties(window, cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = self.activate_focused_entry_in_new_tab_with_watcher(false, cx) {
             self.perform_entry_action(action, window, cx);
         }
@@ -348,6 +358,11 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_trash_view() {
+            self.open_selected_properties(window, cx);
+            cx.notify();
+            return;
+        }
         if crate::explorer::archive_fs::is_archive_path(&self.path)
             && self.selection.selected_indices.len() > 1
         {
@@ -367,6 +382,11 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_trash_view() {
+            self.open_selected_properties(window, cx);
+            cx.notify();
+            return;
+        }
         if let Some(action) = self.activate_focused_entry_in_new_tab_with_watcher(true, cx) {
             self.perform_entry_action(action, window, cx);
         }

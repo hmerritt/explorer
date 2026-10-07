@@ -539,6 +539,9 @@ impl ExplorerView {
     }
 
     pub(super) fn can_start_selected_rename(&self) -> bool {
+        if self.is_trash_view() {
+            return false;
+        }
         if self.is_sidebar_group_view() {
             return false;
         }
@@ -762,6 +765,9 @@ impl ExplorerView {
     }
 
     pub(super) fn start_rename_for_path_without_focus(&mut self, path: &Path) -> bool {
+        if super::trash::is_item(path) {
+            return false;
+        }
         self.cancel_pending_click_rename();
 
         let Some(entry) = self

@@ -2,8 +2,8 @@
 
 ## 2
 
-- Site
-    - https://getartcraft.com/apps/photocraft
+- macOS tabs cannot be dragged into a split view, dragging a tab currently drags the entire window
+- OS interop for windows currently passes file/folder paths with forward slashes. Not all programs can handle this and it can break.
 
 ## 3
 
@@ -22,9 +22,6 @@ Major remaining Windows Explorer parity areas:
 
 - GUI Settings / Preferences
   The app already has a lot of power in JSON settings: view mode, hidden files, extensions, sidebar pins, WSL visibility, columns, native icons, context menu commands. A real settings window would make existing functionality discoverable immediately. This is probably the best 80/20 feature.
-
-- First-Class Recycle Bin / Trash
-  Delete-to-trash and some undo behavior exist, but users need a browsable Trash/Recycle Bin location with restore, empty, and permanent delete workflows. This strongly improves trust around destructive actions.
 
 - File Operation Polish
   The copy engine is already strong, including resumable copy and cancellation. The missing 80/20 layer is UX: queue multiple operations, pause/resume, ETA, clearer source/destination details, and richer conflict handling than global Replace/Skip.

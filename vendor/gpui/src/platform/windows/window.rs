@@ -1001,7 +1001,7 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
-        if paths.paths().is_empty() {
+        if paths.paths().is_empty() && paths.internal_token().is_none() {
             return ExternalPathsDragStartResult::Failed;
         }
 
@@ -1080,6 +1080,10 @@ impl PlatformWindow for WindowsWindow {
     }
 }
 
+static INTERNAL_DRAG_FORMAT: LazyLock<u16> = LazyLock::new(|| {
+    let text = HSTRING::from("GPUI Internal Drag");
+    register_shell_clipboard_format(PCWSTR(text.as_ptr()))
+});
 static PREFERRED_DROPEFFECT_FORMAT: LazyLock<u16> =
     LazyLock::new(|| register_shell_clipboard_format(CFSTR_PREFERREDDROPEFFECT));
 static PERFORMED_DROPEFFECT_FORMAT: LazyLock<u16> =
@@ -1130,6 +1134,7 @@ impl IDropSource_Impl for WindowsFileDragSource_Impl {
 #[implement(IDataObject)]
 struct WindowsFileDataObject {
     paths: Vec<PathBuf>,
+    internal_token: Option<String>,
     preferred_effect: DROPEFFECT,
     performed_effect: Rc<Cell<DROPEFFECT>>,
     logical_performed_effect: Rc<Cell<DROPEFFECT>>,
@@ -1151,7 +1156,10 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
         let format = unsafe { pformatetcin.as_ref() }
             .map(|format| format.cfFormat)
             .ok_or_else(|| windows::core::Error::from(DV_E_FORMATETC))?;
-        let hglobal = if format == CF_HDROP.0 {
+        let hglobal = if format == *INTERNAL_DRAG_FORMAT {
+            let token = self.internal_token.as_ref().ok_or(DV_E_FORMATETC)?;
+            allocate_global_payload(token.as_bytes())?
+        } else if format == CF_HDROP.0 {
             allocate_hdrop(self.paths.as_slice())?
         } else if format == *PREFERRED_DROPEFFECT_FORMAT {
             allocate_dropeffect(self.preferred_effect)?
@@ -1190,17 +1198,16 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
     }
 
     fn QueryGetData(&self, pformatetc: *const FORMATETC) -> windows::core::HRESULT {
-        let hdrop_supported = is_hdrop_format(pformatetc)
-            && {
-                #[cfg(test)]
-                {
-                    self.test_offer_hdrop
-                }
-                #[cfg(not(test))]
-                {
-                    true
-                }
-            };
+        let hdrop_supported = self.internal_token.is_none() && is_hdrop_format(pformatetc) && {
+            #[cfg(test)]
+            {
+                self.test_offer_hdrop
+            }
+            #[cfg(not(test))]
+            {
+                true
+            }
+        };
         #[cfg(test)]
         let shell_id_list_supported = self.test_shell_id_list.is_some()
             && is_clipboard_hglobal_format(pformatetc, *TEST_SHELL_ID_LIST_FORMAT);
@@ -1208,6 +1215,8 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
         let shell_id_list_supported = false;
 
         if hdrop_supported
+            || (self.internal_token.is_some()
+                && is_clipboard_hglobal_format(pformatetc, *INTERNAL_DRAG_FORMAT))
             || shell_id_list_supported
             || is_dropeffect_format(pformatetc, *PREFERRED_DROPEFFECT_FORMAT)
         {
@@ -1251,7 +1260,11 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
 
     fn EnumFormatEtc(&self, dwdirection: u32) -> windows::core::Result<IEnumFORMATETC> {
         if dwdirection == DATADIR_GET.0 as u32 {
-            Ok(WindowsFormatEtcEnumerator::new().into())
+            let mut formats = WindowsFormatEtcEnumerator::new();
+            if self.internal_token.is_some() {
+                formats.first_format = *INTERNAL_DRAG_FORMAT;
+            }
+            Ok(formats.into())
         } else {
             Err(E_NOTIMPL.into())
         }
@@ -1278,12 +1291,14 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
 #[implement(IEnumFORMATETC)]
 struct WindowsFormatEtcEnumerator {
     next_index: Cell<usize>,
+    first_format: u16,
 }
 
 impl WindowsFormatEtcEnumerator {
     fn new() -> Self {
         Self {
             next_index: Cell::new(0),
+            first_format: CF_HDROP.0,
         }
     }
 }
@@ -1298,7 +1313,7 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
         let mut fetched = 0;
         while fetched < celt && self.next_index.get() < 2 {
             let format = match self.next_index.get() {
-                0 => hdrop_format_etc(),
+                0 => dropeffect_format_etc(self.first_format),
                 1 => dropeffect_format_etc(*PREFERRED_DROPEFFECT_FORMAT),
                 _ => unreachable!(),
             };
@@ -1335,12 +1350,17 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
     fn Clone(&self) -> windows::core::Result<IEnumFORMATETC> {
         Ok(WindowsFormatEtcEnumerator {
             next_index: Cell::new(self.next_index.get()),
+            first_format: self.first_format,
         }
         .into())
     }
 }
 
-fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> ExternalPathsDragStartResult {
+fn start_windows_external_paths_drag(
+    hwnd: HWND,
+    paths: ExternalPaths,
+) -> ExternalPathsDragStartResult {
+    let internal_token = paths.internal_token().map(str::to_owned);
     let operations = paths.operations();
     let preferred_effect = preferred_dropeffect_for_operations(operations);
     let allowed_effects = allowed_dropeffects_for_operations(operations);
@@ -1351,7 +1371,7 @@ fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> Extern
         .cloned()
         .collect::<Vec<_>>();
 
-    if paths.is_empty() {
+    if paths.is_empty() && internal_token.is_none() {
         return ExternalPathsDragStartResult::Failed;
     }
 
@@ -1360,6 +1380,7 @@ fn start_windows_external_paths_drag(hwnd: HWND, paths: ExternalPaths) -> Extern
     let result = unsafe {
         let data_object: IDataObject = WindowsFileDataObject {
             paths,
+            internal_token,
             preferred_effect,
             performed_effect: performed_effect.clone(),
             logical_performed_effect: logical_performed_effect.clone(),
@@ -1666,6 +1687,34 @@ fn shell_item_paths_from_data_object(
 }
 
 fn external_paths_from_data_object(data_object: &IDataObject) -> Option<ExternalPaths> {
+    let format = dropeffect_format_etc(*INTERNAL_DRAG_FORMAT);
+    if unsafe { data_object.QueryGetData(&format) } == S_OK {
+        let mut medium = unsafe { data_object.GetData(&format) }.ok()?;
+        let token = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+            unsafe {
+                let global = medium.u.hGlobal;
+                let len = GlobalSize(global);
+                let data = GlobalLock(global);
+                let token = if !data.is_null() && len <= 128 {
+                    std::str::from_utf8(std::slice::from_raw_parts(data.cast::<u8>(), len))
+                        .ok()
+                        .map(str::to_owned)
+                } else {
+                    None
+                };
+                if !data.is_null() {
+                    let _ = GlobalUnlock(global);
+                }
+                token
+            }
+        } else {
+            None
+        };
+        unsafe { ReleaseStgMedium(&mut medium) };
+        let token = token?;
+        uuid::Uuid::parse_str(&token).ok()?;
+        return Some(ExternalPaths::from_internal_token(token));
+    }
     match hdrop_paths_from_data_object(data_object) {
         HdropPaths::Paths(paths) => Some(ExternalPaths::new(paths)),
         HdropPaths::Unavailable => {
@@ -1716,9 +1765,22 @@ fn complete_active_windows_external_drop(
 }
 
 #[implement(IDropTarget)]
-struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
+struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>, Cell<bool>);
 
 impl WindowsDragDropHandler {
+    fn drop_effect(&self) -> DROPEFFECT {
+        if self.1.get() {
+            let modifiers = current_modifiers();
+            if modifiers.control || modifiers.alt {
+                DROPEFFECT_NONE
+            } else {
+                DROPEFFECT_MOVE
+            }
+        } else {
+            DROPEFFECT_COPY
+        }
+    }
+
     fn handle_drag_drop(&self, input: PlatformInput) {
         let mut lock = self.0.state.borrow_mut();
         if let Some(mut func) = lock.callbacks.input.take() {
@@ -1739,10 +1801,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         unsafe {
+            self.1.set(false);
             let idata_obj = pdataobj.ok()?;
             let cursor_position = POINT { x: pt.x, y: pt.y };
             if let Some(paths) = external_paths_from_data_object(idata_obj) {
-                *pdweffect = DROPEFFECT_COPY;
+                self.1.set(paths.internal_token().is_some());
+                *pdweffect = self.drop_effect();
                 let mut cursor_position = cursor_position;
                 ScreenToClient(self.0.hwnd, &mut cursor_position)
                     .ok()
@@ -1776,7 +1840,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     ) -> windows::core::Result<()> {
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
-            *pdweffect = DROPEFFECT_COPY;
+            *pdweffect = self.drop_effect();
             self.0
                 .drop_target_helper
                 .DragOver(&cursor_position, *pdweffect)
@@ -1817,7 +1881,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     ) -> windows::core::Result<()> {
         let idata_obj = pdataobj.ok()?;
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
-        let default_effect = DROPEFFECT_COPY;
+        let default_effect = self.drop_effect();
         unsafe {
             *pdweffect = default_effect;
             self.0
@@ -1962,6 +2026,7 @@ mod external_paths_drag_tests {
         let test_offer_hdrop = hdrop_paths.is_some();
         WindowsFileDataObject {
             paths: hdrop_paths.unwrap_or_default(),
+            internal_token: None,
             preferred_effect: DROPEFFECT_COPY,
             performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
@@ -1975,6 +2040,7 @@ mod external_paths_drag_tests {
     fn malformed_test_data_object() -> IDataObject {
         WindowsFileDataObject {
             paths: Vec::new(),
+            internal_token: None,
             preferred_effect: DROPEFFECT_COPY,
             performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
@@ -2488,7 +2554,7 @@ fn get_module_handle() -> HMODULE {
 
 fn register_drag_drop(window: &Rc<WindowsWindowInner>) -> Result<()> {
     let window_handle = window.hwnd;
-    let handler = WindowsDragDropHandler(window.clone());
+    let handler = WindowsDragDropHandler(window.clone(), Cell::new(false));
     // The lifetime of `IDropTarget` is handled by Windows, it won't release until
     // we call `RevokeDragDrop`.
     // So, it's safe to drop it here.
