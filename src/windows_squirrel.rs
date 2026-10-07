@@ -250,7 +250,7 @@ pub(crate) fn run_update_variants(
     args: &[&str],
     timeout: Duration,
 ) -> io::Result<Output> {
-    let mut command = Command::new(update_exe);
+    let mut command = Command::new(crate::os_paths::native_path(update_exe));
     command
         .args(args)
         .stdout(Stdio::piped())

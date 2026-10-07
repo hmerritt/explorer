@@ -17,6 +17,29 @@ use windows::{
 
 use crate::*;
 
+/// Encode a filesystem path for Windows without losing non-Unicode OS data.
+/// This does not include a terminating nul; callers supply protocol framing.
+pub(crate) fn native_path_wide(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit == u16::from(b'/') {
+                u16::from(b'\\')
+            } else {
+                unit
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn native_path(path: &std::path::Path) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+
+    std::ffi::OsString::from_wide(&native_path_wide(path))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WindowsVersion {
     Win10,

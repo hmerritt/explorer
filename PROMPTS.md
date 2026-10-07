@@ -4,6 +4,7 @@
 
 - macOS tabs cannot be dragged into a split view, dragging a tab currently drags the entire window
 - OS interop for windows currently passes file/folder paths with forward slashes. Not all programs can handle this and it can break.
+- Deleting a file in Large Icons view with many files (that scrolls) will reset the scroll position. It should auto-select the previous item (or next in the case of a first item) and maintain the place
 
 ## 3
 

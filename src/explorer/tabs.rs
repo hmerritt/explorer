@@ -4350,7 +4350,11 @@ mod tests {
         let (temp, tabs, cx) = test_tabs_with_two_files(cx);
         let view = active_test_view(&tabs, cx);
         let path = temp.path().join("a.txt");
-        let expected = cx.read_entity(&view, |view, _| view.address_text_for_path(&path));
+        let expected = if cfg!(target_os = "windows") {
+            path.to_string_lossy().into_owned()
+        } else {
+            cx.read_entity(&view, |view, _| view.address_text_for_path(&path))
+        };
 
         right_click_entry_other_column(cx, "explorer-entry-0");
         click_selector(cx, "context-menu-entry-copy-path");
@@ -4427,7 +4431,11 @@ mod tests {
     fn current_folder_context_menu_copy_path_copies_current_folder_path(cx: &mut TestAppContext) {
         let (temp, tabs, cx) = test_tabs_with_two_files(cx);
         let view = active_test_view(&tabs, cx);
-        let expected = cx.read_entity(&view, |view, _| view.address_text_for_path(temp.path()));
+        let expected = if cfg!(target_os = "windows") {
+            temp.path().to_string_lossy().into_owned()
+        } else {
+            cx.read_entity(&view, |view, _| view.address_text_for_path(temp.path()))
+        };
         let second = cx
             .debug_bounds("explorer-entry-1")
             .expect("second entry bounds");

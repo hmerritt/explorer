@@ -41,18 +41,14 @@ fn create_cache_root_with(
 
 #[cfg(target_os = "windows")]
 fn mark_hidden(path: &Path) -> io::Result<()> {
-    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+    use std::os::windows::fs::MetadataExt;
     use windows::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW,
     };
     use windows::core::PCWSTR;
 
     let attributes = fs::metadata(path)?.file_attributes() | FILE_ATTRIBUTE_HIDDEN.0;
-    let wide_path = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let wide_path = crate::os_paths::native_path_wide(path);
     unsafe {
         SetFileAttributesW(
             PCWSTR(wide_path.as_ptr()),

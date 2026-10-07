@@ -189,13 +189,11 @@ fn shell_parsing_name(name: &OsStr) -> Vec<u16> {
     let mut wide: Vec<_> = name.encode_wide().collect();
     // Recycle Bin namespace descriptors are opaque. Only filesystem paths use
     // Windows separators and ordinary drive/UNC prefixes at the Shell boundary.
-    if Path::new(name).is_absolute() {
-        for unit in &mut wide {
-            if *unit == u16::from(b'/') {
-                *unit = u16::from(b'\\');
-            }
-        }
-        match Path::new(name).components().next() {
+    let native = crate::os_paths::native_path(Path::new(name));
+    let path = Path::new(&native);
+    if path.is_absolute() {
+        wide = native.encode_wide().collect();
+        match path.components().next() {
             Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
                 std::path::Prefix::VerbatimDisk(_) => {
                     wide.drain(..4);

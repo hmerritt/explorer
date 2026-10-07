@@ -148,14 +148,9 @@ pub(super) fn query_drive_capacities(paths: Vec<PathBuf>) -> HashMap<PathBuf, Dr
 
 #[cfg(target_os = "windows")]
 fn query_drive_capacity(path: &Path) -> Option<DriveCapacity> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::PCWSTR};
 
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let wide = crate::os_paths::native_path_wide(path);
     let mut available = 0u64;
     let mut total = 0u64;
     let mut free = 0u64;

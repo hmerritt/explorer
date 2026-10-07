@@ -364,7 +364,8 @@ fn spawn_video_hover_preview_ffmpeg(path: &Path, size: u32) -> Result<FfmpegChil
     if !path_may_have_video_metadata(path) {
         return Err("Path is not a recognized video.".to_owned());
     }
-    let mut command = FfmpegCommand::new_with_path(ffmpeg_executable_path());
+    let mut command =
+        FfmpegCommand::new_with_path(crate::os_paths::native_path(&ffmpeg_executable_path()));
     for arg in video_hover_preview_ffmpeg_args(path, size) {
         command.arg(arg);
     }
@@ -379,7 +380,7 @@ pub(super) fn video_hover_preview_ffmpeg_args(path: &Path, size: u32) -> Vec<OsS
         OsString::from("-1"),
         OsString::from("-re"),
         OsString::from("-i"),
-        path.as_os_str().to_owned(),
+        crate::os_paths::native_path(path),
         OsString::from("-map"),
         OsString::from("0:v:0"),
         OsString::from("-an"),

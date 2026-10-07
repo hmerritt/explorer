@@ -531,9 +531,7 @@ fn windows_volume_label(path: &Path) -> Option<String> {
     use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
     use windows::core::PCWSTR;
 
-    let root = path.display().to_string();
-    let mut encoded = root.encode_utf16().collect::<Vec<_>>();
-    encoded.push(0);
+    let encoded = crate::os_paths::native_path_wide(path);
 
     let mut volume_name = [0u16; 261];
     unsafe {
@@ -860,10 +858,9 @@ fn network_connection_request(
     let local_name = target
         .local_name
         .as_deref()
-        .map(OsStr::new)
-        .map(crate::explorer::windows_shell::null_terminated_wide);
-    let remote_name =
-        crate::explorer::windows_shell::null_terminated_wide(OsStr::new(&target.remote_name));
+        .map(Path::new)
+        .map(crate::os_paths::native_path_wide);
+    let remote_name = crate::os_paths::native_path_wide(Path::new(&target.remote_name));
 
     let mut resource = NETRESOURCEW {
         dwType: RESOURCETYPE_DISK,
@@ -1513,7 +1510,7 @@ fn windows_drive_type(path: &Path) -> Option<u32> {
     use windows::core::PCWSTR;
 
     let root = windows_drive_root(path)?;
-    let encoded = wide_null(&root);
+    let encoded = crate::os_paths::native_path_wide(Path::new(&root));
     Some(unsafe { GetDriveTypeW(PCWSTR(encoded.as_ptr())) })
 }
 
@@ -1558,7 +1555,7 @@ fn windows_drive_device_descriptor(path: &Path) -> Option<(u8, bool, i32)> {
 
     let root = windows_drive_root(path)?;
     let drive = root.trim_end_matches(['\\', '/']);
-    let encoded = wide_null(&format!(r"\\.\{drive}"));
+    let encoded = crate::os_paths::native_path_wide(Path::new(&format!(r"\\.\{drive}")));
     let handle = WindowsHandle(unsafe {
         CreateFileW(
             PCWSTR(encoded.as_ptr()),
@@ -6626,17 +6623,13 @@ pub(super) fn replace_destination_with_temp(
         return Err(error);
     }
 
-    use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
     use windows::core::PCWSTR;
 
     fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
+        crate::os_paths::native_path_wide(path)
     }
 
     let temp = wide(temp);
@@ -6971,10 +6964,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     fn set_windows_file_attributes(path: &Path, attributes: FILE_FLAGS_AND_ATTRIBUTES) {
-        use std::os::windows::ffi::OsStrExt;
-
-        let mut wide_path = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        wide_path.push(0);
+        let wide_path = crate::os_paths::native_path_wide(path);
         unsafe {
             SetFileAttributesW(PCWSTR(wide_path.as_ptr()), attributes)
                 .expect("set windows file attributes");

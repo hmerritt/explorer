@@ -112,7 +112,7 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn media_tool_is_installed(path: &Path) -> bool {
-    let mut command = Command::new(path);
+    let mut command = Command::new(crate::os_paths::native_path(path));
     command
         .arg("-version")
         .stdin(Stdio::null())
@@ -233,7 +233,7 @@ pub(super) fn ffprobe_scalar_value_label(value: &serde_json::Value) -> Option<St
 }
 
 pub(super) fn probe_video_duration_seconds(path: &Path) -> Result<f64, String> {
-    let mut command = Command::new(ffprobe_executable_path());
+    let mut command = Command::new(crate::os_paths::native_path(&ffprobe_executable_path()));
     command
         .arg("-v")
         .arg("error")
@@ -243,7 +243,7 @@ pub(super) fn probe_video_duration_seconds(path: &Path) -> Result<f64, String> {
         .arg("format=duration:stream=codec_type,duration")
         .arg("-of")
         .arg("json")
-        .arg(path)
+        .arg(crate::os_paths::native_path(path))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

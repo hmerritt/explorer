@@ -94,29 +94,19 @@ pub(super) fn null_terminated_wide(value: &OsStr) -> Vec<u16> {
 }
 
 fn null_terminated_shell_path(path: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-
-    path.as_os_str()
-        .encode_wide()
-        .map(|unit| {
-            if unit == b'/' as u16 {
-                b'\\' as u16
-            } else {
-                unit
-            }
-        })
-        .chain(std::iter::once(0))
-        .collect()
+    crate::os_paths::native_path_wide(path)
 }
 
 fn legacy_shell_path_wide(path: &Path) -> Option<Vec<u16>> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
+    let native = crate::os_paths::native_path(path);
+    let path = Path::new(&native);
     if !path.is_absolute() {
         return None;
     }
 
-    let mut encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let mut encoded = native.encode_wide().collect::<Vec<_>>();
     const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
     const VERBATIM_UNC_PREFIX: &[u16] = &[
         b'\\' as u16,
@@ -432,11 +422,11 @@ pub(super) fn create_shell_shortcut(shortcut: &Path, target: &Path) -> io::Resul
         let initialized_com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         let result = (|| -> windows::core::Result<()> {
             let shell_link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
-            let target_path = null_terminated_wide(target.as_os_str());
+            let target_path = crate::os_paths::native_path_wide(target);
             shell_link.SetPath(PCWSTR::from_raw(target_path.as_ptr()))?;
 
             let persist_file: IPersistFile = shell_link.cast()?;
-            let shortcut_path = null_terminated_wide(shortcut.as_os_str());
+            let shortcut_path = crate::os_paths::native_path_wide(shortcut);
             persist_file.Save(PCWSTR::from_raw(shortcut_path.as_ptr()), true)
         })();
         if initialized_com {
@@ -488,6 +478,38 @@ mod tests {
                 0,
             ]
         );
+    }
+
+    #[test]
+    fn legacy_winscp_paths_normalize_before_stripping_supported_prefixes() {
+        for (input, expected) in [
+            (r"C:/folder\file", r"C:\folder\file"),
+            (r"//host/share/folder\file", r"\\host\share\folder\file"),
+            (r"\\?\C:\folder/file", r"C:\folder\file"),
+            (r"\\?\UNC\host\share/folder", r"\\host\share\folder"),
+        ] {
+            assert_eq!(
+                legacy_shell_path_wide(Path::new(input)).unwrap(),
+                expected.encode_utf16().collect::<Vec<_>>()
+            );
+        }
+        assert!(legacy_shell_path_wide(Path::new("relative/folder")).is_none());
+        assert!(legacy_shell_path_wide(Path::new(&format!("C:/{}", "x".repeat(260)))).is_none());
+    }
+
+    #[test]
+    fn shell_shortcut_round_trips_forward_and_mixed_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target folder");
+        std::fs::create_dir(&target).unwrap();
+        let shortcut = temp.path().join("shortcut.lnk");
+        let forward_target = PathBuf::from(target.to_string_lossy().replace('\\', "/"));
+        let mixed_shortcut =
+            PathBuf::from(temp.path().to_string_lossy().replace('\\', "/")).join("shortcut.lnk");
+        create_shell_shortcut(&mixed_shortcut, &forward_target).unwrap();
+        assert!(shortcut.is_file());
+        let resolved = super::super::entry::shell_shortcut_target(&mixed_shortcut).unwrap();
+        assert_eq!(resolved.as_os_str(), crate::os_paths::native_path(&target));
     }
 
     #[test]

@@ -552,7 +552,7 @@ impl ExplorerView {
             ContextMenuCommand::CopySelected => self.copy_selected_to_clipboard(cx),
             ContextMenuCommand::CopyPath { path } => {
                 crate::explorer::clipboard::write_to_clipboard_and_refresh(
-                    ClipboardItem::new_string(self.address_text_for_path(&path)),
+                    ClipboardItem::new_string(copy_path_text(self, &path)),
                     cx,
                 );
                 self.cut_paths.clear();
@@ -909,6 +909,22 @@ fn sidebar_group_entry_context_menu_items(
     items
 }
 
+fn copy_path_text(view: &ExplorerView, path: &Path) -> String {
+    if !cfg!(target_os = "windows")
+        || super::remote_fs::is_remote(path)
+        || super::archive_fs::is_archive_path(path)
+        || super::trash::is_root(path)
+        || super::trash::is_item(path)
+        || super::portable_devices::is_portable_path(path)
+    {
+        view.address_text_for_path(path)
+    } else {
+        crate::os_paths::native_path(path)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 fn run_custom_command(
     executable: &Path,
     args: &[String],
@@ -972,7 +988,11 @@ fn run_custom_command_with(
     spawn: impl FnOnce(&Path, &[OsString], &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let arguments = custom_command_arguments(args, targets);
-    spawn(executable, &arguments, working_directory)
+    spawn(
+        Path::new(&crate::os_paths::native_path(executable)),
+        &arguments,
+        Path::new(&crate::os_paths::native_path(working_directory)),
+    )
 }
 
 fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsString> {
@@ -984,7 +1004,7 @@ fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsStrin
             "{path}" => {
                 expanded_placeholder = true;
                 if let Some(target) = targets.first() {
-                    arguments.push(target.as_os_str().to_os_string());
+                    arguments.push(crate::os_paths::native_path(target));
                 }
             }
             "{paths}" => {
@@ -992,7 +1012,7 @@ fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsStrin
                 arguments.extend(
                     targets
                         .iter()
-                        .map(|target| target.as_os_str().to_os_string()),
+                        .map(|target| crate::os_paths::native_path(target)),
                 );
             }
             "{cwd}" => {
@@ -1006,7 +1026,7 @@ fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsStrin
         arguments.extend(
             targets
                 .iter()
-                .map(|target| target.as_os_str().to_os_string()),
+                .map(|target| crate::os_paths::native_path(target)),
         );
     }
 
@@ -1185,7 +1205,8 @@ fn windows_mount_image_uses_shell(path: &Path) -> bool {
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_mount_disk_image_command(path: &Path) -> PlatformCommand {
-    let path_literal = powershell_single_quoted_literal(&path.display().to_string());
+    let path_literal =
+        powershell_single_quoted_literal(&crate::os_paths::native_path(path).to_string_lossy());
     PlatformCommand {
         executable: OsString::from("powershell.exe"),
         args: vec![
@@ -1206,14 +1227,22 @@ fn windows_shell_mount_image_command(path: &Path) -> PlatformCommand {
     let parent_literal = powershell_single_quoted_literal(
         &path
             .parent()
-            .map(|parent| parent.display().to_string())
+            .map(|parent| {
+                crate::os_paths::native_path(parent)
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .unwrap_or_else(|| ".".to_owned()),
     );
     let file_name_literal = powershell_single_quoted_literal(
         &path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+            .unwrap_or_else(|| {
+                crate::os_paths::native_path(path)
+                    .to_string_lossy()
+                    .into_owned()
+            }),
     );
     PlatformCommand {
         executable: OsString::from("powershell.exe"),
@@ -1236,7 +1265,8 @@ fn windows_shell_mount_image_command(path: &Path) -> PlatformCommand {
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_mounted_volume_eject_command(path: &Path) -> PlatformCommand {
-    let path_literal = powershell_single_quoted_literal(&path.display().to_string());
+    let path_literal =
+        powershell_single_quoted_literal(&crate::os_paths::native_path(path).to_string_lossy());
     PlatformCommand {
         executable: OsString::from("powershell.exe"),
         args: vec![
@@ -5075,13 +5105,21 @@ mod tests {
         assert_eq!(windows_command.executable, OsString::from("powershell.exe"));
         assert!(windows_command.args.iter().any(|arg| arg == "-NoProfile"));
         let script = windows_command.args.last().unwrap().to_string_lossy();
-        assert!(script.contains("Mount-DiskImage -ImagePath '/images/Win''s.iso'"));
+        assert!(script.contains(if cfg!(target_os = "windows") {
+            r"Mount-DiskImage -ImagePath '\images\Win''s.iso'"
+        } else {
+            "Mount-DiskImage -ImagePath '/images/Win''s.iso'"
+        }));
 
         let shell_image = PathBuf::from("/images/Disk.img");
         assert!(windows_mount_image_uses_shell(&shell_image));
         let shell_command = windows_shell_mount_image_command(&shell_image);
         let script = shell_command.args.last().unwrap().to_string_lossy();
-        assert!(script.contains("Namespace('/images')"));
+        assert!(script.contains(if cfg!(target_os = "windows") {
+            r"Namespace('\images')"
+        } else {
+            "Namespace('/images')"
+        }));
         assert!(script.contains("ParseName('Disk.img')"));
         assert!(script.contains("$item.InvokeVerb('Mount')"));
     }
@@ -5157,6 +5195,75 @@ mod tests {
                 working_directory,
             )]
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_custom_command_normalizes_only_generated_paths() {
+        let targets = vec![
+            PathBuf::from(r"C:/first folder\file.txt"),
+            PathBuf::from(r"//host/share/folder/"),
+        ];
+        for args in [
+            vec![
+                "https://example.com/a/b".to_owned(),
+                "--literal=C:/keep/slashes".to_owned(),
+            ],
+            vec![
+                "https://example.com/a/b".to_owned(),
+                "--literal=C:/keep/slashes".to_owned(),
+                "{paths}".to_owned(),
+            ],
+        ] {
+            run_custom_command_with(
+                Path::new(r"C:/tools\program.exe"),
+                &args,
+                &targets,
+                Path::new(r"C:/working\folder/"),
+                |executable, arguments, cwd| {
+                    assert_eq!(executable.as_os_str(), r"C:\tools\program.exe");
+                    assert_eq!(cwd.as_os_str(), r"C:\working\folder\");
+                    assert_eq!(
+                        arguments,
+                        &[
+                            OsString::from("https://example.com/a/b"),
+                            OsString::from("--literal=C:/keep/slashes"),
+                            OsString::from(r"C:\first folder\file.txt"),
+                            OsString::from(r"\\host\share\folder\"),
+                        ]
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            custom_command_arguments(&["{path}".to_owned()], &targets),
+            vec![OsString::from(r"C:\first folder\file.txt")]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_copy_path_is_independent_of_address_display_slashes() {
+        use crate::settings::AddressSlash;
+
+        let path = Path::new(r"C:/folder\子 file.txt");
+        let mut view = ExplorerView::new(PathBuf::from(r"C:\"));
+        view.address_slash = AddressSlash::Forward;
+        assert_eq!(view.address_text_for_path(path), "C:/folder/子 file.txt");
+        assert_eq!(copy_path_text(&view, path), r"C:\folder\子 file.txt");
+        for path in [
+            super::super::remote_fs::virtual_root().join("site/folder"),
+            PathBuf::from(r"\\explorer.archive\archives\archive/folder"),
+            super::super::portable_devices::virtual_root().join("device/folder"),
+            PathBuf::from(super::super::trash::ADDRESS),
+        ] {
+            assert_eq!(
+                copy_path_text(&view, &path),
+                view.address_text_for_path(&path)
+            );
+        }
     }
 
     #[test]

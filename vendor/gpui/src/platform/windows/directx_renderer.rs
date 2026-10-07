@@ -1551,7 +1551,7 @@ pub(crate) mod shader_resources {
             );
 
             let ret = D3DCompileFromFile(
-                &HSTRING::from(shader_path.to_str().unwrap()),
+                &HSTRING::from(crate::platform::windows::util::native_path(&shader_path)),
                 None,
                 include_handler,
                 entry_point,

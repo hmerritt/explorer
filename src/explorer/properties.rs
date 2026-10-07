@@ -5807,7 +5807,7 @@ fn ffprobe_metadata_unavailable_groups(
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffprobe_executable_path());
+    let mut command = Command::new(crate::os_paths::native_path(&ffprobe_executable_path()));
     command
         .arg("-v")
         .arg("quiet")
@@ -5817,7 +5817,7 @@ fn ffprobe_json_output(path: &Path) -> Result<Vec<u8>, String> {
         .arg("-show_streams")
         .arg("-show_programs")
         .arg("-show_chapters")
-        .arg(path)
+        .arg(crate::os_paths::native_path(path))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -6123,13 +6123,13 @@ fn property_image_preview_from_rgba(
 }
 
 fn ffmpeg_cover_png_output(path: &Path, stream_index: usize) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg_executable_path());
+    let mut command = Command::new(crate::os_paths::native_path(&ffmpeg_executable_path()));
     command
         .arg("-v")
         .arg("error")
         .arg("-nostdin")
         .arg("-i")
-        .arg(path)
+        .arg(crate::os_paths::native_path(path))
         .arg("-map")
         .arg(format!("0:{stream_index}"))
         .arg("-frames:v")
@@ -6656,7 +6656,7 @@ fn spawn_audio_spectrum_ffmpeg(
     path: &Path,
     audio_stream_index: usize,
 ) -> Result<std::process::Child, String> {
-    let mut command = Command::new(ffmpeg_executable_path());
+    let mut command = Command::new(crate::os_paths::native_path(&ffmpeg_executable_path()));
     for arg in ffmpeg_audio_spectrum_args(path, audio_stream_index) {
         command.arg(arg);
     }
@@ -6681,7 +6681,7 @@ fn ffmpeg_audio_spectrum_args(path: &Path, audio_stream_index: usize) -> Vec<OsS
         OsString::from("error"),
         OsString::from("-nostdin"),
         OsString::from("-i"),
-        path.as_os_str().to_os_string(),
+        crate::os_paths::native_path(path),
         OsString::from("-map"),
         OsString::from(format!("0:a:{audio_stream_index}")),
         OsString::from("-vn"),
@@ -8968,17 +8968,12 @@ fn size_on_disk(path: &Path, metadata: &fs::Metadata) -> Option<u64> {
 
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Foundation::{ERROR_SUCCESS, GetLastError, SetLastError};
         use windows::Win32::Storage::FileSystem::{GetCompressedFileSizeW, INVALID_FILE_SIZE};
         use windows::core::PCWSTR;
 
         let mut high = 0;
-        let encoded = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
+        let encoded = crate::os_paths::native_path_wide(path);
         unsafe {
             SetLastError(ERROR_SUCCESS);
             let low = GetCompressedFileSizeW(PCWSTR::from_raw(encoded.as_ptr()), Some(&mut high));
@@ -9259,7 +9254,6 @@ fn apply_unix_mode(_: &Path, _: u32) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn apply_hidden_attribute(path: &Path, hidden: bool) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::MetadataExt;
     use windows::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_HIDDEN, FILE_FLAGS_AND_ATTRIBUTES, SetFileAttributesW,
@@ -9273,11 +9267,7 @@ fn apply_hidden_attribute(path: &Path, hidden: bool) -> Result<(), String> {
     } else {
         attributes &= !FILE_ATTRIBUTE_HIDDEN.0;
     }
-    let mut encoded = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let mut encoded = crate::os_paths::native_path_wide(path);
     unsafe {
         SetFileAttributesW(
             PCWSTR::from_raw(encoded.as_mut_ptr()),
@@ -9571,12 +9561,7 @@ fn windows_registry_status(status: windows::Win32::Foundation::WIN32_ERROR) -> s
 
 #[cfg(target_os = "windows")]
 fn windows_wide_null_path(path: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
+    crate::os_paths::native_path_wide(path)
 }
 
 #[cfg(target_os = "windows")]

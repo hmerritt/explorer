@@ -471,7 +471,7 @@ fn clipboard_operation_from_drop_effect(effect: u32) -> ClipboardFileOperation {
 fn build_hdrop_payload(paths: &[PathBuf]) -> Vec<u8> {
     let mut encoded_paths = Vec::<u16>::new();
     for path in paths {
-        encoded_paths.extend(path.to_string_lossy().encode_utf16());
+        encoded_paths.extend(super::util::native_path_wide(path));
         encoded_paths.push(0);
     }
     encoded_paths.push(0);
@@ -547,6 +547,42 @@ mod tests {
             clipboard_operation_from_drop_effect(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0),
             ClipboardFileOperation::Move
         );
+    }
+
+    #[test]
+    fn hdrop_payload_normalizes_paths_without_losing_utf16() {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+        let cases = [
+            (r"C:/folder\file one.txt", r"C:\folder\file one.txt"),
+            (r"C:/", r"C:\"),
+            (r"//host/share/子 folder/", r"\\host\share\子 folder\"),
+            (r"\\?\C:\folder/file", r"\\?\C:\folder\file"),
+            (r"\\?\UNC\host\share/folder", r"\\?\UNC\host\share\folder"),
+            (r"relative/./../folder/", r"relative\.\..\folder\"),
+            (r"C:\already\native", r"C:\already\native"),
+        ];
+        let mut paths = cases
+            .iter()
+            .map(|(input, _)| PathBuf::from(input))
+            .collect::<Vec<_>>();
+        paths.push(PathBuf::from(OsString::from_wide(&[
+            0x43, 0x3a, 0x2f, 0xd800, 0x2f, 0xdc00,
+        ])));
+        let payload = build_hdrop_payload(&paths);
+        let offset = u32::from_ne_bytes(payload[..4].try_into().unwrap()) as usize;
+        assert_eq!(offset, mem::size_of::<DROPFILES>());
+        let words = payload[offset..]
+            .chunks_exact(2)
+            .map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]]))
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for (_, path) in cases {
+            expected.extend(path.encode_utf16());
+            expected.push(0);
+        }
+        expected.extend([0x43, 0x3a, 0x5c, 0xd800, 0x5c, 0xdc00, 0, 0]);
+        assert_eq!(words, expected);
     }
 
     #[test]

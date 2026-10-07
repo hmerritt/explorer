@@ -564,7 +564,15 @@ fn windows_default_open_dispatch(paths: Vec<PathBuf>) -> DefaultOpenDispatch {
 
 #[cfg(target_os = "windows")]
 fn windows_open_default_file(path: &Path) -> io::Result<DefaultOpenStep> {
-    match open::that_detached(path) {
+    windows_open_default_file_with(path, |path| open::that_detached(path))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_open_default_file_with(
+    path: &Path,
+    open: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<DefaultOpenStep> {
+    match open(Path::new(&crate::os_paths::native_path(path))) {
         Ok(()) => Ok(DefaultOpenStep::Opened(OpenWithOutcome::opened(false))),
         Err(error) if windows_error_is_no_association(&error) => {
             Ok(DefaultOpenStep::ChooseApplication)
@@ -2104,6 +2112,44 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "shell failed");
+    }
+
+    #[test]
+    fn default_open_keeps_association_fallback_and_other_errors() {
+        let path = Path::new("file.txt");
+        assert_eq!(
+            windows_open_default_file_with(path, |_| Err(io::Error::from_raw_os_error(1155)))
+                .unwrap(),
+            DefaultOpenStep::ChooseApplication
+        );
+        let error = windows_open_default_file_with(path, |_| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_default_open_receives_native_path_without_losing_utf16() {
+        use std::{
+            ffi::OsString,
+            os::windows::ffi::{OsStrExt, OsStringExt},
+        };
+
+        let input = OsString::from_wide(&[0x43, 0x3a, 0x2f, 0xd800, 0x2f, 0x78]);
+        let result = windows_open_default_file_with(Path::new(&input), |path| {
+            assert_eq!(
+                path.as_os_str().encode_wide().collect::<Vec<_>>(),
+                [0x43, 0x3a, 0x5c, 0xd800, 0x5c, 0x78]
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            result,
+            DefaultOpenStep::Opened(OpenWithOutcome::opened(false))
+        );
     }
 
     #[cfg(target_os = "windows")]

@@ -1339,7 +1339,7 @@ fn native_payload(item: &trash::TrashItem) -> Result<PathBuf, String> {
 }
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn platform_trash(path: &Path) -> Result<(), String> {
-    trash::delete(path).map_err(|e| e.to_string())
+    trash::delete(Path::new(&crate::os_paths::native_path(path))).map_err(|e| e.to_string())
 }
 #[cfg(target_os = "linux")]
 fn platform_purge(item: &TrashEntry) -> Result<(), String> {

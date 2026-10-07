@@ -1058,14 +1058,14 @@ fn run_ytdlp_download(
     process: Arc<YtDlpProcessState>,
     on_progress: impl Fn(YtDlpProgressEvent) + Send + 'static,
 ) -> Result<DownloadResult, String> {
-    let mut command = Command::new(&command_spec.executable);
+    let mut command = Command::new(crate::os_paths::native_path(&command_spec.executable));
     let _cache_invalidation =
         crate::explorer::remote_directory_cache::DirectoryMutation::new([command_spec
             .current_dir
             .clone()]);
     command
         .args(&command_spec.args)
-        .current_dir(&command_spec.current_dir)
+        .current_dir(crate::os_paths::native_path(&command_spec.current_dir))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

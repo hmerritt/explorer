@@ -1396,8 +1396,19 @@ fn clipboard_text(paths: &[PathBuf]) -> String {
     paths
         .iter()
         .map(|path| {
-            super::remote_fs::display_address(path)
-                .unwrap_or_else(|| path.to_string_lossy().into_owned())
+            super::remote_fs::display_address(path).unwrap_or_else(|| {
+                if super::archive_fs::is_archive_path(path)
+                    || super::portable_devices::is_portable_path(path)
+                    || super::trash::is_root(path)
+                    || super::trash::is_item(path)
+                {
+                    path.to_string_lossy().into_owned()
+                } else {
+                    crate::os_paths::native_path(path)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            })
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1487,6 +1498,39 @@ mod tests {
             Some(ClipboardFileOperation::Copy)
         );
         assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_clipboard_text_uses_native_paths_and_keeps_metadata() {
+        for operation in [FileClipboardOperation::Copy, FileClipboardOperation::Cut] {
+            let clipboard = FileClipboard::new(
+                operation,
+                vec![
+                    PathBuf::from(r"C:/first folder\file.txt"),
+                    PathBuf::from(r"//host/share/folder/"),
+                ],
+            );
+            let item = clipboard_item_for_files(&clipboard).unwrap();
+            assert_eq!(
+                item.text(),
+                Some("C:\\first folder\\file.txt\n\\\\host\\share\\folder\\".to_owned())
+            );
+            assert_eq!(
+                item.files().unwrap().operation,
+                native_clipboard_operation(operation)
+            );
+            assert_eq!(file_clipboard_from_item(&item), Some(clipboard));
+        }
+        for path in [
+            PathBuf::from(r"\\explorer.archive\archives\archive/folder"),
+            super::super::portable_devices::virtual_root().join("device/folder"),
+        ] {
+            assert_eq!(
+                clipboard_text(std::slice::from_ref(&path)),
+                path.to_string_lossy()
+            );
+        }
     }
 
     #[test]

@@ -1552,18 +1552,11 @@ fn load_windows_image_list_icon_png_bytes(
         }
         WindowsIconRequest::Path { path } => (path.clone(), false),
     };
-    let wide_path = path
-        .as_os_str()
-        .encode_wide()
-        .map(|unit| {
-            if !use_file_attributes && unit == b'/' as u16 {
-                b'\\' as u16
-            } else {
-                unit
-            }
-        })
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let wide_path = if use_file_attributes {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    } else {
+        crate::os_paths::native_path_wide(&path)
+    };
     let attributes = if use_file_attributes {
         FILE_ATTRIBUTE_NORMAL
     } else {
@@ -1642,18 +1635,11 @@ fn load_windows_file_info_icon_png_bytes(
         }
         WindowsIconRequest::Path { path } => (path.clone(), false),
     };
-    let wide_path = path
-        .as_os_str()
-        .encode_wide()
-        .map(|unit| {
-            if !use_file_attributes && unit == b'/' as u16 {
-                b'\\' as u16
-            } else {
-                unit
-            }
-        })
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let wide_path = if use_file_attributes {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    } else {
+        crate::os_paths::native_path_wide(&path)
+    };
     let attributes = if use_file_attributes {
         FILE_ATTRIBUTE_NORMAL
     } else {

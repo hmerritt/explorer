@@ -365,7 +365,6 @@ pub(super) fn resolve_shell_shortcut_target_kind(target: &Path) -> ShellShortcut
 
 #[cfg(target_os = "windows")]
 unsafe fn resolve_shell_shortcut_target(path: &Path) -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::{
         Win32::{
             Storage::FileSystem::WIN32_FIND_DATAW,
@@ -378,11 +377,7 @@ unsafe fn resolve_shell_shortcut_target(path: &Path) -> Option<PathBuf> {
     let shell_link: IShellLinkW =
         unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }.ok()?;
     let persist_file: IPersistFile = shell_link.cast().ok()?;
-    let wide_path = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let wide_path = crate::os_paths::native_path_wide(path);
 
     unsafe {
         persist_file
@@ -709,7 +704,6 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     fn create_shell_shortcut(shortcut: &Path, target: &Path) -> windows::core::Result<()> {
-        use std::os::windows::ffi::OsStrExt;
         use windows::{
             Win32::{
                 System::Com::{
@@ -726,19 +720,11 @@ mod tests {
             let result = (|| {
                 let shell_link: IShellLinkW =
                     CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
-                let target_path = target
-                    .as_os_str()
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect::<Vec<_>>();
+                let target_path = crate::os_paths::native_path_wide(target);
                 shell_link.SetPath(PCWSTR::from_raw(target_path.as_ptr()))?;
 
                 let persist_file: IPersistFile = shell_link.cast()?;
-                let shortcut_path = shortcut
-                    .as_os_str()
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect::<Vec<_>>();
+                let shortcut_path = crate::os_paths::native_path_wide(shortcut);
                 persist_file.Save(PCWSTR::from_raw(shortcut_path.as_ptr()), true)
             })();
             if initialized_com {

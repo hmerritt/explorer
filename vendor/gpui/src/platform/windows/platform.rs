@@ -508,7 +508,7 @@ impl Platform for WindowsPlatform {
         let path = path.to_path_buf();
         self.background_executor()
             .spawn(async move {
-                open_target(&path)
+                open_target(super::util::native_path(&path))
                     .with_context(|| format!("Opening {} with system", path.display()))
                     .log_err();
             })
@@ -873,6 +873,8 @@ fn open_target(target: impl AsRef<OsStr>) -> Result<()> {
 }
 
 fn open_target_in_explorer(target: &Path) -> Result<()> {
+    let native = super::util::native_path(target);
+    let target = Path::new(&native);
     let dir = target.parent().context("No parent folder found")?;
     let desktop = unsafe { SHGetDesktopFolder()? };
 
@@ -971,7 +973,7 @@ fn file_save_dialog(
             .log_err()
     {
         let full_path = SanitizedPath::new(&full_path);
-        let full_path_string = full_path.to_string();
+        let full_path_string = super::util::native_path(full_path.as_ref());
         let path_item: IShellItem =
             unsafe { SHCreateItemFromParsingName(&HSTRING::from(full_path_string), None)? };
         unsafe {

@@ -231,7 +231,7 @@ pub(super) fn static_video_thumbnail_args(
     }
     args.extend([
         OsString::from("-i"),
-        path.as_os_str().to_owned(),
+        crate::os_paths::native_path(path),
         OsString::from("-map"),
         OsString::from("0:v:0"),
         OsString::from("-an"),
@@ -265,7 +265,7 @@ pub(super) fn video_frame_batch_args(path: &Path, seek_seconds: &[f64]) -> Vec<O
             OsString::from("-ss"),
             OsString::from(ffmpeg_seek_argument(seek)),
             OsString::from("-i"),
-            path.as_os_str().to_owned(),
+            crate::os_paths::native_path(path),
         ]);
         filters.push(format!(
             "[{index}:v:0]trim=end_frame=1,setpts=PTS-STARTPTS,settb=AVTB[v{index}]"
@@ -357,7 +357,7 @@ fn run_program_ppm_stream(
     }
     let total_started = Instant::now();
     let spawn_started = Instant::now();
-    let mut command = Command::new(program);
+    let mut command = Command::new(crate::os_paths::native_path(program));
     command
         .args(args)
         .stdin(Stdio::null())
@@ -799,6 +799,26 @@ mod tests {
         assert_eq!(args[index("-vcodec") + 1], "ppm");
         assert!(args[index("-vf") + 1].contains("fast_bilinear"));
         assert!(args[index("-vf") + 1].contains("format=rgb24"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_media_arguments_normalize_input_paths_only() {
+        let path = Path::new(r"C:/videos\子 clip.mp4");
+        for args in [
+            static_video_thumbnail_args(path, None, 128),
+            video_frame_batch_args(path, &[0.0, 2.0]),
+            super::super::video_hover_preview::video_hover_preview_ffmpeg_args(path, 128),
+        ] {
+            let mut inputs = 0;
+            for pair in args.windows(2) {
+                if pair[0] == "-i" {
+                    assert_eq!(pair[1], r"C:\videos\子 clip.mp4");
+                    inputs += 1;
+                }
+            }
+            assert!(inputs > 0);
+        }
     }
 
     #[test]

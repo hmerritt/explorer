@@ -222,7 +222,8 @@ fn open_settings_file_with(
     let path = path.ok_or_else(|| {
         "Could not open settings.json: settings file path is unavailable".to_owned()
     })?;
-    open(path).map_err(|error| format!("Could not open {}: {error}", path.display()))
+    open(Path::new(&crate::os_paths::native_path(path)))
+        .map_err(|error| format!("Could not open {}: {error}", path.display()))
 }
 
 fn show_error_dialog(message: &str) {
