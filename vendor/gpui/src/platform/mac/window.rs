@@ -140,6 +140,11 @@ unsafe fn build_classes() {
                     mouse_down_can_move_window as extern "C" fn(&Object, Sel) -> BOOL,
                 );
                 decl.add_method(
+                    sel!(_opaqueRectForWindowMoveWhenInTitlebar),
+                    opaque_rect_for_window_move_when_in_titlebar
+                        as extern "C" fn(&Object, Sel) -> NSRect,
+                );
+                decl.add_method(
                     sel!(mouseUp:),
                     handle_view_event as extern "C" fn(&Object, Sel, id),
                 );
@@ -1837,6 +1842,19 @@ extern "C" fn mouse_down_can_move_window(this: &Object, _: Sel) -> BOOL {
         NO
     } else {
         unsafe { msg_send![super(this, class!(NSView)), mouseDownCanMoveWindow] }
+    }
+}
+
+// AppKit's titlebar drag routing is separate from mouseDownCanMoveWindow. Claim the
+// custom titlebar content so tab drags reach GPUI; blank drag regions still move
+// the window explicitly via start_window_move without disabling native tiling.
+extern "C" fn opaque_rect_for_window_move_when_in_titlebar(this: &Object, _: Sel) -> NSRect {
+    let window_state = unsafe { get_window_state(this) };
+    let transparent_titlebar = window_state.lock().transparent_titlebar;
+    if transparent_titlebar {
+        unsafe { msg_send![this, bounds] }
+    } else {
+        NSRect::new(NSPoint::new(0., 0.), NSSize::new(0., 0.))
     }
 }
 

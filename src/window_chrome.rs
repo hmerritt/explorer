@@ -113,6 +113,7 @@ pub(crate) fn render_titlebar_drag_surface<T: WindowDragState + 'static>(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .window_control_area(WindowControlArea::Drag)
         .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, _| {
             if event.button == MouseButton::Left {

@@ -2321,6 +2321,7 @@ fn pane_focus_outline_visible(
 
 fn render_split_drop_preview(direction: SplitDirection) -> AnyElement {
     div()
+        .debug_selector(|| "explorer-split-drop-preview".to_owned())
         .absolute()
         .when(direction == SplitDirection::Left, |this| {
             this.left_0().top_0().bottom_0().w(relative(0.5))
@@ -7335,6 +7336,237 @@ mod tests {
         assert_eq!(tab_strip_width(0), TAB_BAR_HEIGHT);
         assert_eq!(tab_strip_width(1), TAB_WIDTH + TAB_BAR_HEIGHT);
         assert_eq!(tab_strip_width(3), (3.0 * TAB_WIDTH) + TAB_BAR_HEIGHT);
+    }
+
+    fn tab_drag_start_position(
+        tabs: &Entity<ExplorerTabs>,
+        cx: &gpui::VisualTestContext,
+        index: usize,
+    ) -> Point<Pixels> {
+        cx.read_entity(tabs, |tabs, _| {
+            let handle = &tabs.tab_scroll_handle;
+            let mut position = handle.bounds_for_item(index).expect("tab bounds").center();
+            position.x += handle.offset().x;
+            position
+        })
+    }
+
+    fn begin_test_tab_drag(
+        tabs: &Entity<ExplorerTabs>,
+        cx: &mut gpui::VisualTestContext,
+        index: usize,
+    ) {
+        let id = cx.read_entity(tabs, |tabs, _| tabs.tabs[index].id);
+        let start = tab_drag_start_position(tabs, cx, index);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.read_entity(tabs, |tabs, _| assert!(!tabs.should_move_window));
+        cx.simulate_mouse_move(
+            gpui::point(start.x, start.y + px(10.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|_, app| assert!(app.has_active_drag()));
+        cx.read_entity(tabs, |tabs, _| {
+            assert_eq!(tabs.dragging_tab, Some(id));
+            assert!(!tabs.should_move_window);
+        });
+    }
+
+    #[gpui::test]
+    fn tab_drag_docks_at_each_pane_edge_without_arming_window_move(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        for direction in [
+            SplitDirection::Left,
+            SplitDirection::Right,
+            SplitDirection::Up,
+            SplitDirection::Down,
+        ] {
+            let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
+            let (workspace_tab, target_pane, source_pane, source_view) =
+                cx.update(|window, app| {
+                    tabs.update(app, |tabs, cx| {
+                        tabs.add_background_tab(temp.path().join("source"), window, cx);
+                        cx.notify();
+                        (
+                            tabs.tabs[0].id,
+                            tabs.tabs[0].active_pane,
+                            tabs.tabs[1].active_pane,
+                            tabs.tabs[1].active_view(),
+                        )
+                    })
+                });
+            cx.run_until_parked();
+            let bounds = cx.read_entity(&tabs, |tabs, _| tabs.pane_bounds[&target_pane]);
+            let position = match direction {
+                SplitDirection::Left => gpui::point(bounds.left() + px(10.0), bounds.center().y),
+                SplitDirection::Right => gpui::point(bounds.right() - px(10.0), bounds.center().y),
+                SplitDirection::Up => gpui::point(bounds.center().x, bounds.top() + px(10.0)),
+                SplitDirection::Down => gpui::point(bounds.center().x, bounds.bottom() - px(10.0)),
+            };
+            begin_test_tab_drag(&tabs, cx, 1);
+            cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::default());
+            cx.read_entity(&tabs, |tabs, _| {
+                assert_eq!(
+                    tabs.dock_target,
+                    Some(DockTarget {
+                        workspace_tab,
+                        pane: target_pane,
+                        direction,
+                    })
+                );
+                assert!(!tabs.should_move_window);
+            });
+            let preview = cx
+                .debug_bounds("explorer-split-drop-preview")
+                .expect("visible docking preview");
+            assert!(preview.contains(&position));
+
+            cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+            cx.read_entity(&tabs, |tabs, _| {
+                assert_eq!(tabs.tabs.len(), 1);
+                let workspace = tabs.active_tab().unwrap();
+                assert_eq!(workspace.id, workspace_tab);
+                assert_eq!(workspace.active_pane, source_pane);
+                assert_eq!(workspace.active_view(), source_view);
+                let mut pane_ids = Vec::new();
+                workspace.layout.pane_ids(&mut pane_ids);
+                let expected = if direction.increasing() {
+                    vec![target_pane, source_pane]
+                } else {
+                    vec![source_pane, target_pane]
+                };
+                assert_eq!(pane_ids, expected);
+                assert!(tabs.dragging_tab.is_none());
+                assert!(tabs.dock_target.is_none());
+                assert!(!tabs.should_move_window);
+            });
+            cx.update(|_, app| assert!(!app.has_active_drag()));
+            assert!(cx.debug_bounds("explorer-split-drop-preview").is_none());
+        }
+    }
+
+    #[gpui::test]
+    fn lone_tab_drag_self_docks_without_arming_window_move(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (_temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let (workspace_tab, original_pane, original_view, bounds) =
+            cx.read_entity(&tabs, |tabs, _| {
+                let tab = tabs.active_tab().unwrap();
+                (
+                    tab.id,
+                    tab.active_pane,
+                    tab.active_view(),
+                    tabs.pane_bounds[&tab.active_pane],
+                )
+            });
+        let position = gpui::point(bounds.right() - px(10.0), bounds.center().y);
+        begin_test_tab_drag(&tabs, cx, 0);
+        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::default());
+        assert!(cx.debug_bounds("explorer-split-drop-preview").is_some());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 1);
+            let tab = tabs.active_tab().unwrap();
+            assert_eq!(tab.id, workspace_tab);
+            assert_eq!(tab.layout.pane_count(), 2);
+            assert_eq!(tab.active_pane, original_pane);
+            assert_eq!(tab.active_view(), original_view);
+            let mut pane_ids = Vec::new();
+            tab.layout.pane_ids(&mut pane_ids);
+            assert_eq!(pane_ids[1], original_pane);
+            assert!(tabs.dragging_tab.is_none());
+            assert!(tabs.dock_target.is_none());
+            assert!(!tabs.should_move_window);
+        });
+        cx.update(|_, app| assert!(!app.has_active_drag()));
+    }
+
+    #[gpui::test]
+    fn tab_drag_reorders_without_arming_window_move(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
+        let (first, source) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("source"), window, cx);
+                cx.notify();
+                (tabs.tabs[0].id, tabs.tabs[1].id)
+            })
+        });
+        cx.run_until_parked();
+        let first_position = tab_drag_start_position(&tabs, cx, 0);
+        let position = gpui::point(first_position.x - px(30.0), first_position.y);
+        begin_test_tab_drag(&tabs, cx, 1);
+        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(
+                tabs.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                vec![source, first]
+            );
+            assert_eq!(tabs.active_tab, first);
+            assert!(tabs.dragging_tab.is_none());
+            assert!(tabs.dock_target.is_none());
+            assert!(!tabs.should_move_window);
+        });
+        cx.update(|_, app| assert!(!app.has_active_drag()));
+    }
+
+    #[gpui::test]
+    fn tab_drag_invalid_drop_clears_preview_and_drag_state(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("source"), window, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let bounds = cx.read_entity(&tabs, |tabs, _| {
+            tabs.pane_bounds[&tabs.active_tab().unwrap().active_pane]
+        });
+        begin_test_tab_drag(&tabs, cx, 1);
+        let edge = gpui::point(bounds.right() - px(10.0), bounds.center().y);
+        cx.simulate_mouse_move(edge, MouseButton::Left, Modifiers::default());
+        assert!(cx.debug_bounds("explorer-split-drop-preview").is_some());
+        cx.simulate_mouse_move(bounds.center(), MouseButton::Left, Modifiers::default());
+        assert!(cx.debug_bounds("explorer-split-drop-preview").is_none());
+        cx.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert!(tabs.tabs.iter().all(|tab| !tab.is_split()));
+            assert!(tabs.dragging_tab.is_none());
+            assert!(tabs.dock_target.is_none());
+            assert!(!tabs.should_move_window);
+        });
+        cx.update(|_, app| assert!(!app.has_active_drag()));
+    }
+
+    #[gpui::test]
+    fn blank_titlebar_drag_arms_and_consumes_window_move(cx: &mut TestAppContext) {
+        let (_temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let position = cx
+            .debug_bounds("explorer-titlebar-drag-region")
+            .expect("blank titlebar bounds")
+            .center();
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| assert!(tabs.should_move_window));
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| assert!(!tabs.should_move_window));
+
+        cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| assert!(tabs.should_move_window));
+        cx.simulate_mouse_move(
+            gpui::point(position.x + px(10.0), position.y),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.read_entity(&tabs, |tabs, _| {
+            assert!(!tabs.should_move_window);
+            assert!(tabs.dragging_tab.is_none());
+        });
+        cx.update(|_, app| assert!(!app.has_active_drag()));
+        cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
     }
 
     #[gpui::test]

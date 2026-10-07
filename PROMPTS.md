@@ -2,8 +2,6 @@
 
 ## 2
 
-- macOS tabs cannot be dragged into a split view, dragging a tab currently drags the entire window
-
 ## 3
 
 - Settings UI
