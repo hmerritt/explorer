@@ -179,10 +179,16 @@ const CLIPBOARD_STATUS_POPUP_RIGHT_INSET: f32 = STATUS_BAR_HORIZONTAL_PADDING;
 const CLIPBOARD_STATUS_POPUP_STATUS_GAP: f32 = 8.0;
 const CLIPBOARD_STATUS_POPUP_TOP_INSET: f32 = 16.0;
 const DIRECTORY_COPY_ADDRESS_FADE_MS: u64 = 50;
-const SIDEBAR_SETTINGS_FADE_MS: u64 = 80;
+const SIDEBAR_UTILITIES_FADE_MS: u64 = 80;
 const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 4.0;
 const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 4.0;
 const IMAGE_HOVER_PREVIEW_RADIUS: f32 = 15.0;
+
+#[derive(Clone, Copy)]
+enum SidebarItemPresentation {
+    Row { content_indent: f32 },
+    UtilityIcon,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CodebaseMakeupSegment {
@@ -1903,22 +1909,6 @@ impl ExplorerView {
             previous_group_expanded = Some(expanded);
         }
 
-        if let Some(expanded) = previous_group_expanded {
-            children.push(sidebar_group_gap(expanded).into_any_element());
-        }
-        children.push(self.render_sidebar_row(
-            1_000_000,
-            SidebarItem {
-                label: super::trash::label().into(),
-                path: super::trash::root(),
-                kind: SidebarItemKind::Directory(DirectoryKind::Bin),
-                configured_index: None,
-            },
-            SidebarGroupKind::Pinned,
-            0.0,
-            cx,
-        ));
-        previous_group_expanded = Some(false);
         if !sections.drives.is_empty()
             && !sidebar_group_is_hidden(&self.sidebar_settings, SidebarGroupKind::Drives)
         {
@@ -2059,14 +2049,49 @@ impl ExplorerView {
     }
 
     fn render_sidebar_lower_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let buttons = div()
+            .id("explorer-sidebar-utilities")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .ml(px(8.0))
+            .child(self.render_sidebar_settings_button(cx))
+            .child(self.render_sidebar_item(
+                1_000_000,
+                SidebarItem {
+                    label: super::trash::label().into(),
+                    path: super::trash::root(),
+                    kind: SidebarItemKind::Directory(DirectoryKind::Bin),
+                    configured_index: None,
+                },
+                SidebarGroupKind::Pinned,
+                SidebarItemPresentation::UtilityIcon,
+                cx,
+            ));
+        let buttons = if self.sidebar_lower_hovered {
+            buttons
+                .with_animation(
+                    (
+                        "explorer-sidebar-utilities-fade",
+                        self.sidebar_lower_hover_generation,
+                    ),
+                    Animation::new(Duration::from_millis(SIDEBAR_UTILITIES_FADE_MS)),
+                    |buttons, delta| buttons.opacity(delta),
+                )
+                .into_any_element()
+        } else {
+            buttons.opacity(0.0).into_any_element()
+        };
+
         div()
             .id("explorer-sidebar-lower-section")
             .debug_selector(|| "explorer-sidebar-lower-section".to_owned())
             .flex()
-            .flex_col()
-            .items_start()
+            .flex_row()
+            .items_center()
             .w_full()
-            .pt(px(8.0))
+            .pt(px(24.0))
             .pb(px(8.0))
             .flex_shrink_0()
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -2079,12 +2104,12 @@ impl ExplorerView {
                     cx.notify();
                 }
             }))
-            .child(self.render_sidebar_settings_button(cx))
+            .child(buttons)
             .into_any_element()
     }
 
     fn render_sidebar_settings_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let button = div()
+        div()
             .id("explorer-sidebar-settings")
             .debug_selector(|| "explorer-sidebar-settings".to_owned())
             .flex()
@@ -2092,7 +2117,7 @@ impl ExplorerView {
             .justify_center()
             .w(px(SIDEBAR_ROW_HEIGHT))
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .ml(px(8.0))
+            .flex_shrink_0()
             .rounded(px(4.0))
             .cursor_default()
             .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
@@ -2104,22 +2129,8 @@ impl ExplorerView {
                 cx.stop_propagation();
             }))
             .tooltip(explorer_tooltip("Settings"))
-            .child(gpui::img(SETTINGS_ICON.clone()).w(px(16.0)).h(px(16.0)));
-
-        if self.sidebar_lower_hovered {
-            button
-                .with_animation(
-                    (
-                        "explorer-sidebar-settings-fade",
-                        self.sidebar_lower_hover_generation,
-                    ),
-                    Animation::new(Duration::from_millis(SIDEBAR_SETTINGS_FADE_MS)),
-                    |button, delta| button.opacity(delta),
-                )
-                .into_any_element()
-        } else {
-            button.opacity(0.0).into_any_element()
-        }
+            .child(gpui::img(SETTINGS_ICON.clone()).w(px(16.0)).h(px(16.0)))
+            .into_any_element()
     }
 
     fn render_sidebar_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2340,6 +2351,23 @@ impl ExplorerView {
         content_indent: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.render_sidebar_item(
+            id,
+            item,
+            group,
+            SidebarItemPresentation::Row { content_indent },
+            cx,
+        )
+    }
+
+    fn render_sidebar_item(
+        &self,
+        id: usize,
+        item: SidebarItem,
+        group: SidebarGroupKind,
+        presentation: SidebarItemPresentation,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let is_current =
             sidebar_item_is_current(&item.path, &self.path, self.is_sidebar_group_view());
         let label = item.label.clone();
@@ -2378,15 +2406,16 @@ impl ExplorerView {
         let middle_click_path = path.clone();
         let context_menu_target = sidebar_context_menu_target(&item);
         let context_menu_active = sidebar_context_menu_is_active(self.context_menu.as_ref(), id);
-        let mut row = div()
+        let row = div()
             .id(("explorer-sidebar-row", id))
-            .debug_selector(move || format!("explorer-sidebar-row-{id}"))
+            .debug_selector(move || match presentation {
+                SidebarItemPresentation::Row { .. } => format!("explorer-sidebar-row-{id}"),
+                SidebarItemPresentation::UtilityIcon => "explorer-sidebar-bin".to_owned(),
+            })
             .flex()
             .flex_row()
             .items_center()
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .mx(px(8.0))
-            .px(px(SIDEBAR_HORIZONTAL_PADDING))
             .rounded(px(4.0))
             .cursor_default()
             .when(is_dragging, |this| this.opacity(0.4))
@@ -2436,19 +2465,30 @@ impl ExplorerView {
                     cx.stop_propagation();
                     cx.notify();
                 }),
-            )
-            .child(div().w(px(content_indent)).h(px(1.0)).flex_shrink_0())
-            .child(sidebar_item_icon(&icon_item))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .ml(px(SIDEBAR_ICON_TEXT_GAP))
-                    .truncate()
-                    .text_size(px(SIDEBAR_TEXT_SIZE))
-                    .text_color(rgb(0x1f1f1f))
-                    .child(SharedString::from(label)),
             );
+        let mut row = match presentation {
+            SidebarItemPresentation::Row { content_indent } => row
+                .mx(px(8.0))
+                .px(px(SIDEBAR_HORIZONTAL_PADDING))
+                .child(div().w(px(content_indent)).h(px(1.0)).flex_shrink_0())
+                .child(sidebar_item_icon(&icon_item))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .ml(px(SIDEBAR_ICON_TEXT_GAP))
+                        .truncate()
+                        .text_size(px(SIDEBAR_TEXT_SIZE))
+                        .text_color(rgb(0x1f1f1f))
+                        .child(SharedString::from(label)),
+                ),
+            SidebarItemPresentation::UtilityIcon => row
+                .w(px(SIDEBAR_ROW_HEIGHT))
+                .flex_shrink_0()
+                .justify_center()
+                .tooltip(explorer_tooltip(label))
+                .child(sidebar_group_item_icon_sized(&icon_item, 16.0)),
+        };
 
         let (context_path, context_configured_index, hide_item, open_icon_kind, can_eject) =
             context_menu_target;
@@ -10072,9 +10112,14 @@ mod tests {
         let drive_group_top_offset = f32::from(drive_group.origin.y) - f32::from(sidebar.origin.y);
 
         assert!(
-            (drive_group_top_offset - 42.0).abs() <= 1.0,
-            "drive group should follow the bin row, got {drive_group_top_offset}"
+            (drive_group_top_offset - 8.0).abs() <= 1.0,
+            "drive group should start at the sidebar top padding, got {drive_group_top_offset}"
         );
+        let bin = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin button bounds");
+        assert!(bin.origin.y > drive_group.origin.y);
+        assert!(cx.debug_bounds("explorer-sidebar-row-1000000").is_none());
         assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
         assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_none());
     }
@@ -10123,7 +10168,13 @@ mod tests {
             .expect("network group bounds");
         assert!(network.origin.y > drives.origin.y);
         assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
-        assert!(cx.debug_bounds("explorer-sidebar-row-3000").is_some());
+        let network_row = cx
+            .debug_bounds("explorer-sidebar-row-3000")
+            .expect("network row bounds");
+        let bin = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin button bounds");
+        assert!(bin.origin.y > network_row.origin.y);
     }
 
     #[gpui::test]
@@ -10225,8 +10276,8 @@ mod tests {
             .debug_bounds("explorer-sidebar-row-0")
             .expect("pinned row bounds");
         let drive_group = cx
-            .debug_bounds("explorer-sidebar-row-1000000")
-            .expect("bin row bounds");
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drives group bounds");
         let header_gap = f32::from(pinned_row.origin.y)
             - (f32::from(pinned_group.origin.y) + f32::from(pinned_group.size.height));
         let trailing_gap = f32::from(drive_group.origin.y)
@@ -10284,8 +10335,8 @@ mod tests {
             .debug_bounds("explorer-sidebar-group-pinned")
             .expect("pinned group bounds");
         let drive_group = cx
-            .debug_bounds("explorer-sidebar-row-1000000")
-            .expect("bin row bounds");
+            .debug_bounds("explorer-sidebar-group-drives")
+            .expect("drives group bounds");
         let group_gap = f32::from(drive_group.origin.y)
             - (f32::from(pinned_group.origin.y) + f32::from(pinned_group.size.height));
 
@@ -10596,7 +10647,13 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_some());
-        assert!(cx.debug_bounds("explorer-sidebar-row-4000").is_some());
+        let wsl_row = cx
+            .debug_bounds("explorer-sidebar-row-4000")
+            .expect("WSL row bounds");
+        let bin = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin button bounds");
+        assert!(bin.origin.y > wsl_row.origin.y);
     }
 
     #[cfg(target_os = "windows")]
@@ -10631,6 +10688,14 @@ mod tests {
 
         assert!(cx.debug_bounds("explorer-sidebar-group-wsl").is_none());
         assert!(cx.debug_bounds("explorer-sidebar-row-4000").is_none());
+        let bin = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin stays available when all groups are hidden or empty");
+        let settings = cx
+            .debug_bounds("explorer-sidebar-settings")
+            .expect("settings button bounds");
+        assert_eq!(bin.origin.y, settings.origin.y);
+        assert!(bin.origin.x > settings.origin.x);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -10707,7 +10772,8 @@ mod tests {
         assert!(cx.debug_bounds("explorer-sidebar-group-pinned").is_some());
         assert!(cx.debug_bounds("explorer-sidebar-row-0").is_some());
         assert!(cx.debug_bounds("explorer-sidebar-row-1").is_none());
-        assert!(cx.debug_bounds("explorer-sidebar-row-1000000").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-row-1000000").is_none());
+        assert!(cx.debug_bounds("explorer-sidebar-bin").is_some());
         assert!(cx.debug_bounds("explorer-sidebar-group-macos").is_none());
     }
 
@@ -10736,11 +10802,29 @@ mod tests {
         let button_left = f32::from(button.origin.x) - f32::from(sidebar.origin.x);
 
         assert!((sidebar_bottom - lower_bottom).abs() <= 1.0);
+        assert!((f32::from(lower.size.height) - 62.0).abs() <= 1.0);
+        let button_bottom = f32::from(button.origin.y) + f32::from(button.size.height);
+        assert!((sidebar_bottom - button_bottom - 8.0).abs() <= 1.0);
+        assert!((f32::from(button.size.width) - 30.0).abs() <= 1.0);
+        assert!((f32::from(button.size.height) - 30.0).abs() <= 1.0);
         assert!(button_left <= 12.0);
+        let bin = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin button bounds");
+        let items = cx
+            .debug_bounds("explorer-sidebar-items")
+            .expect("sidebar navigation bounds");
+        let button_gap =
+            f32::from(bin.origin.x) - (f32::from(button.origin.x) + f32::from(button.size.width));
+        assert!((button_gap - 8.0).abs() <= 1.0);
+        assert_eq!(bin.origin.y, button.origin.y);
+        assert_eq!(bin.size, button.size);
+        assert!(bin.origin.y >= items.origin.y + items.size.height);
+        assert!(cx.debug_bounds("explorer-sidebar-row-1000000").is_none());
     }
 
     #[gpui::test]
-    fn sidebar_settings_button_fade_restarts_on_lower_section_hover(cx: &mut gpui::TestAppContext) {
+    fn sidebar_utility_buttons_fade_restarts_on_lower_section_hover(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let (view, cx) = cx.add_window_view(move |window, cx| {
@@ -10755,10 +10839,15 @@ mod tests {
             assert_eq!(view.sidebar_lower_hover_generation, 0);
         });
 
-        let lower_position = cx
+        let lower = cx
             .debug_bounds("explorer-sidebar-lower-section")
-            .expect("sidebar lower section bounds")
-            .center();
+            .expect("sidebar lower section bounds");
+        // This point is in the extra 16px above the previous hover region.
+        let lower_position = Point::new(lower.center().x, lower.origin.y + gpui::px(8.0));
+        let button = cx
+            .debug_bounds("explorer-sidebar-settings")
+            .expect("settings button bounds");
+        assert!(lower_position.y < button.origin.y - gpui::px(8.0));
         cx.simulate_mouse_move(
             lower_position,
             Option::<MouseButton>::None,
@@ -10769,6 +10858,19 @@ mod tests {
             assert!(view.sidebar_lower_hovered);
             assert_eq!(view.sidebar_lower_hover_generation, 1);
         });
+
+        for selector in ["explorer-sidebar-settings", "explorer-sidebar-bin"] {
+            let position = cx
+                .debug_bounds(selector)
+                .expect("utility button bounds")
+                .center();
+            cx.simulate_mouse_move(position, Option::<MouseButton>::None, Modifiers::default());
+            cx.run_until_parked();
+            cx.read_entity(&view, |view, _| {
+                assert!(view.sidebar_lower_hovered);
+                assert_eq!(view.sidebar_lower_hover_generation, 1);
+            });
+        }
 
         let outside_position = cx
             .debug_bounds("back")
@@ -10795,6 +10897,109 @@ mod tests {
             assert!(view.sidebar_lower_hovered);
             assert_eq!(view.sidebar_lower_hover_generation, 2);
         });
+    }
+
+    #[gpui::test]
+    fn sidebar_bin_button_opens_bin_and_its_context_menu(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin button")
+            .center();
+        cx.simulate_mouse_move(position, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_click(position, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| assert!(view.is_trash_view()));
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().expect("bin context menu");
+            assert_eq!(
+                menu.source,
+                Some(ContextMenuSource::SidebarItem { row_id: 1_000_000 })
+            );
+            assert!(menu.items.iter().any(|item| matches!(
+                item,
+                ContextMenuItem::Action {
+                    command: ContextMenuCommand::EmptyBin,
+                    ..
+                }
+            )));
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_bin_button_keeps_new_tab_shortcuts(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        let mut events = cx.events(&view);
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin button")
+            .center();
+        cx.simulate_mouse_move(position, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_click(
+            position,
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            events.try_recv().expect("Ctrl-click event"),
+            crate::explorer::view::ExplorerViewEvent::OpenDirectoryInNewTab(
+                crate::explorer::trash::root()
+            )
+        );
+        cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            events.try_recv().expect("middle-click event"),
+            crate::explorer::view::ExplorerViewEvent::OpenDirectoryInNewTab(
+                crate::explorer::trash::root()
+            )
+        );
+        cx.read_entity(&view, |view, _| assert_eq!(view.path, temp.path()));
+    }
+
+    #[gpui::test]
+    fn sidebar_bin_button_file_drop_requests_confirmation(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let file = temp.path().join("keep-until-confirmed.txt");
+        fs::write(&file, "test").unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+        let position = cx
+            .debug_bounds("explorer-sidebar-bin")
+            .expect("bin button")
+            .center();
+        // Enter while the utilities are hidden, just as an external drag would.
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths::new(vec![file.clone()]),
+        });
+        cx.run_until_parked();
+        cx.simulate_event(gpui::FileDropEvent::Submit { position });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.pending_trash
+                    .as_ref()
+                    .expect("trash confirmation")
+                    .paths,
+                vec![file.clone()]
+            );
+            assert!(view.pending_trash_task.is_none());
+        });
+        assert!(file.exists());
     }
 
     #[gpui::test]
