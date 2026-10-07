@@ -111,7 +111,7 @@ jobs:
                   Icon=explorer
                   Terminal=false
                   Categories=Utility;FileManager;
-                  MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
+                  MimeType=inode/directory;application/epub+zip;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
                   StartupNotify=true
                   EOF
 
@@ -340,6 +340,30 @@ jobs:
                     <string>public.app-category.utilities</string>
                     <key>NSHighResolutionCapable</key>
                     <true/>
+                    <key>CFBundleDocumentTypes</key>
+                    <array>
+                      <dict>
+                        <key>CFBundleTypeName</key><string>EPUB book</string>
+                        <key>CFBundleTypeRole</key><string>Viewer</string>
+                        <key>LSHandlerRank</key><string>Alternate</string>
+                        <key>LSItemContentTypes</key><array><string>org.idpf.epub-container</string></array>
+                        <key>CFBundleTypeExtensions</key><array><string>epub</string></array>
+                        <key>CFBundleTypeMIMETypes</key><array><string>application/epub+zip</string></array>
+                      </dict>
+                    </array>
+                    <key>UTImportedTypeDeclarations</key>
+                    <array>
+                      <dict>
+                        <key>UTTypeIdentifier</key><string>org.idpf.epub-container</string>
+                        <key>UTTypeDescription</key><string>EPUB book</string>
+                        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+                        <key>UTTypeTagSpecification</key>
+                        <dict>
+                          <key>public.filename-extension</key><array><string>epub</string></array>
+                          <key>public.mime-type</key><string>application/epub+zip</string>
+                        </dict>
+                      </dict>
+                    </array>
                   </dict>
                   </plist>
                   EOF

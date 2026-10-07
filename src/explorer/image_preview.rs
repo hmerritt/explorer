@@ -1665,7 +1665,7 @@ fn load_svg_rgba_with_cancel_timed(
     )
 }
 
-pub(super) fn load_svg_rgba_from_bytes(
+pub(crate) fn load_svg_rgba_from_bytes(
     bytes: &[u8],
     longest_side: u32,
     cancel: &AtomicBool,

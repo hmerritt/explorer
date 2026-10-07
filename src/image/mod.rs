@@ -11,6 +11,8 @@ mod decode;
 mod resize;
 mod view;
 
+pub(crate) use decode::render_image_from_rgba;
+
 actions!(
     image_viewer,
     [

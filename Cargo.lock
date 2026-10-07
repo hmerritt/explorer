@@ -2569,6 +2569,7 @@ dependencies = [
  "plist",
  "psl",
  "qoi",
+ "quick-xml 0.42.0",
  "raw-window-handle",
  "rayon",
  "rbook",

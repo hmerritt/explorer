@@ -8,6 +8,7 @@ const APPLICATION_DESCRIPTION: &str =
     "File Explorer for Windows, macOS, and Linux, built with GPUI.";
 const PACKAGED_WINDOWS_EXECUTABLE_NAME: &str = "file-explorer.exe";
 const PROG_ID: &str = "HMerritt.Explorer.Image.1";
+const EPUB_PROG_ID: &str = "HMerritt.Explorer.Epub.1";
 const CAPABILITIES_KEY: &str = r"Software\HMerritt\Explorer\Capabilities";
 const REGISTERED_APPLICATIONS_KEY: &str = r"Software\RegisteredApplications";
 const REGISTER_FILE_ASSOCIATIONS_ARG: &str = "--register-file-associations";
@@ -63,14 +64,14 @@ pub(crate) fn handle_file_association_command(
                     .unwrap_or(current_exe);
             register_file_associations(&executable_path)?;
             println!(
-                "Registered Explorer image file associations for {}.",
+                "Registered Explorer image and EPUB file associations for {}.",
                 executable_path.display()
             );
             Ok(true)
         }
         Some(FileAssociationCommand::Unregister) => {
             unregister_file_associations()?;
-            println!("Unregistered Explorer image file associations.");
+            println!("Unregistered Explorer image and EPUB file associations.");
             Ok(true)
         }
         None => Ok(false),
@@ -137,6 +138,13 @@ fn registration_plan(executable_path: &Path) -> RegistryPlan {
     for extension in IMAGE_FILE_EXTENSIONS {
         plan.set_string(&supported_types_key, extension, "");
     }
+    plan.set_string(&supported_types_key, ".epub", "");
+    let epub_key = format!(r"Software\Classes\{EPUB_PROG_ID}");
+    plan.set_default_string(&epub_key, "Explorer EPUB");
+    plan.set_string(&epub_key, "FriendlyTypeName", "Explorer EPUB");
+    plan.set_default_string(&format!(r"{epub_key}\DefaultIcon"), &icon);
+    plan.set_default_string(&format!(r"{epub_key}\shell\open"), "Open");
+    plan.set_default_string(&format!(r"{epub_key}\shell\open\command"), &command);
 
     plan.set_default_string(&prog_id_key, "Explorer Image");
     plan.set_string(&prog_id_key, "FriendlyTypeName", "Explorer Image");
@@ -153,6 +161,8 @@ fn registration_plan(executable_path: &Path) -> RegistryPlan {
     plan.set_string(CAPABILITIES_KEY, "ApplicationIcon", &icon);
 
     let file_associations_key = format!(r"{CAPABILITIES_KEY}\FileAssociations");
+    plan.set_string(&file_associations_key, ".epub", EPUB_PROG_ID);
+    plan.set_none(r"Software\Classes\.epub\OpenWithProgids", EPUB_PROG_ID);
     for extension in IMAGE_FILE_EXTENSIONS {
         plan.set_string(&file_associations_key, extension, PROG_ID);
         plan.set_none(
@@ -172,6 +182,12 @@ fn registration_plan(executable_path: &Path) -> RegistryPlan {
 
 fn unregistration_plan() -> RegistryPlan {
     let mut plan = RegistryPlan::default();
+    plan.delete_values.push(RegistryDeleteValue {
+        key_path: r"Software\Classes\.epub\OpenWithProgids".to_owned(),
+        value_name: EPUB_PROG_ID.to_owned(),
+    });
+    plan.delete_trees
+        .push(format!(r"Software\Classes\{EPUB_PROG_ID}"));
 
     for extension in IMAGE_FILE_EXTENSIONS {
         plan.delete_values.push(RegistryDeleteValue {
@@ -523,6 +539,42 @@ mod tests {
         let plan = test_registration_plan();
 
         assert!(!format!("{plan:?}").contains("UserChoice"));
+    }
+
+    #[test]
+    fn epub_registration_and_cleanup_only_advertise_open_with_support() {
+        let plan = test_registration_plan();
+        assert!(plan_contains_string(
+            &plan,
+            r"Software\HMerritt\Explorer\Capabilities\FileAssociations",
+            Some(".epub"),
+            EPUB_PROG_ID
+        ));
+        assert!(plan_contains_string(
+            &plan,
+            r"Software\Classes\Applications\file-explorer.exe\SupportedTypes",
+            Some(".epub"),
+            ""
+        ));
+        assert!(plan.set_values.iter().any(|value| value.key_path
+            == r"Software\Classes\.epub\OpenWithProgids"
+            && value.value_name.as_deref() == Some(EPUB_PROG_ID)));
+        assert!(
+            !plan
+                .set_values
+                .iter()
+                .any(|value| value.key_path == r"Software\Classes\.epub")
+        );
+        let cleanup = unregistration_plan();
+        assert!(
+            cleanup
+                .delete_trees
+                .contains(&format!(r"Software\Classes\{EPUB_PROG_ID}"))
+        );
+        assert!(cleanup.delete_values.iter().any(|value| value.key_path
+            == r"Software\Classes\.epub\OpenWithProgids"
+            && value.value_name == EPUB_PROG_ID));
+        assert!(!format!("{cleanup:?}").contains("UserChoice"));
     }
 
     #[test]

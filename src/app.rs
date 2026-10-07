@@ -148,6 +148,8 @@ enum SingleInstanceLaunch {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 struct LaunchRequest {
     image_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epub_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -598,8 +600,10 @@ pub(crate) fn open_new_explorer_window(
 
 impl LaunchRequest {
     fn from_args(args: impl IntoIterator<Item = OsString>) -> Self {
+        let args = args.into_iter().collect::<Vec<_>>();
         Self {
-            image_path: crate::image_viewer::startup_image_path(args),
+            image_path: crate::image_viewer::startup_image_path(args.clone()),
+            epub_path: crate::epub_reader::startup_epub_path(args),
         }
     }
 }
@@ -609,7 +613,9 @@ fn handle_initial_launch(request: LaunchRequest, cx: &mut App) {
 }
 
 fn handle_launch_request(request: LaunchRequest, cx: &mut App) {
-    if let Some(path) = request.image_path {
+    if let Some(path) = request.epub_path {
+        crate::epub_reader::open_epub_window(path, cx);
+    } else if let Some(path) = request.image_path {
         crate::image_viewer::open_image_window(path, cx);
     } else {
         handle_explorer_launch_request(cx);
@@ -693,9 +699,17 @@ fn launch_requests_from_open_urls(urls: impl IntoIterator<Item = String>) -> Vec
     urls.into_iter()
         .filter_map(|url| {
             let path = reqwest::Url::parse(&url).ok()?.to_file_path().ok()?;
-            crate::image_viewer::image_like_existing_file(&path).then_some(LaunchRequest {
-                image_path: Some(path),
-            })
+            if crate::epub_reader::epub_existing_file(&path) {
+                Some(LaunchRequest {
+                    image_path: None,
+                    epub_path: Some(path),
+                })
+            } else {
+                crate::image_viewer::image_like_existing_file(&path).then_some(LaunchRequest {
+                    image_path: Some(path),
+                    epub_path: None,
+                })
+            }
         })
         .collect()
 }
@@ -1004,6 +1018,30 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
     }
     push_split_pane_key_bindings(&mut bindings);
     push_large_icon_key_bindings(&mut bindings);
+    use crate::epub_reader::{
+        EpubBack, EpubBeginning, EpubCopy, EpubDismiss, EpubEnd, EpubNext, EpubPrevious,
+    };
+    bindings.extend([
+        KeyBinding::new("right", EpubNext, Some("EpubReader")),
+        KeyBinding::new("pagedown", EpubNext, Some("EpubReader")),
+        KeyBinding::new("space", EpubNext, Some("EpubReader")),
+        KeyBinding::new("left", EpubPrevious, Some("EpubReader")),
+        KeyBinding::new("pageup", EpubPrevious, Some("EpubReader")),
+        KeyBinding::new("shift-space", EpubPrevious, Some("EpubReader")),
+        KeyBinding::new("home", EpubBeginning, Some("EpubReader")),
+        KeyBinding::new("end", EpubEnd, Some("EpubReader")),
+        KeyBinding::new("alt-left", EpubBack, Some("EpubReader")),
+        KeyBinding::new("escape", EpubDismiss, Some("EpubReader")),
+        KeyBinding::new(
+            if profile == KeyBindingProfile::Mac {
+                "cmd-c"
+            } else {
+                "ctrl-c"
+            },
+            EpubCopy,
+            Some("EpubReader"),
+        ),
+    ]);
 
     bindings
 }
@@ -1562,6 +1600,74 @@ mod tests {
             let bindings = key_bindings_for_profile(profile);
             assert!(has_binding(&bindings, GoUp, "left", None));
         }
+    }
+
+    #[test]
+    fn epub_reader_bindings_use_a_dedicated_context() {
+        use crate::epub_reader::*;
+        for profile in [KeyBindingProfile::Mac, KeyBindingProfile::WindowsLike] {
+            let bindings = key_bindings_for_profile(profile);
+            for key in ["right", "pagedown", "space"] {
+                assert!(has_binding(&bindings, EpubNext, key, Some("EpubReader")));
+            }
+            for key in ["left", "pageup", "shift-space"] {
+                assert!(has_binding(
+                    &bindings,
+                    EpubPrevious,
+                    key,
+                    Some("EpubReader")
+                ));
+            }
+            assert!(has_binding(
+                &bindings,
+                EpubBeginning,
+                "home",
+                Some("EpubReader")
+            ));
+            assert!(has_binding(&bindings, EpubEnd, "end", Some("EpubReader")));
+            assert!(has_binding(
+                &bindings,
+                EpubBack,
+                "alt-left",
+                Some("EpubReader")
+            ));
+            assert!(has_binding(
+                &bindings,
+                EpubCopy,
+                if profile == KeyBindingProfile::Mac {
+                    "cmd-c"
+                } else {
+                    "ctrl-c"
+                },
+                Some("EpubReader")
+            ));
+        }
+    }
+
+    #[test]
+    fn epub_launch_requests_support_args_file_urls_and_legacy_messages() {
+        let dir = unique_temp_dir("epub-launch");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("café book.EPUB");
+        fs::write(&path, b"launch by extension").unwrap();
+        let request =
+            LaunchRequest::from_args([OsString::from("explorer"), path.clone().into_os_string()]);
+        assert_eq!(request.epub_path.as_deref(), Some(path.as_path()));
+        assert!(request.image_path.is_none());
+        assert_eq!(
+            launch_requests_from_open_urls([file_url(&path)]),
+            vec![request.clone()]
+        );
+        assert_eq!(
+            serde_json::from_str::<LaunchRequest>(&serde_json::to_string(&request).unwrap())
+                .unwrap(),
+            request
+        );
+        let legacy =
+            serde_json::from_str::<LaunchRequest>(r#"{"image_path":"photo.png"}"#).unwrap();
+        assert!(legacy.epub_path.is_none());
+        assert_eq!(legacy.image_path, Some(PathBuf::from("photo.png")));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2599,6 +2705,7 @@ mod tests {
             handle_launch_request(
                 LaunchRequest {
                     image_path: Some(image_path),
+                    epub_path: None,
                 },
                 cx,
             )
@@ -2630,9 +2737,11 @@ mod tests {
             vec![
                 LaunchRequest {
                     image_path: Some(named_image),
+                    epub_path: None,
                 },
                 LaunchRequest {
                     image_path: Some(extensionless_image),
+                    epub_path: None,
                 },
             ]
         );
@@ -2715,6 +2824,7 @@ mod tests {
         let mut primary = start_single_instance_primary(paths.clone()).expect("start primary");
         let request = LaunchRequest {
             image_path: Some(PathBuf::from("photo.png")),
+            epub_path: None,
         };
 
         send_launch_request_from_paths(&paths, &request).expect("send launch request");
@@ -2730,13 +2840,17 @@ mod tests {
     #[test]
     fn single_instance_secondary_routes_to_primary() {
         let dir = unique_temp_dir("single-instance-secondary");
-        let initial = LaunchRequest { image_path: None };
+        let initial = LaunchRequest {
+            image_path: None,
+            epub_path: None,
+        };
         let mut primary = match prepare_single_instance_launch_in_dir(dir.clone(), &initial) {
             SingleInstanceLaunch::Primary(Some(primary)) => primary,
             _ => panic!("initial launch should become primary"),
         };
         let request = LaunchRequest {
             image_path: Some(PathBuf::from("photo.png")),
+            epub_path: None,
         };
 
         let secondary = prepare_single_instance_launch_in_dir(dir.clone(), &request);
@@ -2788,8 +2902,13 @@ mod tests {
         )
         .unwrap();
 
-        let launch =
-            prepare_single_instance_launch_in_dir(dir.clone(), &LaunchRequest { image_path: None });
+        let launch = prepare_single_instance_launch_in_dir(
+            dir.clone(),
+            &LaunchRequest {
+                image_path: None,
+                epub_path: None,
+            },
+        );
 
         assert!(matches!(launch, SingleInstanceLaunch::Primary(Some(_))));
         drop(launch);

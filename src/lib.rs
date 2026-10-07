@@ -3,6 +3,8 @@ mod app;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod debug_options;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod epub_reader;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod explorer;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod http_client;

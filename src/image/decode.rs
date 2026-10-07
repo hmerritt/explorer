@@ -110,7 +110,7 @@ pub(super) fn apply_deferred_icc_correction(
     Ok(render_image_from_rgba(corrected))
 }
 
-pub(super) fn render_image_from_rgba(mut image: image::RgbaImage) -> Arc<RenderImage> {
+pub(crate) fn render_image_from_rgba(mut image: image::RgbaImage) -> Arc<RenderImage> {
     for pixel in image.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
