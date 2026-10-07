@@ -1159,7 +1159,7 @@ mod tests {
         assert!(cx.debug_bounds("trash-header-original-location").is_some());
         assert!(cx.debug_bounds("utility-bin-restore").is_some());
         assert!(cx.debug_bounds("utility-bin-empty").is_some());
-        assert!(cx.debug_bounds("explorer-sidebar-row-1000000").is_some());
+        assert!(cx.debug_bounds("explorer-sidebar-bin").is_some());
         cx.update(|_, app| {
             view.update(app, |view, cx| {
                 assert!(!view.can_start_selected_rename());
