@@ -1656,10 +1656,40 @@ fn load_svg_rgba_with_cancel_timed(
         }
     };
     timings.finish(ThumbnailStage::SourceRead, read_started);
+    load_svg_rgba_from_bytes_with_cancel_timed(
+        &bytes,
+        longest_side,
+        cancel,
+        timings_enabled,
+        timings,
+    )
+}
+
+pub(super) fn load_svg_rgba_from_bytes(
+    bytes: &[u8],
+    longest_side: u32,
+    cancel: &AtomicBool,
+) -> Result<image::RgbaImage, String> {
+    load_svg_rgba_from_bytes_with_cancel_timed(
+        bytes,
+        longest_side,
+        cancel,
+        false,
+        &mut ImageThumbnailExtractionTimings::default(),
+    )
+}
+
+fn load_svg_rgba_from_bytes_with_cancel_timed(
+    bytes: &[u8],
+    longest_side: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+    timings: &mut ImageThumbnailExtractionTimings,
+) -> Result<image::RgbaImage, String> {
     check_image_cancelled(cancel)?;
     let options = usvg::Options::default();
     let parse_started = thumbnail_timing_started(timings_enabled);
-    let tree = usvg::Tree::from_data(&bytes, &options);
+    let tree = usvg::Tree::from_data(bytes, &options);
     timings.finish(ThumbnailStage::SvgParse, parse_started);
     let tree = tree.map_err(|error| format!("Failed to parse SVG: {error}"))?;
     timings.source_dimensions = Some((tree.size().width() as u32, tree.size().height() as u32));

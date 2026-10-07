@@ -1339,7 +1339,7 @@ impl ExplorerView {
                     VideoHoverPreviewLookup::Failed => return None,
                 }
             }
-            HoverPreviewKind::Image | HoverPreviewKind::Pdf => {
+            kind @ (HoverPreviewKind::Image | HoverPreviewKind::Pdf | HoverPreviewKind::Epub) => {
                 self.cancel_video_hover_preview(cx);
                 self.cancel_text_hover_preview();
                 match self.hover_image_preview_for_entry(&state.entry, cx)? {
@@ -1356,6 +1356,21 @@ impl ExplorerView {
                         preview.width,
                         preview.height,
                         self.image_hover_preview_ready_content(preview, cx),
+                    ),
+                    HoverImagePreviewLookup::Failed if kind == HoverPreviewKind::Epub => (
+                        self.media_preview_size,
+                        self.media_preview_size,
+                        div()
+                            .debug_selector(|| "epub-hover-preview-no-cover".to_owned())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size_full()
+                            .p(px(12.0))
+                            .text_size(px(12.0))
+                            .text_color(rgb(0x595959))
+                            .child("No cover available")
+                            .into_any_element(),
                     ),
                     HoverImagePreviewLookup::Failed => return None,
                 }
@@ -12046,6 +12061,138 @@ mod tests {
 
         assert_eq!(preview.size.width, gpui::px(400.0));
         assert_eq!(preview.size.height, gpui::px(200.0));
+    }
+
+    #[gpui::test]
+    fn alt_hover_epub_loading_shows_existing_progress_indicator(cx: &mut gpui::TestAppContext) {
+        use crate::explorer::epub_hover_preview::test_support::write_epub;
+        let temp = TempDir::new();
+        write_epub(&temp.path().join("book.epub"), "3.0", None, None);
+        let (view, cx) =
+            add_hover_preview_test_view(cx, temp.path().to_path_buf(), FileViewMode::Details);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = view.entries[0].clone();
+                view.hold_hover_image_preview_loading_for_test(&entry, cx);
+            })
+        });
+        hover_selector(cx, "explorer-entry-0", alt_modifiers());
+        run_until_image_hover_preview_size(cx, (400.0, 400.0));
+        run_until_debug_bounds(cx, "image-hover-preview-loading-progress");
+        assert!(cx.debug_bounds("epub-hover-preview-no-cover").is_none());
+    }
+
+    #[gpui::test]
+    fn alt_hover_epub_cover_and_placeholder_in_details(cx: &mut gpui::TestAppContext) {
+        assert_epub_cover_and_placeholder_hover(
+            cx,
+            FileViewMode::Details,
+            ["explorer-entry-0", "explorer-entry-1", "explorer-entry-2"],
+        );
+    }
+
+    #[gpui::test]
+    fn alt_hover_epub_cover_and_placeholder_in_large_icons(cx: &mut gpui::TestAppContext) {
+        assert_epub_cover_and_placeholder_hover(
+            cx,
+            FileViewMode::LargeIcons,
+            [
+                "explorer-large-icon-entry-0",
+                "explorer-large-icon-entry-1",
+                "explorer-large-icon-entry-2",
+            ],
+        );
+    }
+
+    fn assert_epub_cover_and_placeholder_hover(
+        cx: &mut gpui::TestAppContext,
+        mode: FileViewMode,
+        selectors: [&'static str; 3],
+    ) {
+        use crate::explorer::epub_hover_preview::test_support::{raster_cover, write_epub};
+        use crate::explorer::image_thumbnails::HoverImagePreviewLookup;
+        let temp = TempDir::new();
+        write_epub(&temp.path().join("01-no-cover.epub"), "2.0", None, None);
+        let bytes = raster_cover(4, 8, image::ImageFormat::Png);
+        let cover_path = temp.path().join("02-cover.EPUB");
+        write_epub(
+            &cover_path,
+            "3.0",
+            Some(("cover.png", "image/png")),
+            Some(("cover.png", &bytes)),
+        );
+        fs::write(temp.path().join("03-broken.epub"), b"not an EPUB").unwrap();
+        let (view, cx) = add_hover_preview_test_view(cx, temp.path().to_path_buf(), mode);
+
+        hover_selector(cx, selectors[0], Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("image-hover-preview").is_none());
+        hover_selector(cx, selectors[0], alt_modifiers());
+        run_until_debug_bounds(cx, "epub-hover-preview-no-cover");
+        run_until_image_hover_preview_size(cx, (400.0, 400.0));
+
+        hover_selector(cx, selectors[1], alt_modifiers());
+        run_until_image_hover_preview_size(cx, (200.0, 400.0));
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.image_hover_preview.as_ref().unwrap().entry.path,
+                cover_path
+            );
+        });
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let entry = view.image_hover_preview.as_ref().unwrap().entry.clone();
+                assert!(matches!(
+                    view.hover_image_preview_for_entry(&entry, cx),
+                    Some(HoverImagePreviewLookup::Ready(_))
+                ));
+            })
+        });
+
+        // Resizing uses the same setting and cache identity as other media previews.
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.media_preview_size = 240;
+                cx.notify();
+            })
+        });
+        run_until_image_hover_preview_size(cx, (120.0, 240.0));
+        hover_selector(cx, selectors[2], alt_modifiers());
+        let mut failed = false;
+        for _ in 0..20 {
+            cx.run_until_parked();
+            failed = cx.update(|_, app| {
+                view.update(app, |view, cx| {
+                    let entry = view.image_hover_preview.as_ref().unwrap().entry.clone();
+                    matches!(
+                        view.hover_image_preview_for_entry(&entry, cx),
+                        Some(HoverImagePreviewLookup::Failed)
+                    )
+                })
+            });
+            if failed {
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "invalid EPUB should finish loading with a placeholder"
+        );
+        run_until_image_hover_preview_size(cx, (240.0, 240.0));
+
+        cx.simulate_modifiers_change(Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| assert!(!view.image_hover_preview_alt));
+        // GPUI retains historical debug bounds; check the current overlay directly.
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(
+                    view.render_image_hover_preview_overlay(window, cx)
+                        .is_none()
+                );
+            })
+        });
     }
 
     #[gpui::test]

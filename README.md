@@ -76,6 +76,7 @@ scoop install hmerritt/explorer
     - [x] Images
     - [x] Videos
     - [x] PDF first-page preview
+    - [x] EPUB cover preview
     - [x] Text (plain text, logs, markdown, code files, etc...)
 - [x] File properties
     - [x] Generic file/folder information

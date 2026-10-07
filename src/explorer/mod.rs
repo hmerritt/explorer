@@ -16,6 +16,7 @@ mod directory_kind;
 mod download;
 mod drag_drop;
 mod entry;
+mod epub_hover_preview;
 mod explorer_fs;
 mod file_commands;
 mod filesystem;

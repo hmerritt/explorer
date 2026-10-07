@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     explorer::{
         entry::FileEntry,
+        epub_hover_preview::{load_epub_cover_rgba, path_may_have_epub_preview},
         filesystem::path_is_remote_drive,
         image_preview::{
             AnimatedImageSource, ImageThumbnailExtractionTimings, ThumbnailSpec, ThumbnailStage,
@@ -115,6 +116,7 @@ pub(super) enum ThumbnailSourcePolicy {
 enum ImageThumbnailKind {
     Image,
     Pdf,
+    Epub,
     Video,
 }
 
@@ -129,9 +131,11 @@ impl ImageThumbnailUsage {
         match (self, kind) {
             (Self::Standard, ImageThumbnailKind::Image) => "image-v3",
             (Self::Standard, ImageThumbnailKind::Pdf) => "pdf",
+            (Self::Standard, ImageThumbnailKind::Epub) => "epub",
             (Self::Standard, ImageThumbnailKind::Video) => "video-v2",
             (Self::HoverPreview, ImageThumbnailKind::Image) => "image-v3",
             (Self::HoverPreview, ImageThumbnailKind::Pdf) => "pdf-hover-preview-v1",
+            (Self::HoverPreview, ImageThumbnailKind::Epub) => "epub-hover-preview-v1",
             (Self::HoverPreview, ImageThumbnailKind::Video) => "video-hover-preview",
         }
     }
@@ -775,10 +779,15 @@ impl ExplorerView {
         ) else {
             return;
         };
-        let Ok((width, height)) =
-            hover_image_preview_dimensions(&request.path, self.media_preview_size)
-        else {
-            return;
+        let (width, height) = if request.kind == ImageThumbnailKind::Epub {
+            (self.media_preview_size, self.media_preview_size)
+        } else {
+            let Ok(dimensions) =
+                hover_image_preview_dimensions(&request.path, self.media_preview_size)
+            else {
+                return;
+            };
+            dimensions
         };
         if let Some(cache) = cx.try_global::<ImageThumbnailCache>() {
             cache.inner.borrow_mut().states.insert(
@@ -1114,6 +1123,9 @@ fn load_or_create_thumbnail_with_timings(
                 }
                 ImageThumbnailKind::Pdf => {
                     load_pdf_first_page_rgba(&request.path, request.size, cancel)
+                }
+                ImageThumbnailKind::Epub => {
+                    load_epub_cover_rgba(&request.path, request.size, cancel)
                 }
                 ImageThumbnailKind::Video => {
                     load_video_thumbnail_rgba(&request.path, IMAGE_THUMBNAIL_SIZE, cancel)
@@ -1496,6 +1508,10 @@ pub(super) fn entry_may_have_hover_pdf_preview(entry: &FileEntry) -> bool {
     !entry.is_directory_like() && path_may_have_pdf_preview(&entry.path)
 }
 
+pub(super) fn entry_may_have_hover_epub_preview(entry: &FileEntry) -> bool {
+    !entry.is_directory_like() && path_may_have_epub_preview(&entry.path)
+}
+
 pub(super) fn entry_may_have_hover_video_preview(entry: &FileEntry) -> bool {
     !entry.is_directory_like() && path_may_have_video_metadata(&entry.path)
 }
@@ -1510,6 +1526,8 @@ fn hover_image_preview_request_for_entry(
         ImageThumbnailKind::Image
     } else if entry_may_have_hover_pdf_preview(entry) {
         ImageThumbnailKind::Pdf
+    } else if entry_may_have_hover_epub_preview(entry) {
+        ImageThumbnailKind::Epub
     } else {
         return None;
     };
@@ -1547,6 +1565,8 @@ fn image_thumbnail_key(entry: &FileEntry, kind: ImageThumbnailKind) -> String {
 fn hover_image_preview_key(entry: &FileEntry, size: u32) -> String {
     let kind = if entry_may_have_hover_pdf_preview(entry) {
         ImageThumbnailKind::Pdf
+    } else if entry_may_have_hover_epub_preview(entry) {
+        ImageThumbnailKind::Epub
     } else {
         ImageThumbnailKind::Image
     };
@@ -2461,7 +2481,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_preview_requests_include_images_and_pdfs_only() {
+    fn hover_preview_requests_include_images_pdfs_and_epubs_only() {
         assert!(
             hover_image_preview_request_for_entry(
                 &FileEntry::test("folder", true, None, Some(UNIX_EPOCH)),
@@ -2537,6 +2557,141 @@ mod tests {
             hover_image_preview_key(&first, HOVER_IMAGE_PREVIEW_SIZE),
             hover_image_preview_key(&first, HOVER_IMAGE_PREVIEW_SIZE + 1)
         );
+    }
+
+    #[test]
+    fn epub_preview_requests_are_hover_only_and_exclude_directories() {
+        let entry = FileEntry::test("book.EPUB", false, Some(1), Some(UNIX_EPOCH));
+        let request = hover_image_preview_request_for_entry(
+            &entry,
+            Path::new("folder"),
+            ThumbnailSourcePolicy::ReadSource,
+            240,
+        )
+        .unwrap();
+        assert_eq!(request.kind, ImageThumbnailKind::Epub);
+        assert_eq!(request.usage, ImageThumbnailUsage::HoverPreview);
+        assert_eq!(request.size, 240);
+        assert_eq!(
+            request.usage.cache_namespace(request.kind),
+            "epub-hover-preview-v1"
+        );
+        assert!(
+            image_thumbnail_request_for_entry(
+                &entry,
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
+            )
+            .is_none()
+        );
+        let directory = FileEntry::test("folder.epub", true, None, None);
+        assert!(!entry_may_have_hover_epub_preview(&directory));
+        assert!(
+            hover_image_preview_request_for_entry(
+                &directory,
+                Path::new("folder"),
+                ThumbnailSourcePolicy::ReadSource,
+                240,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn epub_preview_cache_identity_includes_kind_path_metadata_and_size() {
+        let entry = FileEntry::test("book.epub", false, Some(1), Some(UNIX_EPOCH));
+        let key = hover_image_preview_key(&entry, 400);
+        for changed in [
+            FileEntry::test("other.epub", false, Some(1), Some(UNIX_EPOCH)),
+            FileEntry::test("book.epub", false, Some(2), Some(UNIX_EPOCH)),
+            FileEntry::test(
+                "book.epub",
+                false,
+                Some(1),
+                Some(UNIX_EPOCH + Duration::from_secs(1)),
+            ),
+        ] {
+            assert_ne!(key, hover_image_preview_key(&changed, 400));
+        }
+        assert_ne!(key, hover_image_preview_key(&entry, 240));
+        assert_ne!(
+            key,
+            image_thumbnail_key_for_usage(
+                &entry,
+                ImageThumbnailKind::Image,
+                ImageThumbnailUsage::HoverPreview,
+                400,
+            )
+        );
+    }
+
+    #[test]
+    fn epub_cover_round_trips_through_disk_cache_without_reading_source() {
+        use crate::explorer::epub_hover_preview::test_support::{raster_cover, write_epub};
+        let temp = TempDir::new();
+        let path = temp.path().join("book.epub");
+        let bytes = raster_cover(4, 8, image::ImageFormat::Png);
+        write_epub(
+            &path,
+            "3.0",
+            Some(("cover.png", "image/png")),
+            Some(("cover.png", &bytes)),
+        );
+        let entry = FileEntry::from_path(path.clone()).unwrap();
+        let request = hover_image_preview_request_for_entry(
+            &entry,
+            temp.path(),
+            ThumbnailSourcePolicy::ReadSource,
+            240,
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let generated =
+            load_or_create_thumbnail_cache_bytes(&request, Some(temp.path()), &cancel).unwrap();
+        assert_eq!(
+            decode_cached_thumbnail_rgba(&generated)
+                .unwrap()
+                .dimensions(),
+            (120, 240)
+        );
+        assert!(write_cached_thumbnail(
+            Some(temp.path()),
+            &request.key,
+            &generated
+        ));
+        fs::remove_file(path).unwrap();
+        let cache_only = ImageThumbnailRequest {
+            source_policy: ThumbnailSourcePolicy::CacheOnly,
+            ..request
+        };
+        let cached =
+            load_or_create_thumbnail_with_timings(&cache_only, Some(temp.path()), &cancel, true);
+        assert_eq!(cached.outcome, ImageThumbnailLoadOutcome::CacheHit);
+        let preview = cached.image.unwrap();
+        assert_eq!((preview.width, preview.height), (120, 240));
+        assert!(preview.animated_source.is_none());
+        assert!(cached.timings.get(ThumbnailStage::Extract).is_none());
+    }
+
+    #[test]
+    fn failed_epub_hover_preview_does_not_reschedule_the_same_request() {
+        let mut cache = ImageThumbnailCacheInner::new(None);
+        let entry = FileEntry::test("missing.epub", false, Some(1), Some(UNIX_EPOCH));
+        let request = hover_image_preview_request_for_entry(
+            &entry,
+            Path::new("folder"),
+            ThumbnailSourcePolicy::ReadSource,
+            400,
+        )
+        .unwrap();
+        let (_, generation) = cache.hover_preview_for_request(request.clone(), None);
+        let generation = generation.unwrap();
+        let job = cache.next_load_job(generation).unwrap();
+        assert!(cache.finish_request(job.request, generation, None));
+        let (preview, restart) = cache.hover_preview_for_request(request, None);
+        assert!(matches!(preview, HoverImagePreviewLookup::Failed));
+        assert!(restart.is_none());
+        assert!(cache.pending.is_empty());
     }
 
     #[test]
@@ -2967,6 +3122,28 @@ mod tests {
             true,
         );
 
+        assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Failed);
+        assert!(result.image.is_none());
+        assert!(result.timings.get(ThumbnailStage::Extract).is_none());
+    }
+
+    #[test]
+    fn cache_only_epub_hover_miss_does_not_open_source() {
+        let temp = TempDir::new();
+        let entry = FileEntry::test("missing.epub", false, Some(1), Some(UNIX_EPOCH));
+        let request = hover_image_preview_request_for_entry(
+            &entry,
+            temp.path(),
+            ThumbnailSourcePolicy::CacheOnly,
+            400,
+        )
+        .unwrap();
+        let result = load_or_create_thumbnail_with_timings(
+            &request,
+            Some(temp.path()),
+            &AtomicBool::new(false),
+            true,
+        );
         assert_eq!(result.outcome, ImageThumbnailLoadOutcome::Failed);
         assert!(result.image.is_none());
         assert!(result.timings.get(ThumbnailStage::Extract).is_none());

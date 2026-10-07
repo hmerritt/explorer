@@ -10,8 +10,8 @@ use gpui::{Context, Task};
 use crate::explorer::{
     entry::FileEntry,
     image_thumbnails::{
-        entry_may_have_hover_image_preview, entry_may_have_hover_pdf_preview,
-        entry_may_have_hover_video_preview,
+        entry_may_have_hover_epub_preview, entry_may_have_hover_image_preview,
+        entry_may_have_hover_pdf_preview, entry_may_have_hover_video_preview,
     },
     view::ExplorerView,
 };
@@ -111,6 +111,7 @@ const TEXT_PREVIEW_FILE_NAMES: &[&str] = &[
 pub(super) enum HoverPreviewKind {
     Image,
     Pdf,
+    Epub,
     Video,
     Text,
 }
@@ -124,6 +125,9 @@ pub(super) fn hover_preview_kind(entry: &FileEntry) -> Option<HoverPreviewKind> 
     }
     if entry_may_have_hover_pdf_preview(entry) {
         return Some(HoverPreviewKind::Pdf);
+    }
+    if entry_may_have_hover_epub_preview(entry) {
+        return Some(HoverPreviewKind::Epub);
     }
     entry_may_have_hover_text_preview(entry).then_some(HoverPreviewKind::Text)
 }
@@ -538,6 +542,10 @@ mod tests {
         assert_eq!(
             hover_preview_kind(&preview_entry("document.PDF")),
             Some(HoverPreviewKind::Pdf)
+        );
+        assert_eq!(
+            hover_preview_kind(&preview_entry("book.EPUB")),
+            Some(HoverPreviewKind::Epub)
         );
         assert_eq!(
             hover_preview_kind(&preview_entry("notes.md")),
