@@ -296,7 +296,9 @@ export function Footer() {
       </div>
       <div className="footer-bottom label">
         <span>Explorer · Free and open source</span>
-        <span>Built in Rust. Made for your files.</span>
+        <a href="https://mrrtt.me">
+          <span>Made with ❤️ by Harry Merritt</span>
+        </a>
       </div>
     </footer>
   )

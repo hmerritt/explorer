@@ -11,7 +11,7 @@ import { SITE_URL } from '../lib/releases'
 
 const title = 'Explorer — Windows File Explorer for macOS, Linux and Windows'
 const description =
-  'The familiar file explorer, built in Rust with GPUI. Tabs, instant previews, fast search and native file management. Free and open source.'
+  'A free cross-platform file explorer packed with features. Tabs, split-views, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.'
 
 export const Route = createRootRoute({
   head: () => ({

@@ -115,9 +115,9 @@ function Hero({
           <br className="desktop-break" /> and Windows.
         </h1>
         <p className="hero-description">
-          The familiar file explorer, built in Rust. Tabs, instant previews,
-          fast search and the tools to manage your files. Native, free and open
-          source.
+          A file explorer packed with features: Tabs, split-views, instant
+          previews, SFTP support, URL downloads, Git repo integrations, a built
+          in image viewer and EPUB reader.
         </p>
         <div className="hero-actions">
           <ButtonLink href={href} primary down download={!href.startsWith('#')}>
