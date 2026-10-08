@@ -78,6 +78,7 @@ pub(crate) const EXPLORER_PANE_BINDING_CONTEXT: &str = "(ExplorerTabs > Explorer
 pub(crate) const EXPLORER_SPLIT_PANE_BINDING_CONTEXT: &str = "((ExplorerTabs && split == true) > Explorer) && !ExplorerRenameInput && !ExplorerAddressInput && !ExplorerSearchInput";
 
 pub(crate) use actions::{
+    ExtendLargeIconDown, ExtendLargeIconLeft, ExtendLargeIconRight, ExtendLargeIconUp,
     MoveLargeIconDown, MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp,
 };
 

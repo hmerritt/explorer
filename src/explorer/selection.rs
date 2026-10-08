@@ -380,6 +380,18 @@ impl ExplorerView {
     }
 
     pub(super) fn move_large_icon_selection(&mut self, direction: LargeIconSelectionDirection) {
+        self.move_large_icon_selection_with_extension(direction, false);
+    }
+
+    pub(super) fn extend_large_icon_selection(&mut self, direction: LargeIconSelectionDirection) {
+        self.move_large_icon_selection_with_extension(direction, true);
+    }
+
+    fn move_large_icon_selection_with_extension(
+        &mut self,
+        direction: LargeIconSelectionDirection,
+        extend: bool,
+    ) {
         self.cancel_pending_transfer_reveal();
         if self.entries.is_empty() {
             self.clear_selection();
@@ -412,7 +424,11 @@ impl ExplorerView {
             columns,
             direction,
         ) {
-            self.select_single_index(target);
+            if extend {
+                self.extend_selection_to_index(target);
+            } else {
+                self.select_single_index(target);
+            }
         }
     }
 
@@ -721,6 +737,179 @@ mod tests {
         view.select_single_index(6);
         view.move_large_icon_selection(LargeIconSelectionDirection::Above);
         assert_eq!(selected_names(&view), vec!["c.txt"]);
+    }
+
+    #[test]
+    fn large_icon_shift_arrows_select_inclusive_ranges_in_every_direction() {
+        use LargeIconSelectionDirection::{Above, Below, Next, Previous};
+
+        let mut view = test_view_with_entries(&[
+            "a.txt", "b.txt", "folder-c", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt",
+        ]);
+        view.entries[2] = FileEntry::test("folder-c", true, None, None);
+        view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            3,
+            0.0,
+            vec![100.0; view.entries.len()],
+        ));
+
+        for (direction, target) in [(Previous, 3), (Next, 5), (Above, 1), (Below, 7)] {
+            view.select_single_index(4);
+            view.extend_large_icon_selection(direction);
+            assert_eq!(view.selection.anchor_index, Some(4));
+            assert_eq!(view.selection.focused_index, Some(target));
+            assert_eq!(
+                view.selection.selected_indices,
+                (target.min(4)..=target.max(4)).collect()
+            );
+        }
+
+        // Horizontal movement across a row boundary still follows display order.
+        view.select_single_index(2);
+        view.extend_large_icon_selection(Next);
+        assert_eq!(selected_names(&view), vec!["folder-c", "d.txt"]);
+        view.extend_large_icon_selection(Previous);
+        assert_eq!(selected_names(&view), vec!["folder-c"]);
+    }
+
+    #[test]
+    fn large_icon_shift_arrows_reverse_and_cross_the_original_anchor() {
+        use LargeIconSelectionDirection::{Above, Below, Next, Previous};
+
+        let mut view = test_view_with_entries(&[
+            "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt", "i.txt",
+            "j.txt", "k.txt", "l.txt",
+        ]);
+        view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            3,
+            0.0,
+            vec![100.0; view.entries.len()],
+        ));
+        view.select_single_index(4);
+
+        for (direction, target) in [
+            (Above, 1),
+            (Below, 4),
+            (Below, 7),
+            (Below, 10),
+            (Above, 7),
+            (Above, 4),
+            (Above, 1),
+            (Next, 2),
+            (Next, 3),
+            (Next, 4),
+            (Next, 5),
+            (Previous, 4),
+            (Previous, 3),
+        ] {
+            view.extend_large_icon_selection(direction);
+            assert_eq!(view.selection.anchor_index, Some(4));
+            assert_eq!(view.selection.focused_index, Some(target));
+            assert_eq!(
+                view.selection.selected_indices,
+                (target.min(4)..=target.max(4)).collect()
+            );
+        }
+    }
+
+    #[test]
+    fn large_icon_shift_arrows_preserve_ranges_at_bounds_and_clamp_partial_rows() {
+        use LargeIconSelectionDirection::{Above, Below, Next, Previous};
+
+        let mut view = test_view_with_entries(&[
+            "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt",
+        ]);
+        view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            3,
+            0.0,
+            vec![100.0; view.entries.len()],
+        ));
+
+        view.select_single_index(5);
+        view.extend_large_icon_selection(Below);
+        assert_eq!(selected_names(&view), vec!["f.txt", "g.txt", "h.txt"]);
+        let bottom_selection = view.selection.clone();
+        view.extend_large_icon_selection(Below);
+        view.extend_large_icon_selection(Next);
+        assert_eq!(view.selection, bottom_selection);
+
+        view.select_single_index(4);
+        view.extend_large_icon_selection(Above);
+        let top_selection = view.selection.clone();
+        view.extend_large_icon_selection(Above);
+        assert_eq!(view.selection, top_selection);
+        view.extend_large_icon_selection(Previous);
+        assert_eq!(view.selection.selected_indices, (0..=4).collect());
+        let first_selection = view.selection.clone();
+        view.extend_large_icon_selection(Previous);
+        assert_eq!(view.selection, first_selection);
+    }
+
+    #[test]
+    fn large_icon_shift_arrows_initialize_missing_selection_and_handle_empty_folders() {
+        use LargeIconSelectionDirection::{Above, Below, Next, Previous};
+
+        let mut view = test_view_with_entries(&["a.txt", "b.txt"]);
+        for direction in [Previous, Next, Above, Below] {
+            for focused in [None, Some(1), Some(20)] {
+                view.clear_selection();
+                view.selection.focused_index = focused;
+                view.extend_large_icon_selection(direction);
+                assert_eq!(selected_names(&view), vec!["a.txt"]);
+                assert_eq!(view.selection.anchor_index, Some(0));
+                assert_eq!(view.selection.focused_index, Some(0));
+            }
+
+            view.selection.focused_index = None;
+            view.extend_large_icon_selection(direction);
+            assert_eq!(selected_names(&view), vec!["a.txt"]);
+
+            let mut empty_view = test_view_with_entries(&[]);
+            empty_view.selection = view.selection.clone();
+            empty_view.extend_large_icon_selection(direction);
+            assert_eq!(empty_view.selection, SelectionState::default());
+
+            let mut single_view = test_view_with_entries(&["only.txt"]);
+            single_view.large_icon_layout =
+                Some(LargeIconLayout::from_tile_heights(3, 0.0, vec![100.0]));
+            single_view.select_single_index(0);
+            single_view.extend_large_icon_selection(direction);
+            assert_eq!(selected_names(&single_view), vec!["only.txt"]);
+        }
+    }
+
+    #[test]
+    fn large_icon_shift_arrows_use_current_layout_and_wait_for_missing_rows() {
+        use LargeIconSelectionDirection::{Above, Below, Next};
+
+        let mut view = test_view_with_entries(&[
+            "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt",
+        ]);
+        view.select_single_index(6);
+        let original = view.selection.clone();
+        view.extend_large_icon_selection(Above);
+        view.extend_large_icon_selection(Below);
+        assert_eq!(view.selection, original);
+        view.extend_large_icon_selection(Next);
+        assert_eq!(selected_names(&view), vec!["g.txt", "h.txt"]);
+
+        view.select_single_index(6);
+        view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            3,
+            0.0,
+            vec![100.0; view.entries.len()],
+        ));
+        view.extend_large_icon_selection(Above);
+        assert_eq!(view.selection.focused_index, Some(3));
+        view.large_icon_layout = Some(LargeIconLayout::from_tile_heights(
+            4,
+            0.0,
+            vec![100.0; view.entries.len()],
+        ));
+        view.extend_large_icon_selection(Below);
+        assert_eq!(view.selection.anchor_index, Some(6));
+        assert_eq!(view.selection.focused_index, Some(7));
+        assert_eq!(selected_names(&view), vec!["g.txt", "h.txt"]);
     }
 
     #[test]

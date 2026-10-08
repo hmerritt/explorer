@@ -4066,6 +4066,10 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_move_large_icon_right))
             .on_action(cx.listener(Self::handle_move_large_icon_up))
             .on_action(cx.listener(Self::handle_move_large_icon_down))
+            .on_action(cx.listener(Self::handle_extend_large_icon_left))
+            .on_action(cx.listener(Self::handle_extend_large_icon_right))
+            .on_action(cx.listener(Self::handle_extend_large_icon_up))
+            .on_action(cx.listener(Self::handle_extend_large_icon_down))
             .on_action(cx.listener(Self::handle_move_up))
             .on_action(cx.listener(Self::handle_move_down))
             .on_action(cx.listener(Self::handle_extend_up))
@@ -8544,6 +8548,66 @@ mod tests {
                     measurements + 1
                 );
             })
+        });
+    }
+
+    #[gpui::test]
+    fn large_icon_shift_actions_extend_ranges_and_scroll_focus(cx: &mut gpui::TestAppContext) {
+        use crate::explorer::{
+            ExtendLargeIconDown, ExtendLargeIconLeft, ExtendLargeIconRight, ExtendLargeIconUp,
+        };
+
+        let names = (0..180)
+            .map(|ix| format!("item-{ix:03}.txt"))
+            .collect::<Vec<_>>();
+        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let (_temp, view, cx) = test_view_entity_with_mode(cx, &refs, FileViewMode::LargeIcons);
+        run_until_debug_bounds(cx, "explorer-large-icon-entry-0");
+        let columns = cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.select_single_index(1);
+                cx.notify();
+                view.large_icon_layout.as_ref().unwrap().columns
+            })
+        });
+
+        cx.dispatch_action(ExtendLargeIconRight);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selection.selected_indices, (1..=2).collect());
+        });
+        cx.dispatch_action(ExtendLargeIconLeft);
+        cx.dispatch_action(ExtendLargeIconDown);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selection.focused_index, Some(1 + columns));
+            assert_eq!(view.selection.selected_indices, (1..=1 + columns).collect());
+        });
+        cx.dispatch_action(ExtendLargeIconUp);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selection.focused_index, Some(1));
+            assert_eq!(view.selection.selected_indices, [1].into_iter().collect());
+        });
+
+        for _ in 0..12 {
+            cx.dispatch_action(ExtendLargeIconDown);
+        }
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            let last = view.entries.len() - 1;
+            let last_row = last / columns;
+            let focused = (1 + 12.min(last_row) * columns).min(last);
+            assert_eq!(view.selection.anchor_index, Some(1));
+            assert_eq!(view.selection.focused_index, Some(focused));
+            assert_eq!(view.selection.selected_indices, (1..=focused).collect());
+            let metrics = view.scrollbar_metrics().unwrap();
+            assert!(metrics.scroll_top > 0.0);
+            let (_, top, _, height) = view
+                .large_icon_layout
+                .as_ref()
+                .unwrap()
+                .index_bounds(focused)
+                .unwrap();
+            assert!(top >= metrics.scroll_top - 0.1);
+            assert!(top + height <= metrics.scroll_top + metrics.viewport_height + 0.1);
         });
     }
 

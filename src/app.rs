@@ -33,9 +33,10 @@ use crate::explorer::{
     CloseTab, CopySelected, CreateNewFolder, CutSelected, DialogCancel, DialogConfirm,
     DialogFocusPrimary, DialogFocusSecondary, EXPLORER_LARGE_ICONS_BINDING_CONTEXT,
     EXPLORER_PANE_BINDING_CONTEXT, EXPLORER_SPLIT_PANE_BINDING_CONTEXT, EnterSelected,
-    EnterSelectedInNewTab, ExplorerTabs, ExtendDown, ExtendEnd, ExtendHome, ExtendUp,
-    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, GoBack, GoForward, GoUp, MoveDown,
-    MoveEnd, MoveHome, MoveLargeIconDown, MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp,
+    EnterSelectedInNewTab, ExplorerTabs, ExtendDown, ExtendEnd, ExtendHome, ExtendLargeIconDown,
+    ExtendLargeIconLeft, ExtendLargeIconRight, ExtendLargeIconUp, ExtendUp, FocusPaneDown,
+    FocusPaneLeft, FocusPaneRight, FocusPaneUp, GoBack, GoForward, GoUp, MoveDown, MoveEnd,
+    MoveHome, MoveLargeIconDown, MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp,
     MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp, MoveUp, NewTab, NewWindow,
     OpenProperties, OpenSelected, OpenSelectedInNewTab, OpenSettings, PasteClipboard,
     PermanentlyDeleteSelected, PropertiesOpenNext, PropertiesOpenPrevious, RecursiveSearchEdit,
@@ -1072,6 +1073,10 @@ fn push_large_icon_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("right", MoveLargeIconRight, context),
         KeyBinding::new("up", MoveLargeIconUp, context),
         KeyBinding::new("down", MoveLargeIconDown, context),
+        KeyBinding::new("shift-left", ExtendLargeIconLeft, context),
+        KeyBinding::new("shift-right", ExtendLargeIconRight, context),
+        KeyBinding::new("shift-up", ExtendLargeIconUp, context),
+        KeyBinding::new("shift-down", ExtendLargeIconDown, context),
     ]);
 }
 
@@ -1855,10 +1860,27 @@ mod tests {
                 "down",
                 &large_icons
             ));
-            assert!(resolves_to(&bindings, ExtendUp, "shift-up", &large_icons));
             assert!(resolves_to(
                 &bindings,
-                ExtendDown,
+                ExtendLargeIconLeft,
+                "shift-left",
+                &large_icons
+            ));
+            assert!(resolves_to(
+                &bindings,
+                ExtendLargeIconRight,
+                "shift-right",
+                &large_icons
+            ));
+            assert!(resolves_to(
+                &bindings,
+                ExtendLargeIconUp,
+                "shift-up",
+                &large_icons
+            ));
+            assert!(resolves_to(
+                &bindings,
+                ExtendLargeIconDown,
                 "shift-down",
                 &large_icons
             ));
@@ -1874,12 +1896,21 @@ mod tests {
         assert!(resolves_to(&mac, OpenSelected, "right", &details));
         assert!(resolves_to(&mac, MoveUp, "up", &details));
         assert!(resolves_to(&mac, MoveDown, "down", &details));
+        assert!(resolves_to(&mac, ExtendUp, "shift-up", &details));
+        assert!(resolves_to(&mac, ExtendDown, "shift-down", &details));
 
         let windows_like = key_bindings_for_profile(KeyBindingProfile::WindowsLike);
         assert!(resolves_to(&windows_like, GoUp, "left", &details));
         assert!(resolves_to(&windows_like, OpenSelected, "right", &details));
         assert!(resolves_to(&windows_like, MoveUp, "up", &details));
         assert!(resolves_to(&windows_like, MoveDown, "down", &details));
+        assert!(resolves_to(&windows_like, ExtendUp, "shift-up", &details));
+        assert!(resolves_to(
+            &windows_like,
+            ExtendDown,
+            "shift-down",
+            &details
+        ));
     }
 
     #[test]
@@ -1895,12 +1926,38 @@ mod tests {
             ];
             assert!(resolves_to(&bindings, RenameLeft, "left", &rename));
             assert!(resolves_to(&bindings, RenameNoop, "up", &rename));
+            assert!(resolves_to(
+                &bindings,
+                RenameSelectLeft,
+                "shift-left",
+                &rename
+            ));
+            assert!(resolves_to(
+                &bindings,
+                RenameSelectRight,
+                "shift-right",
+                &rename
+            ));
+            assert!(resolves_to(&bindings, RenameNoop, "shift-up", &rename));
+            assert!(resolves_to(&bindings, RenameNoop, "shift-down", &rename));
 
             let address = [
                 large_icons.clone(),
                 KeyContext::parse("ExplorerAddressInput").expect("valid address context"),
             ];
             assert!(resolves_to(&bindings, AddressRight, "right", &address));
+            assert!(resolves_to(
+                &bindings,
+                AddressSelectLeft,
+                "shift-left",
+                &address
+            ));
+            assert!(resolves_to(
+                &bindings,
+                AddressSelectRight,
+                "shift-right",
+                &address
+            ));
             assert!(resolves_to(
                 &bindings,
                 AddressSuggestionDown,
@@ -1914,6 +1971,18 @@ mod tests {
             ];
             assert!(resolves_to(&bindings, SearchLeft, "left", &search));
             assert!(resolves_to(&bindings, SearchRight, "right", &search));
+            assert!(resolves_to(
+                &bindings,
+                SearchSelectLeft,
+                "shift-left",
+                &search
+            ));
+            assert!(resolves_to(
+                &bindings,
+                SearchSelectRight,
+                "shift-right",
+                &search
+            ));
 
             let dialog = [
                 large_icons.clone(),

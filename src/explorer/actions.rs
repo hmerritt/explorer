@@ -16,6 +16,10 @@ actions!(
         MoveLargeIconRight,
         MoveLargeIconUp,
         MoveLargeIconDown,
+        ExtendLargeIconLeft,
+        ExtendLargeIconRight,
+        ExtendLargeIconUp,
+        ExtendLargeIconDown,
         ExtendUp,
         ExtendDown,
         MoveHome,
@@ -185,6 +189,46 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) {
         self.move_large_icon_selection(LargeIconSelectionDirection::Below);
+        cx.notify();
+    }
+
+    pub(super) fn handle_extend_large_icon_left(
+        &mut self,
+        _: &ExtendLargeIconLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_large_icon_selection(LargeIconSelectionDirection::Previous);
+        cx.notify();
+    }
+
+    pub(super) fn handle_extend_large_icon_right(
+        &mut self,
+        _: &ExtendLargeIconRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_large_icon_selection(LargeIconSelectionDirection::Next);
+        cx.notify();
+    }
+
+    pub(super) fn handle_extend_large_icon_up(
+        &mut self,
+        _: &ExtendLargeIconUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_large_icon_selection(LargeIconSelectionDirection::Above);
+        cx.notify();
+    }
+
+    pub(super) fn handle_extend_large_icon_down(
+        &mut self,
+        _: &ExtendLargeIconDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_large_icon_selection(LargeIconSelectionDirection::Below);
         cx.notify();
     }
 
