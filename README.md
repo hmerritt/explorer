@@ -52,53 +52,53 @@ scoop install hmerritt/explorer
 
 ## ⚡ Features
 
-- [x] Cross-platform macOS, Linux (Wayland/X11), and Windows
-- [x] GPU-accelerated Explorer UI ([GPUI](https://gpui.rs/))
-- [x] Tabs
-- [x] Arrow keys navigation
-- [x] Sidebar custom pins (drag-to-pin)
-- [x] Key bindings for ~~everything~~ most things
-- [x] HTTP, HTTPS, FTP, and SFTP file URLs can be downloaded directly when pasted
-- [x] `yt-dlp` integration, supported URLs can be downloaded as videos when pasted
-- [x] Native ZIP creation with Finder-style `Compress` naming and progress
-- [x] A simple, functional, built-in image viewer (you can set `explorer` as the default image viewer)
-- [x] A native EPUB reader via **Open With → Explorer**, with wheel paging, chapter navigation, text copying, light/dark themes, and automatic reading-position resume (reflowable EPUB 2/3)
-- [x] Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
-- [x] Search
-    - [x] Type-to-search current directory
-    - [x] Recursive search (no pre-indexing like Windows, but still pretty quick)
-- [x] Git repo support
-    - [x] Branch
-    - [x] Outgoing/Incoming commits
-    - [x] Lines of code
-    - [x] Primary language used
-    - [x] Github-style language makup bar
-- [x] `Alt+hover` special keybinding to instantly preview files
-    - [x] Images
-    - [x] Videos
-    - [x] PDF first-page preview
-    - [x] EPUB cover preview
-    - [x] Text (plain text, logs, markdown, code files, etc...)
-- [x] File properties
-    - [x] Generic file/folder information
-    - [x] Image preview in properties
-    - [x] Video frames preview in properties
-    - [x] In-depth image/video/audio metadata
-    - [x] Audio spectrum analyser (inspired by [Spek](https://www.spek.cc/))
-    - [x] Image EXIF tags (grouped and organised for ease-of-use)
-- [x] Removable and portable storage
-    - [x] Native mounted volumes, USB mass storage, and optical media
-    - [x] Android phones, cameras, and media players using MTP/PTP
-    - [x] In-app copy/move, rename, folder creation, delete, thumbnails, and file opening when supported by the device
+- Cross-platform macOS, Linux (Wayland/X11), and Windows
+- GPU-accelerated Explorer UI ([GPUI](https://gpui.rs/))
+- Tabs
+- Arrow keys navigation
+- Sidebar custom pins (drag-to-pin)
+- Key bindings for ~~everything~~ most things
+- HTTP, HTTPS, FTP, and SFTP file URLs can be downloaded directly when pasted
+- `yt-dlp` integration, supported URLs can be downloaded as videos when pasted
+- Native ZIP creation with Finder-style `Compress` naming and progress
+- A simple, functional, built-in image viewer (you can set `explorer` as the default image viewer)
+- A simple, fast, built-in EPUB reader
+- Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
+- Search
+    - Type-to-search current directory
+    - Recursive search (no pre-indexing like Windows, but still pretty quick)
+- Git repo support
+    - Branch
+    - Outgoing/Incoming commits
+    - Lines of code
+    - Primary language used
+    - Github-style language makup bar
+- `Alt+hover` special keybinding to instantly preview files
+    - Images
+    - Videos
+    - PDF first-page preview
+    - EPUB cover preview
+    - Text (plain text, logs, markdown, code files, etc...)
+- File properties
+    - Generic file/folder information
+    - Image preview in properties
+    - Video frames preview in properties
+    - In-depth image/video/audio metadata
+    - Audio spectrum analyser (inspired by [Spek](https://www.spek.cc/))
+    - Image EXIF tags (grouped and organised for ease-of-use)
+- Removable and portable storage
+    - Native mounted volumes, USB mass storage, and optical media
+    - Android phones, cameras, and media players using MTP/PTP
+    - In-app copy/move, rename, folder creation, delete, thumbnails, and file opening when supported by the device
 
 ## 🔃 'Anti-Features' that will NOT be implemented
 
-- [x] 3D Objects _that gets used as much as a welcome mat at a house that never has visitors_
-- [x] File grouping _that randomly appears when you didn't set it_
-- [x] List, Titles, and Content file view modes _that are as pointless as a screen door on a submarine_
-- [x] Search _that takes as long as a cross-country flight_
-- [x] Context menu delays _that take longer than my wife does when deciding where to eat_
-- [x] _Claiming it's built in 'pure rust' when really it's just a WebView wrapper with basic app logic in rust_.
+- 3D Objects _that gets used as much as a welcome mat at a house that never has visitors_
+- File grouping _that randomly appears when you didn't set it_
+- List, Titles, and Content file view modes _that are as pointless as a screen door on a submarine_
+- Search _that takes as long as a cross-country flight_
+- Context menu delays _that take longer than my wife does when deciding where to eat_
+- _Claiming it's built in 'pure rust' when really it's just a WebView wrapper with basic app logic in rust_.
 
 ---
 
