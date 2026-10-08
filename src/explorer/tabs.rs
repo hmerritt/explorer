@@ -3090,6 +3090,7 @@ mod tests {
 
     fn transfer_download_row(id: u64, destination: PathBuf) -> DownloadNoticeRow {
         DownloadNoticeRow {
+            speed_tracker: Default::default(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: format!("download-{id}.zip"),

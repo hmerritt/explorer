@@ -15,7 +15,12 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, FontWeight, IntoElement,
     MouseButton, SharedString, Window, div, prelude::*, px, relative, rgb,
 };
-use std::{collections::HashMap, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const TRANSFER_UI_UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 pub(super) const TRANSFER_COMPLETION_RETENTION: Duration = Duration::from_secs(5);
@@ -132,8 +137,13 @@ impl TransferPanelJob {
     }
 
     fn from_download(row: &DownloadNoticeRow, owner: Option<u64>) -> Self {
+        Self::from_download_at(row, owner, Instant::now())
+    }
+
+    fn from_download_at(row: &DownloadNoticeRow, owner: Option<u64>, now: Instant) -> Self {
         let (state, message, bytes, total, percentage, indeterminate, progress_status) =
             download_transfer_state(row);
+        let (speed, remaining) = row.transfer_metrics(now);
         Self {
             id: TransferJobId::Download { owner, id: row.id },
             state,
@@ -147,8 +157,8 @@ impl TransferPanelJob {
             percentage,
             indeterminate,
             progress_status,
-            speed: None,
-            remaining: None,
+            speed,
+            remaining,
             icon_entry: FileEntry::from_provider(
                 row.destination.join(&row.file_name),
                 row.file_name.clone(),
@@ -1916,7 +1926,7 @@ mod tests {
         assert_eq!(labels.primary, "50%");
         assert_eq!(labels.secondary, "512 bytes / 1.0 KB");
         assert_eq!(transfer_speed_text(&job), "512 bytes/s");
-        for forbidden in ["...", "…", "·"] {
+        for forbidden in ["...", "â€¦", "Â·"] {
             assert!(!labels.primary.contains(forbidden));
             assert!(!labels.secondary.contains(forbidden));
             assert!(!transfer_speed_text(&job).contains(forbidden));
@@ -1983,12 +1993,107 @@ mod tests {
 
     fn download_row(id: u64, status: DownloadNoticeStatus) -> DownloadNoticeRow {
         DownloadNoticeRow {
+            speed_tracker: Default::default(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: format!("download-{id}.zip"),
             destination: PathBuf::from("downloads"),
             status,
         }
+    }
+
+    #[test]
+    fn download_columns_show_live_metrics_and_hide_them_outside_transfers() {
+        use super::super::download::DownloadProgress;
+        let now = Instant::now();
+        let mut row = download_row(1, DownloadNoticeStatus::Connecting);
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 0,
+                total_bytes: None,
+            },
+            now,
+        );
+        let initial = TransferPanelJob::from_download_at(&row, None, now);
+        assert_eq!(transfer_speed_text(&initial), "~");
+        assert_eq!(transfer_remaining_text(&initial), "~");
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 512,
+                total_bytes: None,
+            },
+            now + Duration::from_secs(1),
+        );
+        let unknown = TransferPanelJob::from_download_at(&row, None, now + Duration::from_secs(1));
+        assert_eq!(transfer_speed_text(&unknown), "512 bytes/s");
+        assert_eq!(transfer_remaining_text(&unknown), "~");
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 512,
+                total_bytes: Some(1536),
+            },
+            now + Duration::from_secs(1),
+        );
+        let known = TransferPanelJob::from_download_at(&row, None, now + Duration::from_secs(1));
+        assert_eq!(transfer_speed_text(&known), "512 bytes/s");
+        assert_eq!(transfer_remaining_text(&known), "2s");
+        let stalled = TransferPanelJob::from_download_at(&row, None, now + Duration::from_secs(6));
+        assert_eq!(transfer_speed_text(&stalled), "0 bytes/s");
+        assert_eq!(transfer_remaining_text(&stalled), "~");
+        for status in [
+            DownloadNoticeStatus::Connecting,
+            DownloadNoticeStatus::WaitingForCredentials,
+            DownloadNoticeStatus::WaitingForHostConfirmation,
+            DownloadNoticeStatus::Completed,
+            DownloadNoticeStatus::Failed("failed".to_owned()),
+        ] {
+            row.status = status;
+            let job = TransferPanelJob::from_download_at(&row, None, now + Duration::from_secs(1));
+            assert_eq!(transfer_speed_text(&job), "~");
+            assert_eq!(transfer_remaining_text(&job), "~");
+        }
+    }
+
+    #[test]
+    fn download_metrics_are_independent_for_concurrent_rows_and_tab_owners() {
+        use super::super::download::DownloadProgress;
+        let now = Instant::now();
+        let mut left = download_row(7, DownloadNoticeStatus::Connecting);
+        let mut right = download_row(7, DownloadNoticeStatus::Connecting);
+        let mut concurrent = download_row(8, DownloadNoticeStatus::Connecting);
+        for (row, bytes, total) in [
+            (&mut left, 512, Some(1536)),
+            (&mut right, 1024, Some(4096)),
+            (&mut concurrent, 256, None),
+        ] {
+            row.record_progress(
+                DownloadProgress {
+                    downloaded_bytes: 0,
+                    total_bytes: total,
+                },
+                now,
+            );
+            row.record_progress(
+                DownloadProgress {
+                    downloaded_bytes: bytes,
+                    total_bytes: total,
+                },
+                now + Duration::from_secs(1),
+            );
+        }
+        let left = TransferPanelJob::from_download_at(&left, Some(1), now + Duration::from_secs(1));
+        let right =
+            TransferPanelJob::from_download_at(&right, Some(2), now + Duration::from_secs(1));
+        let concurrent =
+            TransferPanelJob::from_download_at(&concurrent, Some(1), now + Duration::from_secs(1));
+        assert_ne!(left.id, right.id);
+        assert_ne!(left.id, concurrent.id);
+        assert_eq!(transfer_speed_text(&left), "512 bytes/s");
+        assert_eq!(transfer_remaining_text(&left), "2s");
+        assert_eq!(transfer_speed_text(&right), "1.0 KB/s");
+        assert_eq!(transfer_remaining_text(&right), "3s");
+        assert_eq!(transfer_speed_text(&concurrent), "256 bytes/s");
+        assert_eq!(transfer_remaining_text(&concurrent), "~");
     }
 
     #[test]

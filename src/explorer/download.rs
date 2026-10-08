@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env,
     ffi::{OsStr, OsString},
     io::{self, BufRead, BufReader, Read, Write},
@@ -10,7 +11,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -51,6 +52,8 @@ use crate::explorer::{
 };
 
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const DOWNLOAD_SPEED_WINDOW: Duration = Duration::from_secs(5);
+const DOWNLOAD_SPEED_MIN_INTERVAL: Duration = Duration::from_millis(500);
 pub(super) const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
 const YTDLP_ERROR_MESSAGE_LIMIT: usize = 4 * 1024;
 const YTDLP_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -75,6 +78,121 @@ pub(super) struct DownloadNoticeRow {
     pub(super) file_name: String,
     pub(super) destination: PathBuf,
     pub(super) status: DownloadNoticeStatus,
+    pub(super) speed_tracker: DownloadSpeedTracker,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct DownloadSpeedTracker {
+    samples: VecDeque<(Instant, u64)>,
+    has_progress: bool,
+}
+
+impl DownloadSpeedTracker {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn record(&mut self, captured_at: Instant, bytes: u64) {
+        if let Some(&(last_time, last_bytes)) = self.samples.back() {
+            if captured_at < last_time {
+                return;
+            }
+            if bytes < last_bytes {
+                self.reset();
+            } else {
+                self.has_progress |= bytes > last_bytes;
+                // Bound storage for chunk-level events, preserving the initial baseline.
+                if captured_at == last_time
+                    || (self.samples.len() > 1
+                        && captured_at.duration_since(self.samples[self.samples.len() - 2].0)
+                            < DOWNLOAD_PROGRESS_INTERVAL)
+                {
+                    self.samples.pop_back();
+                    if self.samples.is_empty() {
+                        self.has_progress = false;
+                    }
+                }
+            }
+        }
+        self.samples.push_back((captured_at, bytes));
+        if let Some(cutoff) = captured_at.checked_sub(DOWNLOAD_SPEED_WINDOW) {
+            // Retain one sample before the window for interpolation at its boundary.
+            while self.samples.len() > 1 && self.samples[1].0 <= cutoff {
+                self.samples.pop_front();
+            }
+        }
+    }
+
+    fn speed(&self, now: Instant) -> Option<f64> {
+        let &(first_time, _) = self.samples.front()?;
+        let &(last_time, last_bytes) = self.samples.back()?;
+        if !self.has_progress
+            || now.checked_duration_since(first_time)? < DOWNLOAD_SPEED_MIN_INTERVAL
+            || now < last_time
+        {
+            return None;
+        }
+        let start = now
+            .checked_sub(DOWNLOAD_SPEED_WINDOW)
+            .unwrap_or(first_time)
+            .max(first_time);
+        if start >= last_time {
+            return Some(0.0);
+        }
+        let mut baseline = *self.samples.front()?;
+        let mut transferred = (last_bytes - baseline.1) as f64;
+        for &(time, bytes) in self.samples.iter().skip(1) {
+            if time <= start {
+                baseline = (time, bytes);
+                transferred = (last_bytes - bytes) as f64;
+                continue;
+            }
+            let fraction = start.duration_since(baseline.0).as_secs_f64()
+                / time.duration_since(baseline.0).as_secs_f64();
+            transferred -= (bytes - baseline.1) as f64 * fraction;
+            break;
+        }
+        // Include idle time after the latest event so stalled rates decay to zero.
+        Some(transferred.max(0.0) / now.duration_since(start).as_secs_f64())
+    }
+}
+
+impl DownloadNoticeRow {
+    pub(super) fn record_progress(&mut self, progress: DownloadProgress, captured_at: Instant) {
+        self.speed_tracker
+            .record(captured_at, progress.downloaded_bytes);
+        self.status = DownloadNoticeStatus::Downloading {
+            downloaded_bytes: progress.downloaded_bytes,
+            total_bytes: progress.total_bytes,
+        };
+    }
+
+    fn set_status(&mut self, status: DownloadNoticeStatus) {
+        self.speed_tracker.reset();
+        self.status = status;
+    }
+
+    pub(super) fn transfer_metrics(&self, now: Instant) -> (Option<f64>, Option<Duration>) {
+        let DownloadNoticeStatus::Downloading {
+            downloaded_bytes,
+            total_bytes,
+        } = self.status
+        else {
+            return (None, None);
+        };
+        let speed = self.speed_tracker.speed(now);
+        let remaining = total_bytes.zip(speed).and_then(|(total, speed)| {
+            (speed > 0.0)
+                .then(|| {
+                    Duration::try_from_secs_f64(
+                        total.saturating_sub(downloaded_bytes) as f64 / speed,
+                    )
+                    .ok()
+                })
+                .flatten()
+        });
+        (speed, remaining)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +229,7 @@ pub(super) struct DownloadProgress {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum YtDlpProgressEvent {
     Downloading(DownloadProgress),
+    Finished(DownloadProgress),
     PostProcessing,
 }
 
@@ -386,6 +505,7 @@ impl ExplorerView {
         self.next_download_id = self.next_download_id.wrapping_add(1);
         let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
+            speed_tracker: Default::default(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: download.file_name.clone(),
@@ -408,7 +528,7 @@ impl ExplorerView {
                             download,
                             &destination,
                             |progress| {
-                                let _ = progress_tx.send(progress);
+                                let _ = progress_tx.send((progress, Instant::now()));
                             },
                         )
                         .await;
@@ -456,6 +576,7 @@ impl ExplorerView {
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.wrapping_add(1);
         self.download_notice_rows.push(DownloadNoticeRow {
+            speed_tracker: Default::default(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: download.file_name.clone(),
@@ -490,7 +611,7 @@ impl ExplorerView {
             .iter_mut()
             .find(|row| row.id == id)
         {
-            row.status = DownloadNoticeStatus::Connecting;
+            row.set_status(DownloadNoticeStatus::Connecting);
         }
         self.remove_download_task(id);
 
@@ -508,7 +629,7 @@ impl ExplorerView {
                             &destination,
                             cancel,
                             |progress| {
-                                let _ = progress_tx.send(progress);
+                                let _ = progress_tx.send((progress, Instant::now()));
                             },
                         );
                         finished.store(true, Ordering::Relaxed);
@@ -564,7 +685,7 @@ impl ExplorerView {
                     .iter_mut()
                     .find(|row| row.id == id)
                 {
-                    row.status = DownloadNoticeStatus::WaitingForCredentials;
+                    row.set_status(DownloadNoticeStatus::WaitingForCredentials);
                 }
                 self.request_transfer_panel_expansion(cx);
                 match open_remote_credentials_dialog(
@@ -597,7 +718,7 @@ impl ExplorerView {
                     .iter_mut()
                     .find(|row| row.id == id)
                 {
-                    row.status = DownloadNoticeStatus::WaitingForCredentials;
+                    row.set_status(DownloadNoticeStatus::WaitingForCredentials);
                 }
                 self.request_transfer_panel_expansion(cx);
                 match open_remote_credentials_dialog(
@@ -622,7 +743,7 @@ impl ExplorerView {
                     .iter_mut()
                     .find(|row| row.id == id)
                 {
-                    row.status = DownloadNoticeStatus::WaitingForHostConfirmation;
+                    row.set_status(DownloadNoticeStatus::WaitingForHostConfirmation);
                 }
                 self.request_transfer_panel_expansion(cx);
                 match open_remote_host_key_dialog(cx.entity(), id, *key, cx) {
@@ -767,6 +888,7 @@ impl ExplorerView {
         self.next_download_id = self.next_download_id.wrapping_add(1);
         let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
+            speed_tracker: Default::default(),
             id,
             kind: DownloadNoticeKind::Video {
                 site_domain: site_domain.clone(),
@@ -790,7 +912,7 @@ impl ExplorerView {
                     let finished = finished.clone();
                     async move {
                         let result = run_ytdlp_download(command, process_state, move |event| {
-                            let _ = progress_tx.send(event);
+                            let _ = progress_tx.send((event, Instant::now()));
                         });
                         finished.store(true, Ordering::Relaxed);
                         result
@@ -874,51 +996,51 @@ impl ExplorerView {
         this: &gpui::WeakEntity<Self>,
         cx: &mut gpui::AsyncApp,
         id: u64,
-        progress_rx: &mpsc::Receiver<DownloadProgress>,
+        progress_rx: &mpsc::Receiver<(DownloadProgress, Instant)>,
     ) {
-        let mut latest = None;
-        while let Ok(progress) = progress_rx.try_recv() {
-            latest = Some(progress);
-        }
-
-        if let Some(progress) = latest {
-            let _ = this.update(cx, |explorer, cx| {
-                if let Some(row) = explorer
-                    .download_notice_rows
-                    .iter_mut()
-                    .find(|row| row.id == id)
-                {
-                    row.status = DownloadNoticeStatus::Downloading {
-                        downloaded_bytes: progress.downloaded_bytes,
-                        total_bytes: progress.total_bytes,
-                    };
+        let _ = this.update(cx, |explorer, cx| {
+            if let Some(row) = explorer
+                .download_notice_rows
+                .iter_mut()
+                .find(|row| row.id == id)
+            {
+                for (progress, captured_at) in progress_rx.try_iter() {
+                    row.record_progress(progress, captured_at);
+                }
+                if matches!(row.status, DownloadNoticeStatus::Downloading { .. }) {
                     cx.notify();
                 }
-            });
-        }
+            }
+        });
     }
 
     fn drain_ytdlp_progress(
         this: &gpui::WeakEntity<Self>,
         cx: &mut gpui::AsyncApp,
         id: u64,
-        progress_rx: &mpsc::Receiver<YtDlpProgressEvent>,
+        progress_rx: &mpsc::Receiver<(YtDlpProgressEvent, Instant)>,
     ) {
-        let mut latest = None;
-        while let Ok(progress) = progress_rx.try_recv() {
-            latest = Some(progress);
-        }
-
-        if let Some(progress) = latest {
-            let _ = this.update(cx, |explorer, cx| {
-                if explorer.apply_ytdlp_progress_event(id, progress) {
-                    cx.notify();
-                }
-            });
-        }
+        let _ = this.update(cx, |explorer, cx| {
+            let mut changed = false;
+            for (event, captured_at) in progress_rx.try_iter() {
+                changed |= explorer.apply_ytdlp_progress_event(id, event, captured_at);
+            }
+            if changed
+                || explorer.download_notice_rows.iter().any(|row| {
+                    row.id == id && matches!(row.status, DownloadNoticeStatus::Downloading { .. })
+                })
+            {
+                cx.notify();
+            }
+        });
     }
 
-    fn apply_ytdlp_progress_event(&mut self, id: u64, event: YtDlpProgressEvent) -> bool {
+    fn apply_ytdlp_progress_event(
+        &mut self,
+        id: u64,
+        event: YtDlpProgressEvent,
+        captured_at: Instant,
+    ) -> bool {
         let Some(row) = self
             .download_notice_rows
             .iter_mut()
@@ -926,13 +1048,14 @@ impl ExplorerView {
         else {
             return false;
         };
-        row.status = match event {
-            YtDlpProgressEvent::Downloading(progress) => DownloadNoticeStatus::Downloading {
-                downloaded_bytes: progress.downloaded_bytes,
-                total_bytes: progress.total_bytes,
-            },
-            YtDlpProgressEvent::PostProcessing => DownloadNoticeStatus::Connecting,
-        };
+        match event {
+            YtDlpProgressEvent::Downloading(progress) => row.record_progress(progress, captured_at),
+            YtDlpProgressEvent::Finished(progress) => {
+                row.record_progress(progress, captured_at);
+                row.speed_tracker.reset();
+            }
+            YtDlpProgressEvent::PostProcessing => row.set_status(DownloadNoticeStatus::Connecting),
+        }
         true
     }
 
@@ -958,7 +1081,7 @@ impl ExplorerView {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| self.download_notice_rows[row_index].file_name.clone());
                 self.download_notice_rows[row_index].file_name = final_name;
-                self.download_notice_rows[row_index].status = DownloadNoticeStatus::Completed;
+                self.download_notice_rows[row_index].set_status(DownloadNoticeStatus::Completed);
                 if path.parent() == Some(self.path.as_path()) {
                     self.reload_with_entry_metadata_resolution(cx);
                 }
@@ -966,14 +1089,15 @@ impl ExplorerView {
             }
             Ok(DownloadResult::Video) => {
                 self.download_batch_succeeded += 1;
-                self.download_notice_rows[row_index].status = DownloadNoticeStatus::Completed;
+                self.download_notice_rows[row_index].set_status(DownloadNoticeStatus::Completed);
                 self.reload_with_entry_metadata_resolution(cx);
                 self.emit_filesystem_changed(cx);
             }
             Err(error) => {
                 self.download_batch_failed += 1;
                 self.download_batch_last_error = Some(error.clone());
-                self.download_notice_rows[row_index].status = DownloadNoticeStatus::Failed(error);
+                self.download_notice_rows[row_index]
+                    .set_status(DownloadNoticeStatus::Failed(error));
                 self.request_transfer_panel_expansion(cx);
             }
         }
@@ -1146,10 +1270,15 @@ fn ytdlp_progress_event_from_line(line: &str) -> Option<YtDlpProgressEvent> {
                 .then_some(record.total_bytes)
                 .flatten()
         })?;
-        return Some(YtDlpProgressEvent::Downloading(DownloadProgress {
+        let progress = DownloadProgress {
             downloaded_bytes,
             total_bytes: record.total_bytes,
-        }));
+        };
+        return Some(if record.status == "finished" {
+            YtDlpProgressEvent::Finished(progress)
+        } else {
+            YtDlpProgressEvent::Downloading(progress)
+        });
     }
 
     let prefix = line.find(YTDLP_POSTPROCESS_PROGRESS_PREFIX)?;
@@ -1213,7 +1342,7 @@ fn bounded_ytdlp_message(bytes: &[u8]) -> String {
     while !message.is_char_boundary(start) {
         start += 1;
     }
-    format!("…{}", &message[start..])
+    format!("â€¦{}", &message[start..])
 }
 
 fn ytdlp_executable_from_path() -> Option<PathBuf> {
@@ -1380,6 +1509,324 @@ mod tests {
     use super::*;
     use crate::explorer::test_support::test_view_entity_at_path;
 
+    fn progress_row(id: u64) -> DownloadNoticeRow {
+        DownloadNoticeRow {
+            id,
+            kind: DownloadNoticeKind::File,
+            file_name: "file.zip".to_owned(),
+            destination: PathBuf::from("downloads"),
+            status: DownloadNoticeStatus::Connecting,
+            speed_tracker: Default::default(),
+        }
+    }
+
+    #[test]
+    fn download_speed_needs_timed_progress_and_excludes_existing_bytes() {
+        let now = Instant::now();
+        let mut tracker = DownloadSpeedTracker::default();
+        tracker.record(now, 1000);
+        assert_eq!(tracker.speed(now + Duration::from_secs(1)), None);
+        tracker.record(now + Duration::from_millis(400), 1200);
+        assert_eq!(tracker.speed(now + Duration::from_millis(400)), None);
+        tracker.record(now + Duration::from_millis(500), 1250);
+        assert_eq!(tracker.speed(now + Duration::from_millis(500)), Some(500.0));
+        assert_eq!(tracker.speed(now), None);
+    }
+
+    #[test]
+    fn download_speed_uses_recent_window_and_decays_during_stalls() {
+        let now = Instant::now();
+        let mut tracker = DownloadSpeedTracker::default();
+        tracker.record(now, 0);
+        for second in 1..=10 {
+            let bytes = if second <= 5 {
+                second * 100
+            } else {
+                500 + (second - 5) * 300
+            };
+            tracker.record(now + Duration::from_secs(second), bytes);
+        }
+        assert_eq!(tracker.speed(now + Duration::from_secs(10)), Some(300.0));
+        assert_eq!(
+            tracker.speed(now + Duration::from_millis(10500)),
+            Some(270.0)
+        );
+        assert_eq!(tracker.speed(now + Duration::from_secs(15)), Some(0.0));
+        tracker.record(now + Duration::from_secs(15), 2000);
+        tracker.record(now + Duration::from_secs(16), 2300);
+        assert!(tracker.speed(now + Duration::from_secs(16)).unwrap() > 0.0);
+        tracker.record(now + Duration::from_secs(21), 3800);
+        assert_eq!(tracker.speed(now + Duration::from_secs(21)), Some(300.0));
+    }
+
+    #[test]
+    fn download_speed_handles_duplicate_timestamps_and_counter_regression() {
+        let now = Instant::now();
+        let mut tracker = DownloadSpeedTracker::default();
+        tracker.record(now, 0);
+        tracker.record(now, 100);
+        assert_eq!(tracker.speed(now), None);
+        assert_eq!(tracker.speed(now + Duration::from_secs(1)), None);
+        tracker.record(now + Duration::from_secs(1), 300);
+        assert_eq!(tracker.speed(now + Duration::from_secs(1)), Some(200.0));
+        tracker.record(now + Duration::from_millis(500), 150);
+        assert_eq!(tracker.speed(now + Duration::from_secs(1)), Some(200.0));
+        tracker.record(now + Duration::from_secs(2), 50);
+        assert_eq!(tracker.speed(now + Duration::from_secs(2)), None);
+        tracker.record(now + Duration::from_secs(3), 150);
+        assert_eq!(tracker.speed(now + Duration::from_secs(3)), Some(100.0));
+    }
+
+    #[test]
+    fn download_speed_coalesces_dense_samples_without_losing_recent_rates() {
+        let now = Instant::now();
+        let mut tracker = DownloadSpeedTracker::default();
+        tracker.record(now, 0);
+        for millisecond in 1..=10000 {
+            let bytes = if millisecond <= 4000 {
+                millisecond
+            } else {
+                4000 + (millisecond - 4000) * 3
+            };
+            tracker.record(now + Duration::from_millis(millisecond), bytes);
+        }
+        assert!(
+            tracker.samples.len() <= 60,
+            "{} retained samples",
+            tracker.samples.len()
+        );
+        assert!((tracker.speed(now + Duration::from_secs(10)).unwrap() - 3000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn download_metrics_handle_unknown_late_and_finished_totals() {
+        let now = Instant::now();
+        let mut row = progress_row(1);
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 100,
+                total_bytes: None,
+            },
+            now,
+        );
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 600,
+                total_bytes: None,
+            },
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(
+            row.transfer_metrics(now + Duration::from_secs(1)),
+            (Some(500.0), None)
+        );
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 600,
+                total_bytes: Some(1600),
+            },
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(
+            row.transfer_metrics(now + Duration::from_secs(1)),
+            (Some(500.0), Some(Duration::from_secs(2)))
+        );
+        assert_eq!(
+            row.transfer_metrics(now + Duration::from_secs(6)),
+            (Some(0.0), None)
+        );
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 1600,
+                total_bytes: Some(1600),
+            },
+            now + Duration::from_secs(7),
+        );
+        assert_eq!(
+            row.transfer_metrics(now + Duration::from_secs(7)).1,
+            Some(Duration::ZERO)
+        );
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 1700,
+                total_bytes: Some(1600),
+            },
+            now + Duration::from_secs(8),
+        );
+        assert_eq!(
+            row.transfer_metrics(now + Duration::from_secs(8)).1,
+            Some(Duration::ZERO)
+        );
+        for status in [
+            DownloadNoticeStatus::Connecting,
+            DownloadNoticeStatus::WaitingForCredentials,
+            DownloadNoticeStatus::WaitingForHostConfirmation,
+            DownloadNoticeStatus::Completed,
+            DownloadNoticeStatus::Failed("failed".to_owned()),
+        ] {
+            let mut waiting = row.clone();
+            waiting.set_status(status);
+            assert_eq!(
+                waiting.transfer_metrics(now + Duration::from_secs(8)),
+                (None, None)
+            );
+            assert!(waiting.speed_tracker.samples.is_empty());
+        }
+    }
+
+    #[test]
+    fn download_metrics_handle_empty_files_and_unrepresentable_eta() {
+        let now = Instant::now();
+        let mut row = progress_row(1);
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 0,
+                total_bytes: Some(0),
+            },
+            now,
+        );
+        assert_eq!(
+            row.transfer_metrics(now + Duration::from_secs(1)),
+            (None, None)
+        );
+        row.record_progress(
+            DownloadProgress {
+                downloaded_bytes: 1,
+                total_bytes: Some(u64::MAX),
+            },
+            now + Duration::from_secs(5),
+        );
+        assert_eq!(
+            row.transfer_metrics(now + Duration::from_secs(5)),
+            (Some(0.2), None)
+        );
+    }
+
+    #[gpui::test]
+    fn ytdlp_queued_stream_boundaries_reset_even_when_totals_and_counters_match(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        let now = Instant::now();
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                view.download_notice_rows = vec![progress_row(7), progress_row(8)];
+            })
+        });
+        let (tx, rx) = mpsc::channel();
+        let first = DownloadProgress {
+            downloaded_bytes: 100,
+            total_bytes: Some(1000),
+        };
+        let final_progress = DownloadProgress {
+            downloaded_bytes: 1000,
+            total_bytes: Some(1000),
+        };
+        tx.send((YtDlpProgressEvent::Downloading(first), now))
+            .unwrap();
+        tx.send((
+            YtDlpProgressEvent::Downloading(final_progress),
+            now + Duration::from_secs(1),
+        ))
+        .unwrap();
+        tx.send((
+            YtDlpProgressEvent::Finished(final_progress),
+            now + Duration::from_secs(1),
+        ))
+        .unwrap();
+        // A fully resumed second stream can start with the same counter and total.
+        tx.send((
+            YtDlpProgressEvent::Downloading(final_progress),
+            now + Duration::from_secs(2),
+        ))
+        .unwrap();
+        let mut async_app = cx.update(|_, app| app.to_async());
+        ExplorerView::drain_ytdlp_progress(&view.downgrade(), &mut async_app, 7, &rx);
+        cx.read_entity(&view, |view, _| {
+            let row = &view.download_notice_rows[0];
+            assert_eq!(
+                row.transfer_metrics(now + Duration::from_secs(2)),
+                (None, None)
+            );
+            assert_eq!(row.speed_tracker.samples.len(), 1);
+            assert_eq!(
+                row.status,
+                DownloadNoticeStatus::Downloading {
+                    downloaded_bytes: 1000,
+                    total_bytes: Some(1000)
+                }
+            );
+            assert!(
+                view.download_notice_rows[1]
+                    .speed_tracker
+                    .samples
+                    .is_empty()
+            );
+        });
+        tx.send((
+            YtDlpProgressEvent::PostProcessing,
+            now + Duration::from_secs(3),
+        ))
+        .unwrap();
+        let mut async_app = cx.update(|_, app| app.to_async());
+        ExplorerView::drain_ytdlp_progress(&view.downgrade(), &mut async_app, 7, &rx);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.download_notice_rows[0].status,
+                DownloadNoticeStatus::Connecting
+            );
+            assert!(
+                view.download_notice_rows[0]
+                    .speed_tracker
+                    .samples
+                    .is_empty()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn download_queue_uses_worker_timestamps_before_publishing_latest_progress(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        let now = Instant::now();
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                view.download_notice_rows = vec![progress_row(7)]
+            })
+        });
+        let (tx, rx) = mpsc::channel();
+        for (seconds, bytes) in [(0, 0), (1, 500), (2, 1000)] {
+            tx.send((
+                DownloadProgress {
+                    downloaded_bytes: bytes,
+                    total_bytes: Some(2000),
+                },
+                now + Duration::from_secs(seconds),
+            ))
+            .unwrap();
+        }
+        let mut async_app = cx.update(|_, app| app.to_async());
+        ExplorerView::drain_download_progress(&view.downgrade(), &mut async_app, 7, &rx);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.download_notice_rows[0].transfer_metrics(now + Duration::from_secs(2)),
+                (Some(500.0), Some(Duration::from_secs(2)))
+            );
+        });
+        // An empty drain preserves history; querying later still expires a stalled rate.
+        let mut async_app = cx.update(|_, app| app.to_async());
+        ExplorerView::drain_download_progress(&view.downgrade(), &mut async_app, 7, &rx);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.download_notice_rows[0].transfer_metrics(now + Duration::from_secs(7)),
+                (Some(0.0), None)
+            );
+        });
+    }
+
     #[test]
     fn download_names_use_the_first_free_windows_style_suffix() {
         assert_eq!(download_file_name("archive.tar.gz", 1), "archive.tar.gz");
@@ -1459,7 +1906,7 @@ mod tests {
             ytdlp_progress_event_from_line(
                 "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__{\"status\":\"finished\",\"total_bytes\":100}\n"
             ),
-            Some(YtDlpProgressEvent::Downloading(DownloadProgress {
+            Some(YtDlpProgressEvent::Finished(DownloadProgress {
                 downloaded_bytes: 100,
                 total_bytes: Some(100),
             }))
@@ -1512,6 +1959,7 @@ mod tests {
         cx.update(|_, app| {
             view.update(app, |view, _| {
                 view.download_notice_rows = vec![DownloadNoticeRow {
+                    speed_tracker: Default::default(),
                     id: 7,
                     kind: DownloadNoticeKind::Video {
                         site_domain: "youtube.com".to_owned(),
@@ -1526,7 +1974,8 @@ mod tests {
                     YtDlpProgressEvent::Downloading(DownloadProgress {
                         downloaded_bytes: 25,
                         total_bytes: Some(100),
-                    })
+                    }),
+                    Instant::now(),
                 ));
                 assert_eq!(
                     view.download_notice_rows[0].status,
@@ -1541,7 +1990,8 @@ mod tests {
                     YtDlpProgressEvent::Downloading(DownloadProgress {
                         downloaded_bytes: 50,
                         total_bytes: None,
-                    })
+                    }),
+                    Instant::now(),
                 ));
                 assert_eq!(
                     view.download_notice_rows[0].status,
@@ -1551,12 +2001,20 @@ mod tests {
                     }
                 );
 
-                assert!(view.apply_ytdlp_progress_event(7, YtDlpProgressEvent::PostProcessing));
+                assert!(view.apply_ytdlp_progress_event(
+                    7,
+                    YtDlpProgressEvent::PostProcessing,
+                    Instant::now()
+                ));
                 assert_eq!(
                     view.download_notice_rows[0].status,
                     DownloadNoticeStatus::Connecting
                 );
-                assert!(!view.apply_ytdlp_progress_event(99, YtDlpProgressEvent::PostProcessing));
+                assert!(!view.apply_ytdlp_progress_event(
+                    99,
+                    YtDlpProgressEvent::PostProcessing,
+                    Instant::now()
+                ));
             });
         });
     }
@@ -1761,6 +2219,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 1,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "youtube.com".to_owned(),
@@ -1770,6 +2229,7 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 2,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -1830,6 +2290,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 1,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -1839,6 +2300,7 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 2,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -1877,6 +2339,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 1,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -1886,6 +2349,7 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 2,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "dailymotion.com".to_owned(),
@@ -2127,6 +2591,7 @@ mod tests {
             });
             view.update(app, |view, cx| {
                 view.download_notice_rows.push(DownloadNoticeRow {
+                    speed_tracker: Default::default(),
                     id: 7,
                     kind: DownloadNoticeKind::File,
                     file_name: "partial.zip".to_owned(),
@@ -2159,6 +2624,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 1,
                         kind: DownloadNoticeKind::File,
                         file_name: "complete.zip".to_owned(),
@@ -2166,6 +2632,7 @@ mod tests {
                         status: DownloadNoticeStatus::Completed,
                     },
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 2,
                         kind: DownloadNoticeKind::File,
                         file_name: "cancel.zip".to_owned(),
@@ -2196,6 +2663,7 @@ mod tests {
                 view.download_batch_active = true;
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 1,
                         kind: DownloadNoticeKind::File,
                         file_name: "one.zip".to_owned(),
@@ -2203,6 +2671,7 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 2,
                         kind: DownloadNoticeKind::File,
                         file_name: "two.zip".to_owned(),
@@ -2246,6 +2715,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_batch_active = true;
                 view.download_notice_rows.push(DownloadNoticeRow {
+                    speed_tracker: Default::default(),
                     id: 1,
                     kind: DownloadNoticeKind::File,
                     file_name: "one.zip".to_owned(),
@@ -2262,6 +2732,7 @@ mod tests {
             view.update(app, |view, _| {
                 view.begin_download_batch_if_needed();
                 view.download_notice_rows.push(DownloadNoticeRow {
+                    speed_tracker: Default::default(),
                     id: 2,
                     kind: DownloadNoticeKind::File,
                     file_name: "two.zip".to_owned(),
@@ -2300,6 +2771,7 @@ mod tests {
                 view.download_batch_active = true;
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 1,
                         kind: DownloadNoticeKind::File,
                         file_name: "complete.zip".to_owned(),
@@ -2307,6 +2779,7 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                     DownloadNoticeRow {
+                        speed_tracker: Default::default(),
                         id: 2,
                         kind: DownloadNoticeKind::File,
                         file_name: "failed.zip".to_owned(),
@@ -2354,6 +2827,7 @@ mod tests {
         cx.update(|_, app| {
             view.update(app, |view, cx| {
                 view.download_notice_rows.push(DownloadNoticeRow {
+                    speed_tracker: Default::default(),
                     id: 3,
                     kind: DownloadNoticeKind::File,
                     file_name: "complete.zip".to_owned(),
