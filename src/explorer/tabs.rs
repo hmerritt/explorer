@@ -24,7 +24,7 @@ use crate::explorer::{
     },
     remote_ui::{
         TransferControlHandler, TransferJobId, TransferPanelParts, TransferRevealHandler,
-        render_transfer_panel,
+        TransferRevealSide, render_transfer_panel,
     },
     render::render_drop_indicator,
     view::{ExplorerView, ExplorerViewEvent},
@@ -895,7 +895,8 @@ impl ExplorerTabs {
     }
 
     fn prepare_closed_view(&mut self, view: Entity<ExplorerView>, cx: &mut Context<Self>) {
-        let has_active_operation = view.read(cx).has_background_operation();
+        let has_active_operation =
+            view.read(cx).has_background_operation() || view.read(cx).has_active_downloads();
         let _ = view.update(cx, |view, cx| {
             view.prepare_for_tab_close(cx);
             cx.notify();
@@ -1309,7 +1310,7 @@ impl ExplorerTabs {
         let mut still_running = Vec::new();
 
         for view in std::mem::take(&mut self.background_operation_tabs) {
-            if view.read(cx).has_background_operation() {
+            if view.read(cx).has_background_operation() || view.read(cx).has_active_downloads() {
                 still_running.push(view);
             }
         }
@@ -1892,15 +1893,7 @@ impl ExplorerTabs {
         let parts = self.transfer_panel_parts(cx);
         let entity = cx.entity();
         let on_reveal: TransferRevealHandler = Rc::new(move |id, side, _, cx| {
-            let TransferJobId::Server(id) = id else {
-                return;
-            };
-            let active_view = entity.read(cx).active_tab().map(ExplorerTab::active_view);
-            if let Some(view) = active_view {
-                let _ = view.update(cx, |view, cx| {
-                    view.reveal_remote_transfer(id, side, cx);
-                });
-            }
+            let _ = entity.update(cx, |tabs, cx| tabs.reveal_transfer(id, side, cx));
         });
 
         let entity = cx.entity();
@@ -1937,6 +1930,53 @@ impl ExplorerTabs {
             on_control,
             cx,
         )
+    }
+
+    fn reveal_transfer(
+        &mut self,
+        id: TransferJobId,
+        side: TransferRevealSide,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_view) = self.active_tab().map(ExplorerTab::active_view) else {
+            return;
+        };
+        match id {
+            TransferJobId::Server(id) => {
+                active_view.update(cx, |view, cx| view.reveal_remote_transfer(id, side, cx));
+            }
+            TransferJobId::Download {
+                owner: Some(owner),
+                id,
+            } if side == TransferRevealSide::Destination => {
+                let Some(owner_view) = self.pane_view_for_transfer_owner(owner) else {
+                    return;
+                };
+                let Some((target, active)) = owner_view.read(cx).download_reveal_target(id) else {
+                    return;
+                };
+                active_view.update(cx, |view, cx| {
+                    view.reveal_download_transfer(owner_view.entity_id(), id, target, active, cx)
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_download_reveals(
+        &mut self,
+        owner: gpui::EntityId,
+        id: u64,
+        paths: &[PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        for tab in &self.tabs {
+            for pane in &tab.panes {
+                pane.view.update(cx, |view, cx| {
+                    view.complete_pending_download_reveal(owner, id, paths, cx)
+                });
+            }
+        }
     }
 
     fn render_active_layout(
@@ -2675,6 +2715,10 @@ fn observe_tab_view(view: &Entity<ExplorerView>, window: &Window, cx: &mut Conte
                 this.reload_tabs_except(source_view, cx);
                 cx.notify();
             }
+            ExplorerViewEvent::DownloadFinished { id, paths } => {
+                this.finish_download_reveals(source_view.entity_id(), *id, paths, cx);
+                cx.notify();
+            }
             ExplorerViewEvent::MountedVolumeEjected(path) => {
                 if this.redirect_tabs_after_mounted_volume_ejected(path, cx) {
                     cx.notify();
@@ -3091,6 +3135,7 @@ mod tests {
     fn transfer_download_row(id: u64, destination: PathBuf) -> DownloadNoticeRow {
         DownloadNoticeRow {
             speed_tracker: Default::default(),
+            output_paths: Vec::new(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: format!("download-{id}.zip"),
@@ -6313,6 +6358,171 @@ mod tests {
             assert_eq!(right_view.read(cx).path(), temp.path().join("a").as_path());
             assert_ne!(left_pane, right_pane);
         });
+    }
+
+    #[gpui::test]
+    fn shared_download_reveal_uses_inactive_owner_and_survives_owner_tab_closure(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::explorer::download::DownloadResult;
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["owner", "destination", "other"]);
+        let destination = temp.path().join("destination");
+        let active_view = active_test_view(&tabs, cx);
+        let (owner_tab, owner, owner_view) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("owner"), window, cx);
+                let owner_tab = tabs.tabs[1].id;
+                let owner = tabs.tabs[1].active_pane.0;
+                let owner_view = tabs.tabs[1].active_view();
+                owner_view.update(cx, |view, cx| {
+                    view.download_notice_rows = vec![transfer_download_row(7, destination.clone())];
+                    cx.notify();
+                });
+                active_view.update(cx, |view, cx| {
+                    // Identical IDs in different panes must resolve through the owner.
+                    view.download_notice_rows =
+                        vec![transfer_download_row(7, temp.path().join("other"))];
+                    cx.notify();
+                });
+                cx.notify();
+                (owner_tab, owner, owner_view)
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(owner, 2);
+        let row = cx.debug_bounds("transfer-row-download-2-7").unwrap();
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, app| {
+            assert_eq!(
+                tabs.active_tab().unwrap().active_view().entity_id(),
+                active_view.entity_id()
+            );
+            assert_eq!(active_view.read(app).path(), destination);
+            assert_eq!(owner_view.read(app).path(), temp.path().join("owner"));
+            assert!(active_view.read(app).pending_transfer_reveal.is_some());
+        });
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.close_tab(owner_tab, window, cx);
+                assert!(
+                    tabs.background_operation_tabs
+                        .iter()
+                        .any(|view| view.entity_id() == owner_view.entity_id())
+                );
+            })
+        });
+        let final_path = destination.join("file (2).zip");
+        fs::write(&final_path, b"downloaded").unwrap();
+        cx.update(|_, app| {
+            owner_view.update(app, |view, cx| {
+                view.complete_download(7, Ok(DownloadResult::File(final_path.clone())), cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.read_entity(&active_view, |view, _| {
+            assert_eq!(view.path(), destination);
+            assert_eq!(view.selected_paths(), vec![final_path]);
+            assert!(view.pending_transfer_reveal.is_none());
+        });
+        cx.read_entity(&tabs, |tabs, app| {
+            assert_eq!(tabs.tabs.len(), 1);
+            assert_eq!(
+                tabs.active_tab().unwrap().active_view().entity_id(),
+                active_view.entity_id()
+            );
+            assert!(tabs.background_operation_tabs.is_empty());
+            assert_eq!(
+                active_view.read(app).download_notice_rows[0].status,
+                DownloadNoticeStatus::Downloading {
+                    downloaded_bytes: 25,
+                    total_bytes: Some(100)
+                }
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn shared_video_reveal_navigates_only_the_focused_split_pane(cx: &mut TestAppContext) {
+        use crate::explorer::download::DownloadResult;
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["owner", "destination"]);
+        let destination = temp.path().join("destination");
+        let (left_pane, owner, left_view, right_view) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("owner"), window, cx);
+                let workspace = tabs.tabs[0].id;
+                let left_pane = tabs.tabs[0].active_pane;
+                let source = tabs.tabs[1].id;
+                let right_pane = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    workspace,
+                    left_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx
+                ));
+                let left = tabs.tabs[0].pane(left_pane).unwrap().view.clone();
+                let right = tabs.tabs[0].pane(right_pane).unwrap().view.clone();
+                right.update(cx, |view, cx| {
+                    let mut row = transfer_download_row(7, destination.clone());
+                    row.kind = DownloadNoticeKind::Video {
+                        site_domain: "example.com".to_owned(),
+                    };
+                    view.download_notice_rows.push(row);
+                    cx.notify();
+                });
+                cx.notify();
+                (left_pane, right_pane.0, left, right)
+            })
+        });
+        cx.run_until_parked();
+        let left = cx.debug_bounds("explorer-pane-1").unwrap();
+        cx.simulate_click(left.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(owner, 2);
+        let row = cx.debug_bounds("transfer-row-download-2-7").unwrap();
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.run_until_parked();
+        let final_path = destination.join("Postprocessed.mkv");
+        fs::write(&final_path, b"media").unwrap();
+        cx.update(|_, app| {
+            right_view.update(app, |view, cx| {
+                view.complete_download(7, Ok(DownloadResult::Video(vec![final_path.clone()])), cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, app| {
+            assert_eq!(tabs.active_tab().unwrap().active_pane, left_pane);
+            assert_eq!(left_view.read(app).path(), destination);
+            assert_eq!(left_view.read(app).selected_paths(), vec![final_path]);
+            assert_eq!(right_view.read(app).path(), temp.path().join("owner"));
+            assert!(right_view.read(app).selected_paths().is_empty());
+        });
+        // A stale row from a disappeared owner cannot navigate the pane.
+        cx.update(|_, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.reveal_transfer(
+                    TransferJobId::Download {
+                        owner: Some(999),
+                        id: 7,
+                    },
+                    TransferRevealSide::Destination,
+                    cx,
+                );
+                tabs.reveal_transfer(
+                    TransferJobId::Download {
+                        owner: Some(owner),
+                        id: 999,
+                    },
+                    TransferRevealSide::Destination,
+                    cx,
+                );
+            })
+        });
+        cx.read_entity(&left_view, |view, _| assert_eq!(view.path(), destination));
     }
 
     #[gpui::test]

@@ -5360,7 +5360,7 @@ fn add_current_folder_drop_handlers(
 
         match target {
             CurrentFolderClickTarget::Background => {
-                this.cancel_pending_remote_transfer_reveal();
+                this.cancel_pending_transfer_reveal();
                 this.close_context_menu();
                 if this.suppress_next_click() {
                     this.cancel_pending_click_rename();
@@ -5380,7 +5380,7 @@ fn add_current_folder_drop_handlers(
                 this.close_context_menu();
             }
             CurrentFolderClickTarget::EmptyFolder => {
-                this.cancel_pending_remote_transfer_reveal();
+                this.cancel_pending_transfer_reveal();
                 this.close_context_menu();
                 if this.commit_active_rename_before_interaction(window, cx) {
                     this.clear_selection();

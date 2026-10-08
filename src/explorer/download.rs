@@ -48,7 +48,7 @@ use crate::explorer::{
         RemoteCredentials, RemoteDownloadError, RemoteHostKey, download_remote_to_temporary_file,
         embedded_credentials, endpoint_key, is_remote_download, remember_host_key,
     },
-    view::{ExplorerView, OperationNotice},
+    view::{ExplorerView, ExplorerViewEvent, OperationNotice},
 };
 
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -59,6 +59,8 @@ const YTDLP_ERROR_MESSAGE_LIMIT: usize = 4 * 1024;
 const YTDLP_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const YTDLP_DOWNLOAD_PROGRESS_PREFIX: &str = "__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__";
 const YTDLP_POSTPROCESS_PROGRESS_PREFIX: &str = "__EXPLORER_YTDLP_POSTPROCESS_PROGRESS__";
+const YTDLP_OUTPUT_PREFIX: &str = "__EXPLORER_YTDLP_OUTPUT__";
+const YTDLP_OUTPUT_TEMPLATE: &str = "after_move:__EXPLORER_YTDLP_OUTPUT__%(filepath)j";
 const YTDLP_DOWNLOAD_PROGRESS_TEMPLATE: &str = "download:__EXPLORER_YTDLP_DOWNLOAD_PROGRESS__%(progress.{status,downloaded_bytes,total_bytes})j";
 const YTDLP_POSTPROCESS_PROGRESS_TEMPLATE: &str =
     "postprocess:__EXPLORER_YTDLP_POSTPROCESS_PROGRESS__%(progress.{status})j";
@@ -79,6 +81,7 @@ pub(super) struct DownloadNoticeRow {
     pub(super) destination: PathBuf,
     pub(super) status: DownloadNoticeStatus,
     pub(super) speed_tracker: DownloadSpeedTracker,
+    pub(super) output_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -266,9 +269,9 @@ impl Drop for ActiveRemoteDownload {
 }
 
 #[derive(Debug)]
-enum DownloadResult {
+pub(super) enum DownloadResult {
     File(PathBuf),
-    Video,
+    Video(Vec<PathBuf>),
 }
 
 pub(super) struct YtDlpProcessControl {
@@ -506,6 +509,7 @@ impl ExplorerView {
         let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
             speed_tracker: Default::default(),
+            output_paths: Vec::new(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: download.file_name.clone(),
@@ -577,6 +581,7 @@ impl ExplorerView {
         self.next_download_id = self.next_download_id.wrapping_add(1);
         self.download_notice_rows.push(DownloadNoticeRow {
             speed_tracker: Default::default(),
+            output_paths: Vec::new(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: download.file_name.clone(),
@@ -889,6 +894,7 @@ impl ExplorerView {
         let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
             speed_tracker: Default::default(),
+            output_paths: Vec::new(),
             id,
             kind: DownloadNoticeKind::Video {
                 site_domain: site_domain.clone(),
@@ -966,6 +972,7 @@ impl ExplorerView {
             control.cancel();
         }
         self.download_notice_rows.remove(row_index);
+        self.finish_download_reveal(id, Vec::new(), cx);
         self.remove_download_task(id);
         if self.active_remote_download.as_ref().map(|active| active.id) == Some(id) {
             if let Some(handle) = self.active_dialog_window.take() {
@@ -1059,7 +1066,7 @@ impl ExplorerView {
         true
     }
 
-    fn complete_download(
+    pub(super) fn complete_download(
         &mut self,
         id: u64,
         result: Result<DownloadResult, String>,
@@ -1073,6 +1080,7 @@ impl ExplorerView {
             return;
         };
 
+        let mut output_paths = Vec::new();
         match result {
             Ok(DownloadResult::File(path)) => {
                 self.download_batch_succeeded += 1;
@@ -1081,13 +1089,15 @@ impl ExplorerView {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| self.download_notice_rows[row_index].file_name.clone());
                 self.download_notice_rows[row_index].file_name = final_name;
+                output_paths.push(path.clone());
                 self.download_notice_rows[row_index].set_status(DownloadNoticeStatus::Completed);
                 if path.parent() == Some(self.path.as_path()) {
                     self.reload_with_entry_metadata_resolution(cx);
                 }
                 self.emit_filesystem_changed(cx);
             }
-            Ok(DownloadResult::Video) => {
+            Ok(DownloadResult::Video(paths)) => {
+                output_paths = paths;
                 self.download_batch_succeeded += 1;
                 self.download_notice_rows[row_index].set_status(DownloadNoticeStatus::Completed);
                 self.reload_with_entry_metadata_resolution(cx);
@@ -1102,7 +1112,16 @@ impl ExplorerView {
             }
         }
 
+        self.download_notice_rows[row_index].output_paths = output_paths.clone();
+        self.finish_download_reveal(id, output_paths, cx);
         self.finish_download_batch_if_idle(cx);
+    }
+
+    fn finish_download_reveal(&mut self, id: u64, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.complete_pending_download_reveal(cx.entity_id(), id, &paths, cx);
+        // FilesystemChanged is emitted first, so other panes finish their normal
+        // refresh before the selection reload requested by this event.
+        cx.emit(ExplorerViewEvent::DownloadFinished { id, paths });
     }
 
     fn finish_download_batch_if_idle(&mut self, cx: &mut Context<Self>) {
@@ -1159,6 +1178,8 @@ fn ytdlp_command_spec(
 ) -> YtDlpCommandSpec {
     let mut args = options.into_iter().map(OsString::from).collect::<Vec<_>>();
     args.push(OsString::from("--no-playlist"));
+    args.push(OsString::from("--print"));
+    args.push(OsString::from(YTDLP_OUTPUT_TEMPLATE));
     args.push(OsString::from("--no-quiet"));
     args.push(OsString::from("--newline"));
     args.push(OsString::from("--progress"));
@@ -1196,7 +1217,12 @@ fn run_ytdlp_download(
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    run_ytdlp_command(&mut command, process, on_progress)
+    run_ytdlp_command(&mut command, process, on_progress).map(|result| match result {
+        DownloadResult::Video(paths) => {
+            DownloadResult::Video(resolve_ytdlp_output_paths(paths, &command_spec.current_dir))
+        }
+        other => other,
+    })
 }
 
 fn run_ytdlp_command(
@@ -1219,14 +1245,15 @@ fn run_ytdlp_command(
         }
         thread::sleep(YTDLP_PROCESS_POLL_INTERVAL);
     };
-    stdout_reader
+    let output_paths = stdout_reader
         .map(|reader| {
             reader
                 .join()
                 .map_err(|_| "Could not read yt-dlp progress output.".to_owned())?
                 .map_err(|error| format!("Could not read yt-dlp progress output: {error}"))
         })
-        .transpose()?;
+        .transpose()?
+        .unwrap_or_default();
     let stderr = stderr_reader
         .map(|reader| {
             reader
@@ -1237,23 +1264,52 @@ fn run_ytdlp_command(
         .transpose()?
         .unwrap_or_default();
     ytdlp_result_from_process(status.success(), &status.to_string(), &stderr)
+        .map(|_| DownloadResult::Video(output_paths))
 }
 
 fn read_ytdlp_progress(
     reader: impl Read,
     on_progress: impl Fn(YtDlpProgressEvent),
-) -> io::Result<()> {
+) -> io::Result<Vec<PathBuf>> {
     let mut reader = BufReader::new(reader);
     let mut line = Vec::new();
+    let mut output_paths = Vec::new();
     loop {
         line.clear();
         if reader.read_until(b'\n', &mut line)? == 0 {
-            return Ok(());
+            return Ok(output_paths);
         }
-        if let Some(event) = ytdlp_progress_event_from_line(&String::from_utf8_lossy(&line)) {
+        let line = String::from_utf8_lossy(&line);
+        if let Some(path) = ytdlp_output_path_from_line(&line) {
+            if !output_paths.contains(&path) {
+                output_paths.push(path);
+            }
+        } else if let Some(event) = ytdlp_progress_event_from_line(&line) {
             on_progress(event);
         }
     }
+}
+
+fn ytdlp_output_path_from_line(line: &str) -> Option<PathBuf> {
+    let value = line.trim().strip_prefix(YTDLP_OUTPUT_PREFIX)?;
+    let path = serde_json::from_str::<String>(value).ok()?;
+    (!path.is_empty() && !path.contains('\0') && path != "-" && path != "NA")
+        .then(|| PathBuf::from(path))
+}
+
+fn resolve_ytdlp_output_paths(paths: Vec<PathBuf>, directory: &Path) -> Vec<PathBuf> {
+    let mut resolved = Vec::new();
+    for path in paths {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            directory.join(path)
+        };
+        if !resolved.contains(&path) {
+            resolved.push(path);
+        }
+    }
+    resolved
 }
 
 fn ytdlp_progress_event_from_line(line: &str) -> Option<YtDlpProgressEvent> {
@@ -1293,13 +1349,9 @@ fn ytdlp_progress_event_from_line(line: &str) -> Option<YtDlpProgressEvent> {
     .then_some(YtDlpProgressEvent::PostProcessing)
 }
 
-fn ytdlp_result_from_process(
-    success: bool,
-    status: &str,
-    stderr: &[u8],
-) -> Result<DownloadResult, String> {
+fn ytdlp_result_from_process(success: bool, status: &str, stderr: &[u8]) -> Result<(), String> {
     if success {
-        return Ok(DownloadResult::Video);
+        return Ok(());
     }
 
     let stderr = bounded_ytdlp_message(stderr);
@@ -1517,6 +1569,7 @@ mod tests {
             destination: PathBuf::from("downloads"),
             status: DownloadNoticeStatus::Connecting,
             speed_tracker: Default::default(),
+            output_paths: Vec::new(),
         }
     }
 
@@ -1867,6 +1920,8 @@ mod tests {
                 OsString::from("--progress-template"),
                 OsString::from("download:user-template"),
                 OsString::from("--no-playlist"),
+                OsString::from("--print"),
+                OsString::from(YTDLP_OUTPUT_TEMPLATE),
                 OsString::from("--no-quiet"),
                 OsString::from("--newline"),
                 OsString::from("--progress"),
@@ -1952,6 +2007,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ytdlp_output_records_capture_final_paths_without_publishing_progress() {
+        let paths = [r#"子 folder/quoted "video".mp4"#, r"nested\movie.mkv"];
+        let mut lines = String::from(
+            "noise\n__EXPLORER_YTDLP_OUTPUT__not-json\n__EXPLORER_YTDLP_OUTPUT__null\n__EXPLORER_YTDLP_OUTPUT__\"\"\n",
+        );
+        for path in paths.iter().chain(paths.iter()) {
+            lines.push_str(YTDLP_OUTPUT_PREFIX);
+            lines.push_str(&serde_json::to_string(path).unwrap());
+            lines.push_str("\r\n");
+        }
+        let captured =
+            read_ytdlp_progress(lines.as_bytes(), |_| panic!("output path is not progress"))
+                .unwrap();
+        assert_eq!(captured, paths.map(PathBuf::from));
+        for value in ["[]", "42", "\"-\"", "\"NA\"", "\"bad\\u0000name\""] {
+            let parsed = ytdlp_output_path_from_line(&format!("{YTDLP_OUTPUT_PREFIX}{value}"));
+            assert!(parsed.is_none());
+        }
+    }
+
+    #[test]
+    fn ytdlp_output_paths_resolve_relative_names_and_deduplicate() {
+        let directory = tempfile::tempdir().unwrap();
+        let absolute = directory.path().join("movie.mkv");
+        assert_eq!(
+            resolve_ytdlp_output_paths(
+                vec![
+                    PathBuf::from("movie.mkv"),
+                    absolute.clone(),
+                    PathBuf::from("nested/second.mp4")
+                ],
+                directory.path()
+            ),
+            vec![absolute, directory.path().join("nested/second.mp4")]
+        );
+    }
+
     #[gpui::test]
     fn ytdlp_progress_events_update_exact_unknown_and_postprocess_states(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().expect("temp directory");
@@ -1960,6 +2053,7 @@ mod tests {
             view.update(app, |view, _| {
                 view.download_notice_rows = vec![DownloadNoticeRow {
                     speed_tracker: Default::default(),
+                    output_paths: Vec::new(),
                     id: 7,
                     kind: DownloadNoticeKind::Video {
                         site_domain: "youtube.com".to_owned(),
@@ -2070,9 +2164,15 @@ mod tests {
 
     #[test]
     fn ytdlp_process_test_helper() {
-        let Some(_) = std::env::var_os(YTDLP_TEST_MODE) else {
+        let Some(mode) = std::env::var_os(YTDLP_TEST_MODE) else {
             return;
         };
+        if mode == "output" {
+            let path = serde_json::to_string("Final media.mkv").unwrap();
+            println!("{YTDLP_OUTPUT_PREFIX}{path}");
+            println!("{YTDLP_OUTPUT_PREFIX}{path}");
+            return;
+        }
         let ready = PathBuf::from(std::env::var_os(YTDLP_TEST_READY).expect("ready path"));
         let descendant_ready = PathBuf::from(
             std::env::var_os(YTDLP_TEST_DESCENDANT_READY).expect("descendant ready path"),
@@ -2143,6 +2243,24 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn ytdlp_process_returns_final_media_paths_after_reading_stdout() {
+        let temp = tempfile::tempdir().unwrap();
+        let control = YtDlpProcessControl::new();
+        let mut command = ytdlp_test_command(temp.path());
+        command
+            .env(YTDLP_TEST_MODE, "output")
+            .stdout(Stdio::piped());
+        let result = run_ytdlp_command(&mut command, control.shared(), |_| {
+            panic!("path is not progress")
+        })
+        .unwrap();
+        let DownloadResult::Video(paths) = result else {
+            panic!("expected media paths");
+        };
+        assert_eq!(paths, vec![PathBuf::from("Final media.mkv")]);
     }
 
     #[test]
@@ -2220,6 +2338,7 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 1,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "youtube.com".to_owned(),
@@ -2230,6 +2349,7 @@ mod tests {
                     },
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 2,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -2263,7 +2383,7 @@ mod tests {
                 assert!(!continuing_state.cancelled.load(Ordering::Relaxed));
 
                 view.remove_ytdlp_process_control(1);
-                view.complete_download(1, Ok(DownloadResult::Video), cx);
+                view.complete_download(1, Ok(DownloadResult::Video(Vec::new())), cx);
             });
         });
 
@@ -2291,6 +2411,7 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 1,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -2301,6 +2422,7 @@ mod tests {
                     },
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 2,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -2310,9 +2432,9 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
-                view.complete_download(1, Ok(DownloadResult::Video), cx);
+                view.complete_download(1, Ok(DownloadResult::Video(Vec::new())), cx);
                 assert!(view.operation_notice.is_none());
-                view.complete_download(2, Ok(DownloadResult::Video), cx);
+                view.complete_download(2, Ok(DownloadResult::Video(Vec::new())), cx);
             });
         });
 
@@ -2340,6 +2462,7 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 1,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "vimeo.com".to_owned(),
@@ -2350,6 +2473,7 @@ mod tests {
                     },
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 2,
                         kind: DownloadNoticeKind::Video {
                             site_domain: "dailymotion.com".to_owned(),
@@ -2359,8 +2483,8 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
-                view.complete_download(1, Ok(DownloadResult::Video), cx);
-                view.complete_download(2, Ok(DownloadResult::Video), cx);
+                view.complete_download(1, Ok(DownloadResult::Video(Vec::new())), cx);
+                view.complete_download(2, Ok(DownloadResult::Video(Vec::new())), cx);
             });
         });
 
@@ -2592,6 +2716,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows.push(DownloadNoticeRow {
                     speed_tracker: Default::default(),
+                    output_paths: Vec::new(),
                     id: 7,
                     kind: DownloadNoticeKind::File,
                     file_name: "partial.zip".to_owned(),
@@ -2625,6 +2750,7 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 1,
                         kind: DownloadNoticeKind::File,
                         file_name: "complete.zip".to_owned(),
@@ -2633,6 +2759,7 @@ mod tests {
                     },
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 2,
                         kind: DownloadNoticeKind::File,
                         file_name: "cancel.zip".to_owned(),
@@ -2664,6 +2791,7 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 1,
                         kind: DownloadNoticeKind::File,
                         file_name: "one.zip".to_owned(),
@@ -2672,6 +2800,7 @@ mod tests {
                     },
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 2,
                         kind: DownloadNoticeKind::File,
                         file_name: "two.zip".to_owned(),
@@ -2679,7 +2808,7 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
-                view.complete_download(1, Ok(DownloadResult::Video), cx);
+                view.complete_download(1, Ok(DownloadResult::Video(Vec::new())), cx);
             });
         });
         cx.executor()
@@ -2691,7 +2820,7 @@ mod tests {
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
-                view.complete_download(2, Ok(DownloadResult::Video), cx);
+                view.complete_download(2, Ok(DownloadResult::Video(Vec::new())), cx);
             });
         });
         cx.executor().advance_clock(Duration::from_secs(4));
@@ -2716,13 +2845,14 @@ mod tests {
                 view.download_batch_active = true;
                 view.download_notice_rows.push(DownloadNoticeRow {
                     speed_tracker: Default::default(),
+                    output_paths: Vec::new(),
                     id: 1,
                     kind: DownloadNoticeKind::File,
                     file_name: "one.zip".to_owned(),
                     destination: temp.path().to_path_buf(),
                     status: DownloadNoticeStatus::Connecting,
                 });
-                view.complete_download(1, Ok(DownloadResult::Video), cx);
+                view.complete_download(1, Ok(DownloadResult::Video(Vec::new())), cx);
             });
         });
         cx.executor().advance_clock(Duration::from_secs(4));
@@ -2733,6 +2863,7 @@ mod tests {
                 view.begin_download_batch_if_needed();
                 view.download_notice_rows.push(DownloadNoticeRow {
                     speed_tracker: Default::default(),
+                    output_paths: Vec::new(),
                     id: 2,
                     kind: DownloadNoticeKind::File,
                     file_name: "two.zip".to_owned(),
@@ -2750,7 +2881,7 @@ mod tests {
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
-                view.complete_download(2, Ok(DownloadResult::Video), cx);
+                view.complete_download(2, Ok(DownloadResult::Video(Vec::new())), cx);
             });
         });
         cx.executor()
@@ -2772,6 +2903,7 @@ mod tests {
                 view.download_notice_rows = vec![
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 1,
                         kind: DownloadNoticeKind::File,
                         file_name: "complete.zip".to_owned(),
@@ -2780,6 +2912,7 @@ mod tests {
                     },
                     DownloadNoticeRow {
                         speed_tracker: Default::default(),
+                        output_paths: Vec::new(),
                         id: 2,
                         kind: DownloadNoticeKind::File,
                         file_name: "failed.zip".to_owned(),
@@ -2787,7 +2920,7 @@ mod tests {
                         status: DownloadNoticeStatus::Connecting,
                     },
                 ];
-                view.complete_download(1, Ok(DownloadResult::Video), cx);
+                view.complete_download(1, Ok(DownloadResult::Video(Vec::new())), cx);
                 view.complete_download(2, Err("network unavailable".to_owned()), cx);
             });
         });
@@ -2828,6 +2961,7 @@ mod tests {
             view.update(app, |view, cx| {
                 view.download_notice_rows.push(DownloadNoticeRow {
                     speed_tracker: Default::default(),
+                    output_paths: Vec::new(),
                     id: 3,
                     kind: DownloadNoticeKind::File,
                     file_name: "complete.zip".to_owned(),

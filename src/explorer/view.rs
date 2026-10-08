@@ -121,7 +121,7 @@ pub struct ExplorerView {
     pub(super) remote_transfer_snapshots: Vec<super::remote_transfer::JobSnapshot>,
     pub(super) transfer_completion_cleanup_task: Option<Task<()>>,
     pub(super) remote_transfer_panel_collapsed: bool,
-    pub(super) pending_remote_transfer_reveal: Option<PendingRemoteTransferReveal>,
+    pub(super) pending_transfer_reveal: Option<PendingTransferReveal>,
     pub(super) remote_credentials: HashMap<
         crate::explorer::remote_download::RemoteEndpointKey,
         crate::explorer::remote_download::RemoteCredentials,
@@ -373,6 +373,7 @@ pub(super) struct ShellShortcutResolution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ExplorerViewEvent {
     FilesystemChanged,
+    DownloadFinished { id: u64, paths: Vec<PathBuf> },
     MountedVolumeEjected(PathBuf),
     OpenDirectoryInNewTab(PathBuf),
     ExpandTransfers,
@@ -391,9 +392,15 @@ pub(super) struct PendingTrash {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct PendingRemoteTransferReveal {
-    pub(super) job_id: u64,
+pub(super) struct PendingTransferReveal {
+    pub(super) job_id: TransferRevealJob,
     pub(super) target: super::remote_transfer::RevealTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TransferRevealJob {
+    Server(u64),
+    Download { owner: gpui::EntityId, id: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -595,7 +602,7 @@ impl ExplorerView {
             remote_transfer_snapshots: Vec::new(),
             transfer_completion_cleanup_task: None,
             remote_transfer_panel_collapsed: false,
-            pending_remote_transfer_reveal: None,
+            pending_transfer_reveal: None,
             remote_credentials: HashMap::new(),
             next_download_id: 0,
             download_batch_succeeded: 0,
@@ -2273,6 +2280,12 @@ impl ExplorerView {
             || self.network_connection_is_working()
     }
 
+    pub(super) fn has_active_downloads(&self) -> bool {
+        self.download_notice_rows
+            .iter()
+            .any(|row| row.status.is_active())
+    }
+
     pub(super) fn active_drop_indicator(&self) -> Option<DropIndicator> {
         self.active_drop_indicator.clone()
     }
@@ -2572,6 +2585,7 @@ impl ExplorerView {
     }
 
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
+        self.cancel_pending_transfer_reveal();
         self.rendered_image_leases.borrow_mut().clear();
         self.resource_image_leases.borrow_mut().clear();
         self.animated_hover_image_cache = None;
@@ -2592,6 +2606,7 @@ impl ExplorerView {
         self.pending_drop_task = None;
 
         if !self.has_active_mutating_operation()
+            && !self.has_active_downloads()
             && let Some(handle) = self.active_dialog_window.take()
         {
             let _ = handle.update(cx, |_, window, _| window.remove_window());

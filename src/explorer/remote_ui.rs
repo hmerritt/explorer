@@ -6,9 +6,9 @@ use super::{
     remote_dialog::{open_remote_credentials_dialog, open_remote_host_key_dialog},
     remote_download::RemoteDownloadError,
     remote_fs,
-    remote_transfer::{self, JobSnapshot, State},
+    remote_transfer::{self, JobSnapshot, RevealTarget, State},
     tooltip::explorer_tooltip,
-    view::{ExplorerView, PendingRemoteTransferReveal},
+    view::{ExplorerView, PendingTransferReveal, TransferRevealJob},
 };
 use crate::settings::SettingsState;
 use gpui::{
@@ -322,7 +322,7 @@ impl ExplorerView {
                         if revision != completion {
                             completion = revision;
                             let snapshots = super::remote_transfer::snapshots();
-                            if !view.complete_pending_remote_transfer_reveal(&snapshots, cx) {
+                            if !view.complete_pending_transfer_reveal(&snapshots, cx) {
                                 view.reload_with_entry_metadata_resolution(cx);
                             }
                             view.apply_remote_transfer_snapshots(snapshots, cx);
@@ -411,7 +411,7 @@ impl ExplorerView {
         if transfer_panel_should_expand(&previous, &snapshots) {
             self.request_transfer_panel_expansion(cx);
         }
-        self.reconcile_pending_remote_transfer_reveal(&snapshots, cx);
+        self.reconcile_pending_transfer_reveal(&snapshots, cx);
         let changed = snapshots != previous;
         self.remote_transfer_snapshots = snapshots;
         self.update_transfer_completion_retention(cx);
@@ -509,8 +509,77 @@ impl ExplorerView {
         cx.notify();
     }
 
-    pub(super) fn cancel_pending_remote_transfer_reveal(&mut self) {
-        self.pending_remote_transfer_reveal = None;
+    pub(super) fn cancel_pending_transfer_reveal(&mut self) {
+        self.pending_transfer_reveal = None;
+    }
+
+    pub(super) fn download_reveal_target(&self, id: u64) -> Option<(RevealTarget, bool)> {
+        let row = self.download_notice_rows.iter().find(|row| row.id == id)?;
+        let directory = row
+            .output_paths
+            .first()
+            .and_then(|path| path.parent())
+            .unwrap_or(&row.destination)
+            .to_path_buf();
+        let paths = row
+            .output_paths
+            .iter()
+            .filter(|path| path.parent() == Some(directory.as_path()) && path.is_file())
+            .cloned()
+            .collect();
+        Some((RevealTarget { directory, paths }, row.status.is_active()))
+    }
+
+    pub(super) fn reveal_download_transfer(
+        &mut self,
+        owner: gpui::EntityId,
+        id: u64,
+        target: RevealTarget,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_pending_transfer_reveal();
+        self.navigate_to_directory_with_watcher_selecting(
+            target.directory.clone(),
+            HistoryMode::Record,
+            target.paths.clone(),
+            cx,
+        );
+        if active {
+            self.pending_transfer_reveal = Some(PendingTransferReveal {
+                job_id: TransferRevealJob::Download { owner, id },
+                target,
+            });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn complete_pending_download_reveal(
+        &mut self,
+        owner: gpui::EntityId,
+        id: u64,
+        paths: &[std::path::PathBuf],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_transfer_reveal.as_ref() else {
+            return;
+        };
+        if pending.job_id != (TransferRevealJob::Download { owner, id }) {
+            return;
+        }
+        let pending = self.pending_transfer_reveal.take().unwrap();
+        if self.path != pending.target.directory {
+            return;
+        }
+        let paths = paths
+            .iter()
+            .filter(|path| path.parent() == Some(self.path.as_path()) && path.is_file())
+            .cloned()
+            .collect::<Vec<_>>();
+        if !paths.is_empty() {
+            self.reload_with_entry_metadata_resolution_selecting(paths, cx);
+            cx.notify();
+        }
     }
 
     pub(super) fn reveal_remote_transfer(
@@ -532,7 +601,7 @@ impl ExplorerView {
             TransferRevealSide::Destination => job.destination_reveal.clone(),
         };
 
-        self.cancel_pending_remote_transfer_reveal();
+        self.cancel_pending_transfer_reveal();
         self.navigate_to_directory_with_watcher_selecting(
             target.directory.clone(),
             HistoryMode::Record,
@@ -542,71 +611,77 @@ impl ExplorerView {
         if side == TransferRevealSide::Destination
             && !matches!(job.state, State::Completed | State::Cancelled)
         {
-            self.pending_remote_transfer_reveal =
-                Some(PendingRemoteTransferReveal { job_id: id, target });
+            self.pending_transfer_reveal = Some(PendingTransferReveal {
+                job_id: TransferRevealJob::Server(id),
+                target,
+            });
         }
         cx.notify();
     }
 
-    fn reconcile_pending_remote_transfer_reveal(
+    fn reconcile_pending_transfer_reveal(
         &mut self,
         snapshots: &[JobSnapshot],
         cx: &mut Context<Self>,
     ) {
-        let Some(pending) = self.pending_remote_transfer_reveal.as_mut() else {
+        let Some(pending) = self.pending_transfer_reveal.as_mut() else {
+            return;
+        };
+        let TransferRevealJob::Server(job_id) = pending.job_id else {
             return;
         };
         if self.path != pending.target.directory {
-            self.pending_remote_transfer_reveal = None;
+            self.pending_transfer_reveal = None;
             return;
         }
-        let Some(job) = snapshots.iter().find(|job| job.id == pending.job_id) else {
-            if let Some(target) = remote_transfer::take_completed_destination_reveal(pending.job_id)
-            {
+        let Some(job) = snapshots.iter().find(|job| job.id == job_id) else {
+            if let Some(target) = remote_transfer::take_completed_destination_reveal(job_id) {
                 pending.target = target;
             }
-            self.finish_pending_remote_transfer_reveal(cx);
+            self.finish_pending_transfer_reveal(cx);
             return;
         };
         pending.target = job.destination_reveal.clone();
         if job.state == State::Completed {
-            if let Some(target) = remote_transfer::take_completed_destination_reveal(pending.job_id)
-            {
+            if let Some(target) = remote_transfer::take_completed_destination_reveal(job_id) {
                 pending.target = target;
             }
-            self.finish_pending_remote_transfer_reveal(cx);
+            self.finish_pending_transfer_reveal(cx);
         } else if job.state == State::Cancelled {
-            self.pending_remote_transfer_reveal = None;
+            self.pending_transfer_reveal = None;
         }
     }
 
-    fn complete_pending_remote_transfer_reveal(
+    fn complete_pending_transfer_reveal(
         &mut self,
         snapshots: &[JobSnapshot],
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(pending) = self.pending_remote_transfer_reveal.as_mut() else {
+        let Some(pending) = self.pending_transfer_reveal.as_mut() else {
+            return false;
+        };
+        let TransferRevealJob::Server(job_id) = pending.job_id else {
             return false;
         };
         if self.path != pending.target.directory {
-            self.pending_remote_transfer_reveal = None;
+            self.pending_transfer_reveal = None;
             return false;
         }
-        if let Some(job) = snapshots.iter().find(|job| job.id == pending.job_id) {
+        if let Some(job) = snapshots.iter().find(|job| job.id == job_id) {
             pending.target = job.destination_reveal.clone();
             if job.state != State::Completed {
                 return false;
             }
         }
-        if let Some(target) = remote_transfer::take_completed_destination_reveal(pending.job_id) {
+        if let Some(target) = remote_transfer::take_completed_destination_reveal(job_id) {
             pending.target = target;
         }
-        self.finish_pending_remote_transfer_reveal(cx);
+        self.finish_pending_transfer_reveal(cx);
         true
     }
 
-    fn finish_pending_remote_transfer_reveal(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_remote_transfer_reveal.take() else {
+    fn finish_pending_transfer_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_transfer_reveal.take() else {
             return;
         };
         if self.path == pending.target.directory {
@@ -666,11 +741,15 @@ impl ExplorerView {
         let TransferPanelParts { jobs, native_icons } = self.transfer_panel_parts(None, true, cx);
         let entity = cx.entity();
         let on_reveal: TransferRevealHandler = Rc::new(move |id, side, _, cx| {
-            if let TransferJobId::Server(id) = id {
-                let _ = entity.update(cx, |view, cx| {
-                    view.reveal_remote_transfer(id, side, cx);
-                });
-            }
+            let _ = entity.update(cx, |view, cx| match id {
+                TransferJobId::Server(id) => view.reveal_remote_transfer(id, side, cx),
+                TransferJobId::Download { id, .. } if side == TransferRevealSide::Destination => {
+                    if let Some((target, active)) = view.download_reveal_target(id) {
+                        view.reveal_download_transfer(cx.entity_id(), id, target, active, cx);
+                    }
+                }
+                _ => {}
+            });
         });
         let entity = cx.entity();
         let on_control: TransferControlHandler = Rc::new(move |id, action, _, cx| {
@@ -997,17 +1076,17 @@ fn render_transfer_row(
         .h(px(TRANSFER_ROW_HEIGHT))
         .w_full()
         .bg(rgb(TRANSFER_SURFACE))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(TRANSFER_ROW_HOVER)))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            reveal_destination(reveal_job_id, TransferRevealSide::Destination, window, cx);
+            cx.stop_propagation();
+        })
         .when(job.is_server(), |row| {
-            row.cursor_pointer()
-                .hover(|style| style.bg(rgb(TRANSFER_ROW_HOVER)))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    reveal_destination(reveal_job_id, TransferRevealSide::Destination, window, cx);
-                    cx.stop_propagation();
-                })
-                .on_mouse_down(MouseButton::Right, move |_, window, cx| {
-                    on_reveal(reveal_job_id, TransferRevealSide::Source, window, cx);
-                    cx.stop_propagation();
-                })
+            row.on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                on_reveal(reveal_job_id, TransferRevealSide::Source, window, cx);
+                cx.stop_propagation();
+            })
         })
         .child(
             div()
@@ -1699,7 +1778,7 @@ mod tests {
 
     struct InteractivePanel {
         job: TransferPanelJob,
-        reveals: Vec<(u64, TransferRevealSide)>,
+        reveals: Vec<(TransferJobId, TransferRevealSide)>,
     }
 
     impl gpui::Render for InteractivePanel {
@@ -1713,12 +1792,10 @@ mod tests {
                 false,
                 cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()),
                 Rc::new(move |id, side, _, cx| {
-                    if let TransferJobId::Server(id) = id {
-                        let _ = entity.update(cx, |panel, cx| {
-                            panel.reveals.push((id, side));
-                            cx.notify();
-                        });
-                    }
+                    let _ = entity.update(cx, |panel, cx| {
+                        panel.reveals.push((id, side));
+                        cx.notify();
+                    });
                 }),
                 Rc::new(|_, _, _, _| {}),
                 cx,
@@ -1747,8 +1824,8 @@ mod tests {
             assert_eq!(
                 panel.reveals,
                 vec![
-                    (123, TransferRevealSide::Destination),
-                    (123, TransferRevealSide::Source),
+                    (TransferJobId::Server(123), TransferRevealSide::Destination),
+                    (TransferJobId::Server(123), TransferRevealSide::Source),
                 ]
             );
         });
@@ -1763,6 +1840,248 @@ mod tests {
         cx.simulate_mouse_up(pause, MouseButton::Right, gpui::Modifiers::default());
         cx.run_until_parked();
         cx.read_entity(&panel, |panel, _| assert_eq!(panel.reveals.len(), 2));
+    }
+
+    #[gpui::test]
+    fn download_rows_reveal_on_left_click_but_not_right_click_or_cancel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let row = download_row(7, DownloadNoticeStatus::Connecting);
+        let (panel, cx) = cx.add_window_view(|_, _| InteractivePanel {
+            job: TransferPanelJob::from_download(&row, Some(1)),
+            reveals: Vec::new(),
+        });
+        cx.run_until_parked();
+        let row = cx.debug_bounds("transfer-row-download-1-7").unwrap();
+        let position = gpui::point(row.origin.x + px(180.0), row.center().y);
+        cx.simulate_click(position, gpui::Modifiers::default());
+        cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let cancel = cx
+            .debug_bounds("transfer-cancel-download-1-7")
+            .unwrap()
+            .center();
+        cx.simulate_click(cancel, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&panel, |panel, _| {
+            assert_eq!(
+                panel.reveals,
+                vec![(
+                    TransferJobId::Download {
+                        owner: Some(1),
+                        id: 7
+                    },
+                    TransferRevealSide::Destination
+                )]
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn url_row_opens_destination_then_selects_the_collision_renamed_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::super::download::DownloadResult;
+        let temp = TempDir::new();
+        let initial = temp.path().join("initial");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&initial).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("file.zip"), b"existing").unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, initial.clone());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let mut row = download_row(7, DownloadNoticeStatus::Connecting);
+                row.destination = destination.clone();
+                row.file_name = "file.zip".to_owned();
+                view.download_notice_rows.push(row);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let row = cx.debug_bounds("transfer-row-download-7").unwrap();
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, destination);
+            assert!(view.selected_paths().is_empty());
+            assert!(view.pending_transfer_reveal.is_some());
+            assert_eq!(view.back_stack.last(), Some(&initial.clone().into()));
+        });
+        let final_path = destination.join("file (2).zip");
+        fs::write(&final_path, b"downloaded").unwrap();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.complete_download(7, Ok(DownloadResult::File(final_path.clone())), cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selected_paths(), vec![final_path.clone()]);
+            assert_eq!(
+                view.download_notice_rows[0].output_paths,
+                vec![final_path.clone()]
+            );
+            assert!(view.pending_transfer_reveal.is_none());
+        });
+        let history_length = cx.read_entity(&view, |view, _| view.back_stack.len());
+        let row = cx.debug_bounds("transfer-row-download-7").unwrap();
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.selected_paths(), vec![final_path]);
+            assert_eq!(view.back_stack.len(), history_length);
+        });
+    }
+
+    #[gpui::test]
+    fn video_row_reveals_final_media_in_its_actual_output_directory(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let initial = temp.path().join("initial");
+        let actual = temp.path().join("custom output");
+        fs::create_dir_all(&initial).unwrap();
+        fs::create_dir_all(&actual).unwrap();
+        let media = actual.join("Final video.mkv");
+        let audio = actual.join("Final audio.m4a");
+        let elsewhere = initial.join("Other.mp4");
+        for path in [&media, &audio, &elsewhere] {
+            fs::write(path, b"media").unwrap();
+        }
+        let (view, cx) = test_view_entity_at_path(cx, initial.clone());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let mut row = download_row(7, DownloadNoticeStatus::Completed);
+                row.kind = DownloadNoticeKind::Video {
+                    site_domain: "example.com".to_owned(),
+                };
+                row.destination = initial.clone();
+                row.output_paths = vec![media.clone(), audio.clone(), elsewhere];
+                view.download_notice_rows.push(row);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let row = cx.debug_bounds("transfer-row-download-7").unwrap();
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, actual);
+            let selected = view.selected_paths();
+            assert_eq!(selected.len(), 2);
+            assert!(selected.contains(&media) && selected.contains(&audio));
+            assert!(view.pending_transfer_reveal.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn download_reveal_handles_missing_rows_metadata_and_destinations(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let missing = temp.path().join("removed folder");
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                assert!(view.download_reveal_target(999).is_none());
+                let mut row = download_row(7, DownloadNoticeStatus::Completed);
+                row.kind = DownloadNoticeKind::Video {
+                    site_domain: "example.com".to_owned(),
+                };
+                row.destination = missing.clone();
+                view.download_notice_rows.push(row);
+                let (target, active) = view.download_reveal_target(7).unwrap();
+                assert_eq!(target.directory, missing);
+                assert!(target.paths.is_empty());
+                view.reveal_download_transfer(cx.entity_id(), 7, target, active, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path, missing);
+            assert!(view.read_error.is_some());
+            assert!(view.pending_transfer_reveal.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn download_completion_respects_manual_navigation_selection_and_failure(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::super::download::DownloadResult;
+        let temp = TempDir::new();
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&destination).unwrap();
+        let other = destination.join("other.txt");
+        let final_path = destination.join("final.mp4");
+        fs::write(&other, b"existing").unwrap();
+        fs::write(&final_path, b"media").unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        for (id, action) in [(1, "select"), (2, "navigate"), (3, "fail"), (4, "cancel")] {
+            cx.update(|_, app| {
+                view.update(app, |view, cx| {
+                    let mut row = download_row(id, DownloadNoticeStatus::Connecting);
+                    row.destination = destination.clone();
+                    row.kind = DownloadNoticeKind::Video {
+                        site_domain: "example.com".to_owned(),
+                    };
+                    view.download_notice_rows.push(row);
+                    let (target, active) = view.download_reveal_target(id).unwrap();
+                    view.reveal_download_transfer(cx.entity_id(), id, target, active, cx);
+                    // Remote polling must leave pending download reveals intact.
+                    view.reconcile_pending_transfer_reveal(&[], cx);
+                    assert!(view.pending_transfer_reveal.is_some());
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                view.update(app, |view, cx| {
+                    match action {
+                        "select" => {
+                            let entry = view
+                                .entries
+                                .iter()
+                                .find(|entry| entry.path == other)
+                                .unwrap()
+                                .clone();
+                            view.apply_entry_mouse_down_selection(
+                                &entry,
+                                SelectionModifiers::default(),
+                            );
+                        }
+                        "navigate" => view.navigate_to_directory_with_watcher(
+                            temp.path().to_path_buf(),
+                            HistoryMode::Record,
+                            cx,
+                        ),
+                        _ => {}
+                    }
+                    if action == "cancel" {
+                        view.cancel_download(id, cx);
+                    } else if action == "fail" {
+                        view.complete_download(id, Err("failed".to_owned()), cx);
+                    } else {
+                        view.complete_download(
+                            id,
+                            Ok(DownloadResult::Video(vec![final_path.clone()])),
+                            cx,
+                        );
+                    }
+                })
+            });
+            cx.run_until_parked();
+            cx.read_entity(&view, |view, _| {
+                assert!(view.pending_transfer_reveal.is_none());
+                if action == "select" {
+                    assert_eq!(view.selected_paths(), vec![other.clone()]);
+                }
+                if action == "navigate" {
+                    assert_eq!(view.path, temp.path());
+                }
+                assert!(!view.selected_paths().contains(&final_path));
+            });
+        }
     }
 
     #[gpui::test]
@@ -1852,19 +2171,19 @@ mod tests {
         cx.read_entity(&view, |explorer, _| {
             assert_eq!(explorer.path, destination);
             assert!(selected_names(explorer).is_empty());
-            assert!(explorer.pending_remote_transfer_reveal.is_some());
+            assert!(explorer.pending_transfer_reveal.is_some());
         });
 
         fs::write(&target, b"arrived").unwrap();
         cx.update(|_, app| {
             view.update(app, |explorer, cx| {
-                assert!(explorer.complete_pending_remote_transfer_reveal(&[], cx));
+                assert!(explorer.complete_pending_transfer_reveal(&[], cx));
             });
         });
         cx.run_until_parked();
         cx.read_entity(&view, |explorer, _| {
             assert_eq!(selected_names(explorer), vec!["later.txt"]);
-            assert!(explorer.pending_remote_transfer_reveal.is_none());
+            assert!(explorer.pending_transfer_reveal.is_none());
         });
     }
 
@@ -1900,15 +2219,15 @@ mod tests {
         cx.run_until_parked();
         cx.read_entity(&view, |explorer, _| {
             assert_eq!(explorer.path, initial);
-            assert!(explorer.pending_remote_transfer_reveal.is_none());
+            assert!(explorer.pending_transfer_reveal.is_none());
         });
     }
 
     #[test]
     fn explicit_entry_selection_cancels_a_pending_transfer_reveal() {
         let mut view = test_view_with_entries(&["other.txt"]);
-        view.pending_remote_transfer_reveal = Some(PendingRemoteTransferReveal {
-            job_id: 123,
+        view.pending_transfer_reveal = Some(PendingTransferReveal {
+            job_id: TransferRevealJob::Server(123),
             target: super::super::remote_transfer::RevealTarget {
                 directory: PathBuf::from("selection"),
                 paths: vec![PathBuf::from("selection/later.txt")],
@@ -1916,7 +2235,7 @@ mod tests {
         });
         let entry = view.entries[0].clone();
         view.apply_entry_mouse_down_selection(&entry, SelectionModifiers::default());
-        assert!(view.pending_remote_transfer_reveal.is_none());
+        assert!(view.pending_transfer_reveal.is_none());
     }
 
     #[test]
@@ -1994,6 +2313,7 @@ mod tests {
     fn download_row(id: u64, status: DownloadNoticeStatus) -> DownloadNoticeRow {
         DownloadNoticeRow {
             speed_tracker: Default::default(),
+            output_paths: Vec::new(),
             id,
             kind: DownloadNoticeKind::File,
             file_name: format!("download-{id}.zip"),

@@ -217,7 +217,7 @@ impl ExplorerView {
         local_position: Point<Pixels>,
         modifiers: SelectionModifiers,
     ) {
-        self.cancel_pending_remote_transfer_reveal();
+        self.cancel_pending_transfer_reveal();
         self.mouse_down_entry_selection = None;
         self.hovered_entry_path = None;
         let scroll_top = self
