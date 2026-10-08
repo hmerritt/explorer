@@ -1695,9 +1695,33 @@ fn load_svg_rgba_from_bytes_with_cancel_timed(
     timings.source_dimensions = Some((tree.size().width() as u32, tree.size().height() as u32));
     timings.strategy = "svg";
     timings.bytes_read = bytes.len() as u64;
+    load_svg_rgba_from_tree_with_cancel_timed(&tree, longest_side, cancel, timings_enabled, timings)
+}
+
+pub(crate) fn load_svg_rgba_from_tree(
+    tree: &usvg::Tree,
+    longest_side: u32,
+    cancel: &AtomicBool,
+) -> Result<image::RgbaImage, String> {
+    load_svg_rgba_from_tree_with_cancel_timed(
+        tree,
+        longest_side,
+        cancel,
+        false,
+        &mut ImageThumbnailExtractionTimings::default(),
+    )
+}
+
+fn load_svg_rgba_from_tree_with_cancel_timed(
+    tree: &usvg::Tree,
+    longest_side: u32,
+    cancel: &AtomicBool,
+    timings_enabled: bool,
+    timings: &mut ImageThumbnailExtractionTimings,
+) -> Result<image::RgbaImage, String> {
     check_image_cancelled(cancel)?;
     let render_started = thumbnail_timing_started(timings_enabled);
-    let image = render_svg_rgba(&tree, longest_side);
+    let image = render_svg_rgba(tree, longest_side);
     timings.finish(ThumbnailStage::SvgRender, render_started);
     let mut image = image?;
     check_image_cancelled(cancel)?;

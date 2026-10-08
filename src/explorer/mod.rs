@@ -118,7 +118,7 @@ pub(crate) use filesystem::{
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
 pub(crate) use formatting::format_size;
 pub(crate) use image_memory::{clear_memory_caches, initialize_window_cleanup};
-pub(crate) use image_preview::load_svg_rgba_from_bytes;
+pub(crate) use image_preview::load_svg_rgba_from_tree;
 pub(crate) use image_thumbnails::{
     initialize as initialize_image_thumbnail_cache, load_properties_thumbnail,
 };

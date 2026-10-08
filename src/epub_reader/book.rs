@@ -378,7 +378,7 @@ pub(super) struct Span {
 #[derive(Clone, Debug)]
 pub(super) enum ImageSource {
     Resource(String),
-    Svg(Vec<u8>),
+    Svg { bytes: Vec<u8>, base_href: String },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -651,7 +651,10 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                         writer.write_event(event).map_err(|e| e.to_string())?;
                     }
                     chapter.blocks.push(Block::Image {
-                        source: ImageSource::Svg(writer.into_inner()),
+                        source: ImageSource::Svg {
+                            bytes: writer.into_inner(),
+                            base_href: href.to_owned(),
+                        },
                         alt: String::new(),
                     });
                     style = old_style;

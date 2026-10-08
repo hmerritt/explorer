@@ -1632,19 +1632,21 @@ fn decode_image(
     cancel: &AtomicBool,
 ) -> Result<ImageAsset, String> {
     super::book::check_cancel(cancel)?;
-    let (bytes, svg) = match source {
-        ImageSource::Resource(href) => book.image_data(href)?,
-        ImageSource::Svg(bytes) => (bytes.clone(), true),
+    let (bytes, svg, base_href) = match source {
+        ImageSource::Resource(href) => {
+            let (bytes, svg) = book.image_data(href)?;
+            (bytes, svg, href.as_str())
+        }
+        ImageSource::Svg { bytes, base_href } => (bytes.clone(), true, base_href.as_str()),
     };
     let (rgba, width, height) = if svg {
         // Raster resolution is independent of the SVG's intended display size.
-        let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default())
-            .map_err(|error| error.to_string())?;
+        let tree = decode_svg_tree(book, &bytes, base_href, cancel)?;
         let width = tree.size().width();
         let height = tree.size().height();
         let raster_size = width.max(height).ceil().clamp(1.0, 2048.0) as u32;
         (
-            crate::explorer::load_svg_rgba_from_bytes(&bytes, raster_size, cancel)?,
+            crate::explorer::load_svg_rgba_from_tree(&tree, raster_size, cancel)?,
             width,
             height,
         )
@@ -1664,6 +1666,73 @@ fn decode_image(
         height,
         image: crate::image_viewer::render_image_from_rgba(rgba),
     })
+}
+
+fn decode_svg_tree(
+    book: &Book,
+    bytes: &[u8],
+    base_href: &str,
+    cancel: &AtomicBool,
+) -> Result<usvg::Tree, String> {
+    // usvg normally treats image hrefs as local filesystem paths. EPUB images
+    // must instead be resolved inside the archive, relative to this document.
+    let failure = std::sync::Mutex::new(None);
+    let resolve_data = |mime: &str, data: Arc<Vec<u8>>, options: &usvg::Options| {
+        let result = (|| {
+            super::book::check_cancel(cancel)?;
+            let kind = usvg::ImageHrefResolver::default_data_resolver()(mime, data, options)
+                .ok_or_else(|| "Unsupported SVG image resource.".to_owned())?;
+            // usvg can discard broken images without failing the whole SVG.
+            // Validate raster bytes so a broken cover reaches the reader's
+            // existing fallback rather than becoming a successful blank image.
+            match &kind {
+                usvg::ImageKind::JPEG(data)
+                | usvg::ImageKind::PNG(data)
+                | usvg::ImageKind::GIF(data)
+                | usvg::ImageKind::WEBP(data) => {
+                    image::load_from_memory(data).map_err(|error| error.to_string())?;
+                }
+                usvg::ImageKind::SVG(_) => {}
+            }
+            super::book::check_cancel(cancel)?;
+            Ok::<_, String>(kind)
+        })();
+        match result {
+            Ok(kind) => Some(kind),
+            Err(error) => {
+                *failure.lock().unwrap() = Some(error);
+                None
+            }
+        }
+    };
+    let options = usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(&resolve_data),
+            resolve_string: Box::new(|reference, options| {
+                let result = super::book::resolve_href(base_href, reference)
+                    .ok_or_else(|| "SVG image reference is outside the EPUB.".to_owned())
+                    .and_then(|href| book.image_data(&href));
+                match result {
+                    Ok((bytes, svg)) => resolve_data(
+                        if svg { "image/svg+xml" } else { "text/plain" },
+                        Arc::new(bytes),
+                        options,
+                    ),
+                    Err(error) => {
+                        *failure.lock().unwrap() = Some(error);
+                        None
+                    }
+                }
+            }),
+        },
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_data(bytes, &options).map_err(|error| error.to_string())?;
+    super::book::check_cancel(cancel)?;
+    if let Some(error) = failure.lock().unwrap().take() {
+        return Err(error);
+    }
+    Ok(tree)
 }
 
 #[cfg(target_os = "windows")]
@@ -1707,6 +1776,168 @@ fn normalized_wheel_delta(delta: gpui::ScrollDelta) -> gpui::ScrollDelta {
 mod tests {
     use super::*;
     use gpui::{Modifiers, ScrollDelta, TestAppContext};
+
+    fn svg_cover(reference: &str) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100%" height="100%" viewBox="0 0 800 1224" preserveAspectRatio="xMidYMid meet"><image width="800" height="1224" xlink:href="{reference}"/></svg>"#
+        )
+    }
+
+    fn write_svg_cover_book(
+        path: &std::path::Path,
+        reference: &str,
+        images: &[(&str, &str, &[u8])],
+    ) {
+        super::super::tests::write_book_with_guide(
+            path,
+            "2.0",
+            "",
+            &[
+                (
+                    "front/cover.xhtml",
+                    &format!("<html><body>{}</body></html>", svg_cover(reference)),
+                ),
+                ("title.xhtml", "<html><body><p>Title page</p></body></html>"),
+                ("text.xhtml", "<html><body><p>Main text</p></body></html>"),
+            ],
+            images,
+            "<guide><reference type='cover' title='Cover' href='front/cover.xhtml'/></guide>",
+        );
+    }
+
+    fn assert_red_cover(asset: &ImageAsset) {
+        assert!((asset.width / asset.height - 800.0 / 1224.0).abs() < 0.001);
+        let dimensions = asset.image.size(0);
+        assert!(dimensions.width.0 <= 2048 && dimensions.height.0 <= 2048);
+        let pixels = asset.image.as_bytes(0).unwrap();
+        let offset =
+            ((dimensions.height.0 / 2 * dimensions.width.0 + dimensions.width.0 / 2) * 4) as usize;
+        let center = &pixels[offset..offset + 4];
+        // RenderImage stores BGRA. Checking color and opacity catches successful
+        // SVG decodes whose referenced raster image was silently discarded.
+        assert!(center[0] < 60 && center[1] < 60 && center[2] > 180);
+        assert_eq!(center[3], 255);
+    }
+
+    #[test]
+    fn svg_wrapped_jpeg_cover_renders_pixels_and_preserves_its_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            200,
+            306,
+            image::Rgb([200, 40, 40]),
+        ))
+        .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+        .unwrap();
+        write_svg_cover_book(
+            &path,
+            "../images/cover.jpg",
+            &[("images/cover.jpg", "image/jpeg", jpeg.get_ref())],
+        );
+        let cancel = AtomicBool::new(false);
+        let book = Book::open(&path, &cancel).unwrap();
+        assert_eq!(book.cover_href.as_deref(), Some("/book/front/cover.xhtml"));
+        assert_eq!(book.sections.len(), 3);
+        assert_eq!(book.sections[1].href, "/book/title.xhtml");
+        assert_eq!(
+            book.toc.iter().filter(|item| item.title == "Cover").count(),
+            1
+        );
+        let chapter = book
+            .chapter(book.cover_href.as_ref().unwrap(), &cancel)
+            .unwrap();
+        let [Block::Image { source, .. }] = chapter.blocks.as_slice() else {
+            panic!("Expected the inline SVG cover")
+        };
+        assert_red_cover(&decode_image(&book, source, &cancel).unwrap());
+        cancel.store(true, Ordering::Relaxed);
+        assert!(decode_image(&book, source, &cancel).is_err());
+    }
+
+    #[test]
+    fn svg_png_images_resolve_from_inline_and_standalone_document_locations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let png = super::super::tests::cover_png();
+        let standalone = svg_cover("../images/cover.png#image");
+        write_svg_cover_book(
+            &path,
+            "../images/cover.png",
+            &[
+                ("images/cover.png", "image/png", &png),
+                ("graphics/wrapper", "image/svg+xml", standalone.as_bytes()),
+            ],
+        );
+        let cancel = AtomicBool::new(false);
+        let book = Book::open(&path, &cancel).unwrap();
+        let chapter = book
+            .chapter(book.cover_href.as_ref().unwrap(), &cancel)
+            .unwrap();
+        let Block::Image { source, .. } = &chapter.blocks[0] else {
+            panic!()
+        };
+        assert_red_cover(&decode_image(&book, source, &cancel).unwrap());
+        assert_red_cover(
+            &decode_image(
+                &book,
+                &ImageSource::Resource("/book/graphics/wrapper#view".into()),
+                &cancel,
+            )
+            .unwrap(),
+        );
+        let data_url = format!(
+            "data:image/png,{}",
+            percent_encoding::percent_encode(&png, percent_encoding::NON_ALPHANUMERIC)
+        );
+        assert_red_cover(
+            &decode_image(
+                &book,
+                &ImageSource::Svg {
+                    bytes: svg_cover(&data_url).into_bytes(),
+                    base_href: "/book/front/cover.xhtml".into(),
+                },
+                &cancel,
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn svg_images_fail_for_missing_corrupt_and_external_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let png = super::super::tests::cover_png();
+        let local_image = dir.path().join("local.png");
+        std::fs::write(&local_image, &png).unwrap();
+        let local_url = reqwest::Url::from_file_path(&local_image).unwrap();
+        // Keep a valid PNG header and truncate the pixel data, so the parser's
+        // format/dimension checks alone cannot diagnose the corruption.
+        write_svg_cover_book(
+            &path,
+            "missing.png",
+            &[("broken.png", "image/png", &png[..33])],
+        );
+        let cancel = AtomicBool::new(false);
+        let book = Book::open(&path, &cancel).unwrap();
+        for reference in [
+            "missing.png",
+            "../broken.png",
+            "https://example.com/cover.png",
+            local_url.as_str(),
+            local_image.to_str().unwrap(),
+        ] {
+            let source = ImageSource::Svg {
+                bytes: svg_cover(reference).into_bytes(),
+                base_href: "/book/front/cover.xhtml".into(),
+            };
+            assert!(
+                decode_image(&book, &source, &cancel).is_err(),
+                "{reference}"
+            );
+        }
+    }
 
     #[test]
     fn svg_images_use_manifest_types_and_allow_fragment_identifiers() {
@@ -2191,17 +2422,89 @@ mod tests {
     }
 
     #[gpui::test]
+    fn svg_wrapped_covers_fit_resize_navigate_and_resume(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let png = super::super::tests::cover_png();
+        write_svg_cover_book(
+            &path,
+            "../images/cover.png",
+            &[("images/cover.png", "image/png", &png)],
+        );
+        let (reader, visual_cx) = cx.add_window_view(|window, cx| {
+            Reader::new(path.clone(), "SVG cover".into(), window, cx)
+        });
+        for dimensions in [size(px(1600.0), px(900.0)), size(px(480.0), px(400.0))] {
+            visual_cx.simulate_resize(dimensions);
+            settle(&reader, visual_cx);
+            let body = visual_cx.debug_bounds("epub-body").unwrap();
+            let geometry =
+                PageGeometry::new(f32::from(body.size.width), f32::from(body.size.height));
+            reader.update(visual_cx, |reader, _| {
+                assert_eq!(reader.href, "/book/front/cover.xhtml");
+                let PageItem::Image {
+                    width,
+                    height,
+                    asset,
+                    ..
+                } = &reader.current_page.as_ref().unwrap().items[0]
+                else {
+                    panic!()
+                };
+                assert!(*width <= geometry.width && *height <= geometry.height);
+                assert!((*width / *height - 800.0 / 1224.0).abs() < 0.001);
+                assert_red_cover(asset.as_ref().unwrap());
+            });
+        }
+        visual_cx.dispatch_action(EpubNext);
+        settle(&reader, visual_cx);
+        reader.update(visual_cx, |reader, _| {
+            assert_eq!(reader.href, "/book/title.xhtml")
+        });
+        visual_cx.dispatch_action(EpubPrevious);
+        settle(&reader, visual_cx);
+        reader.update(visual_cx, |reader, _| {
+            assert_eq!(reader.href, "/book/front/cover.xhtml")
+        });
+        visual_cx.dispatch_action(EpubNext);
+        settle(&reader, visual_cx);
+        visual_cx.update(|window, _| window.remove_window());
+        let (reader, visual_cx) = cx.add_window_view(|window, cx| {
+            Reader::new(path, "Resumed SVG cover".into(), window, cx)
+        });
+        settle(&reader, visual_cx);
+        reader.update(visual_cx, |reader, _| {
+            assert_eq!(reader.href, "/book/title.xhtml")
+        });
+        visual_cx.dispatch_action(EpubBeginning);
+        settle(&reader, visual_cx);
+        reader.update(visual_cx, |reader, _| {
+            assert_eq!(reader.href, "/book/front/cover.xhtml")
+        });
+        visual_cx.update(|window, _| window.remove_window());
+    }
+
+    #[gpui::test]
     fn broken_cover_images_fall_through_to_text_and_home_stays_usable(cx: &mut TestAppContext) {
         cx.update(state::initialize);
         let dir = tempfile::tempdir().unwrap();
-        for (name, mime) in [("cover.png", "image/png"), ("cover.svg", "image/svg+xml")] {
+        let missing = svg_cover("missing.png");
+        let corrupt = svg_cover("broken.png");
+        let png = super::super::tests::cover_png();
+        for (name, mime, bytes) in [
+            ("cover.png", "image/png", b"broken image".as_slice()),
+            ("cover.svg", "image/svg+xml", b"broken image".as_slice()),
+            ("cover.svg", "image/svg+xml", missing.as_bytes()),
+            ("cover.svg", "image/svg+xml", corrupt.as_bytes()),
+        ] {
             let path = dir.path().join(format!("{name}.epub"));
             super::super::tests::write_book(
                 &path,
                 "3.0",
                 "",
                 &[("text.xhtml", "<html><body><p>Main text</p></body></html>")],
-                &[(name, mime, b"broken image")],
+                &[(name, mime, bytes), ("broken.png", "image/png", &png[..33])],
             );
             let (reader, visual_cx) = cx
                 .add_window_view(|window, cx| Reader::new(path, "broken cover".into(), window, cx));

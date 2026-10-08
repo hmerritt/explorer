@@ -219,7 +219,7 @@ fn images_inline_svg_and_empty_chapters_are_semantic_blocks() {
         matches!(&chapter.blocks[1], Block::Image { source: ImageSource::Resource(href), alt } if href == "/book/images/cover.png" && alt == "Cover")
     );
     assert!(
-        matches!(&chapter.blocks[3], Block::Image { source: ImageSource::Svg(bytes), .. } if bytes.starts_with(b"<svg"))
+        matches!(&chapter.blocks[3], Block::Image { source: ImageSource::Svg { bytes, base_href }, .. } if bytes.starts_with(b"<svg") && base_href == "/book/chapter.xhtml")
     );
     assert!(self::chapter("<p> </p>").blocks.is_empty());
 }
