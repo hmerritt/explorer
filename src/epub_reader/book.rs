@@ -13,6 +13,8 @@ use quick_xml::{
 };
 use rbook::{Epub, epub::toc::EpubTocEntry};
 
+const COVER_HREF: &str = "explorer:epub-cover";
+
 #[derive(Clone, Debug)]
 pub(super) struct Section {
     pub href: String,
@@ -31,6 +33,9 @@ pub(super) struct Book {
     pub title: String,
     pub sections: Vec<Section>,
     pub toc: Vec<TocItem>,
+    pub cover_href: Option<String>,
+    cover_chapter: Option<Chapter>,
+    cover_aliases: Vec<String>,
 }
 
 impl Book {
@@ -110,9 +115,103 @@ impl Book {
         if sections.is_empty() {
             return Err("This EPUB has no readable chapters.".into());
         }
+        // Only inspect the declared cover and, when needed, the opening
+        // document. The rest of the book remains lazily loaded.
+        let cover_image = epub
+            .manifest()
+            .cover_image()
+            .map(|entry| entry.href().path().as_str().to_owned());
+        let declared_cover = epub.toc().landmarks().and_then(find_cover_document);
+        let read_chapter = |href: &str| {
+            let resource = epub.manifest().by_href(href)?;
+            if !matches!(
+                resource.media_type(),
+                "application/xhtml+xml" | "text/html" | "image/svg+xml"
+            ) {
+                return None;
+            }
+            parse_chapter(&resource.read_str().ok()?, href, cancel)
+                .ok()
+                .filter(|chapter| !chapter.blocks.is_empty())
+        };
+        let mut cover = declared_cover
+            .as_ref()
+            .and_then(|href| read_chapter(href).map(|chapter| (href.clone(), chapter)));
+        if cover.is_none() {
+            if let Some(href) = &declared_cover {
+                sections.retain(|section| section.href != *href);
+                toc.retain(|item| {
+                    item.target
+                        .as_deref()
+                        .and_then(|target| target.split('#').next())
+                        != Some(href)
+                });
+            }
+        }
+        if sections.is_empty() && cover.is_none() {
+            return Err("This EPUB has no readable chapters.".into());
+        }
+        let mut cover_aliases = Vec::new();
+        if let Some(image) = &cover_image {
+            let first_href = sections
+                .first()
+                .map(|section| section.href.clone())
+                .unwrap_or_default();
+            if cover.as_ref().is_none_or(|(href, _)| *href != first_href) {
+                if let Some(chapter) = read_chapter(&first_href) {
+                    if matches!(chapter.blocks.as_slice(), [Block::Image { source: ImageSource::Resource(href), .. }] if href.split('#').next() == Some(image.as_str()))
+                    {
+                        if cover.is_none() {
+                            cover = Some((first_href, chapter));
+                        } else {
+                            cover_aliases.push(first_href.clone());
+                            sections.remove(0);
+                        }
+                    }
+                }
+            }
+            if cover.is_none() {
+                cover = Some((
+                    COVER_HREF.into(),
+                    Chapter {
+                        blocks: vec![Block::Image {
+                            source: ImageSource::Resource(image.clone()),
+                            alt: String::new(),
+                        }],
+                        anchors: HashMap::new(),
+                        is_cover: true,
+                    },
+                ));
+            }
+        }
+        let (cover_href, cover_chapter) = if let Some((href, mut chapter)) = cover {
+            chapter.is_cover = true;
+            sections.retain(|section| section.href != href);
+            sections.insert(
+                0,
+                Section {
+                    href: href.clone(),
+                    title: "Cover".into(),
+                },
+            );
+            for item in &mut toc {
+                if item.target.as_deref().is_some_and(|target| {
+                    target.split('#').next().is_some_and(|target| {
+                        target == href || cover_aliases.iter().any(|alias| alias == target)
+                    })
+                }) {
+                    item.target = Some(href.clone());
+                }
+            }
+            toc.retain(|item| item.target.as_deref() != Some(href.as_str()));
+            (Some(href), Some(chapter))
+        } else {
+            (None, None)
+        };
         if !toc.iter().any(|item| item.target.is_some()) {
             toc = sections
                 .iter()
+                .filter(|section| Some(&section.href) != cover_href.as_ref())
                 .map(|section| TocItem {
                     title: section.title.clone(),
                     target: Some(section.href.clone()),
@@ -120,17 +219,33 @@ impl Book {
                 })
                 .collect();
         }
+        if let Some(href) = &cover_href {
+            toc.insert(
+                0,
+                TocItem {
+                    title: "Cover".into(),
+                    target: Some(href.clone()),
+                    depth: 0,
+                },
+            );
+        }
         check_cancel(cancel)?;
         Ok(Self {
             epub: Arc::new(epub),
             title,
             sections,
             toc,
+            cover_href,
+            cover_chapter,
+            cover_aliases,
         })
     }
 
     pub fn chapter(&self, href: &str, cancel: &AtomicBool) -> Result<Chapter, String> {
         check_cancel(cancel)?;
+        if self.is_cover(href) {
+            return Ok(self.cover_chapter.clone().unwrap_or_default());
+        }
         let resource = self
             .epub
             .manifest()
@@ -140,6 +255,29 @@ impl Book {
             .read_str()
             .map_err(|e| format!("Could not read chapter: {e}"))?;
         parse_chapter(&text, href, cancel)
+    }
+
+    pub fn is_cover(&self, href: &str) -> bool {
+        self.cover_href.as_deref() == Some(href)
+            || self.cover_aliases.iter().any(|alias| alias == href)
+    }
+
+    pub fn reading_href<'a>(&'a self, href: &'a str) -> &'a str {
+        if self.is_cover(href) {
+            self.cover_href.as_deref().unwrap_or(href)
+        } else {
+            href
+        }
+    }
+
+    pub fn readable_location(&self, href: &str) -> bool {
+        self.is_cover(href)
+            || self.epub.manifest().by_href(href).is_some_and(|entry| {
+                matches!(
+                    entry.media_type(),
+                    "application/xhtml+xml" | "text/html" | "image/svg+xml"
+                )
+            })
     }
 
     pub fn image_data(&self, href: &str) -> Result<(Vec<u8>, bool), String> {
@@ -156,6 +294,16 @@ impl Book {
             .map_err(|e| format!("Could not read image: {e}"))?;
         Ok((bytes, svg))
     }
+}
+
+fn find_cover_document(entry: EpubTocEntry<'_>) -> Option<String> {
+    if entry
+        .kind_raw()
+        .is_some_and(|kind| kind.split_whitespace().any(|kind| kind == "cover"))
+    {
+        return entry.href().map(|href| href.path().as_str().to_owned());
+    }
+    entry.iter().find_map(find_cover_document)
 }
 
 fn collect_toc(entry: EpubTocEntry<'_>, depth: usize, items: &mut Vec<TocItem>) {
@@ -275,6 +423,7 @@ pub(super) struct ContentPoint {
 pub(super) struct Chapter {
     pub blocks: Vec<Block>,
     pub anchors: HashMap<String, ContentPoint>,
+    pub is_cover: bool,
 }
 
 #[derive(Default)]

@@ -255,9 +255,7 @@ impl Reader {
                     Ok((book, key, fingerprint)) => {
                         let saved = state::resume(cx, &key, &fingerprint);
                         let location = saved
-                            .filter(|location| {
-                                book.epub.manifest().by_href(&location.href).is_some()
-                            })
+                            .filter(|location| book.readable_location(&location.href))
                             .unwrap_or_else(|| Location {
                                 href: book.sections[0].href.clone(),
                                 point: ContentPoint::default(),
@@ -267,12 +265,13 @@ impl Reader {
                         reader.book = Some(book);
                         reader.key = key;
                         reader.fingerprint = Some(fingerprint);
-                        reader.open_section(
-                            location.href,
-                            PageRequest::Anchor(location.point),
-                            None,
-                            cx,
-                        );
+                        let href = reader
+                            .book
+                            .as_ref()
+                            .unwrap()
+                            .reading_href(&location.href)
+                            .to_owned();
+                        reader.open_section(href, PageRequest::Anchor(location.point), None, cx);
                     }
                     Err(error) => reader.error = Some(error),
                 }
@@ -328,6 +327,12 @@ impl Reader {
         self.error = None;
         self.fragment = fragment;
         self.clear_selection();
+        if self.empty_sections.contains(&href)
+            && self.book.as_ref().is_some_and(|book| book.is_cover(&href))
+        {
+            self.chapters
+                .insert(href.clone(), Arc::new(Chapter::default()));
+        }
         if self.chapters.contains_key(&href) {
             self.prefetch(cx);
             cx.notify();
@@ -475,6 +480,27 @@ impl Reader {
                     });
                     cache.insert(index, slot);
                 }
+                // A broken cover must never leave a reader stuck on a failed
+                // image. Treat it like an empty section so paging skips it.
+                let failed_cover = reader.chapters.get(&href).is_some_and(|chapter| {
+                    chapter.is_cover
+                        && !chapter.blocks.is_empty()
+                        && chapter.blocks.iter().enumerate().all(|(index, block)| {
+                            matches!(block, Block::Image { .. })
+                                && cache.get(&index).is_some_and(|slot| slot.failed)
+                        })
+                });
+                if failed_cover {
+                    reader.empty_sections.insert(href.clone());
+                    reader
+                        .chapters
+                        .insert(href.clone(), Arc::new(Chapter::default()));
+                    reader.layouts.remove(&href);
+                    reader.current_page = None;
+                    reader.request = Some(PageRequest::Index(0));
+                    cx.notify();
+                    return;
+                }
                 // Keep the content position while replacing image placeholders
                 // with their measured aspect ratios.
                 if dimensions_changed {
@@ -569,12 +595,17 @@ impl Reader {
         let Some(book) = &self.book else {
             return;
         };
-        let section = if end {
-            book.sections.last()
+        let mut sections = book
+            .sections
+            .iter()
+            .filter(|section| !self.empty_sections.contains(&section.href));
+        let Some(section) = (if end {
+            sections.next_back()
         } else {
-            book.sections.first()
-        }
-        .unwrap();
+            sections.next()
+        }) else {
+            return;
+        };
         self.open_section(
             section.href.clone(),
             if end {
@@ -903,20 +934,16 @@ impl Reader {
         let Some(book) = &self.book else {
             return;
         };
-        if book.epub.manifest().by_href(href).is_none_or(|entry| {
-            !matches!(
-                entry.media_type(),
-                "application/xhtml+xml" | "text/html" | "image/svg+xml"
-            )
-        }) {
+        if !book.readable_location(href) {
             return;
         }
+        let href = book.reading_href(href).to_owned();
         self.history.push(Location {
             href: self.href.clone(),
             point: self.anchor,
         });
         self.chapters_open = false;
-        self.open_section(href.to_owned(), PageRequest::Index(0), fragment, cx);
+        self.open_section(href, PageRequest::Index(0), fragment, cx);
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
@@ -1286,10 +1313,17 @@ impl Reader {
         let previous = ready && !self.at_boundary(false);
         let next = ready && !self.at_boundary(true);
         let progress = match (&self.book, index) {
+            (Some(book), Some(_)) if book.is_cover(&self.href) => "Cover".into(),
             (Some(book), Some(index)) => format!(
                 "Chapter {}/{} · Page {} · {}",
-                index + 1,
-                book.sections.len(),
+                book.sections[..=index]
+                    .iter()
+                    .filter(|section| !book.is_cover(&section.href))
+                    .count(),
+                book.sections
+                    .iter()
+                    .filter(|section| !book.is_cover(&section.href))
+                    .count(),
                 self.page_index + 1,
                 book.sections[index].title
             ),
@@ -1602,21 +1636,32 @@ fn decode_image(
         ImageSource::Resource(href) => book.image_data(href)?,
         ImageSource::Svg(bytes) => (bytes.clone(), true),
     };
-    let rgba = if svg {
-        crate::explorer::load_svg_rgba_from_bytes(&bytes, 2048, cancel)?
+    let (rgba, width, height) = if svg {
+        // Raster resolution is independent of the SVG's intended display size.
+        let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default())
+            .map_err(|error| error.to_string())?;
+        let width = tree.size().width();
+        let height = tree.size().height();
+        let raster_size = width.max(height).ceil().clamp(1.0, 2048.0) as u32;
+        (
+            crate::explorer::load_svg_rgba_from_bytes(&bytes, raster_size, cancel)?,
+            width,
+            height,
+        )
     } else {
-        image::ImageReader::new(std::io::Cursor::new(bytes))
+        let image = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .map_err(|e| e.to_string())?
             .decode()
-            .map_err(|e| e.to_string())?
-            .thumbnail(2048, 2048)
-            .into_rgba8()
+            .map_err(|e| e.to_string())?;
+        let width = image.width() as f32;
+        let height = image.height() as f32;
+        (image.thumbnail(2048, 2048).into_rgba8(), width, height)
     };
     super::book::check_cancel(cancel)?;
     Ok(ImageAsset {
-        width: rgba.width() as f32,
-        height: rgba.height() as f32,
+        width,
+        height,
         image: crate::image_viewer::render_image_from_rgba(rgba),
     })
 }
@@ -1702,6 +1747,7 @@ mod tests {
                 reader.request.is_none()
                     && reader.chapter_task.is_none()
                     && reader.load_task.is_none()
+                    && reader.image_task.is_none()
             });
             if ready {
                 return;
@@ -2023,5 +2069,223 @@ mod tests {
         cx.dispatch_action(EpubNext);
         cx.run_until_parked();
         reader.update(cx, |reader, _| assert!(reader.selection.is_none()));
+    }
+
+    #[gpui::test]
+    fn cover_pages_fit_navigate_and_resume_without_skipping_front_matter(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        for (name, mime, bytes) in [
+            (
+                "cover.svg",
+                "image/svg+xml",
+                super::super::tests::COVER_SVG.to_vec(),
+            ),
+            ("cover.png", "image/png", super::super::tests::cover_png()),
+        ] {
+            let path = dir.path().join(format!("{name}.epub"));
+            super::super::tests::write_book(
+                &path,
+                "3.0",
+                "",
+                &[
+                    ("title.xhtml", "<html><body><p>Title page</p></body></html>"),
+                    ("text.xhtml", "<html><body><p>Main text</p></body></html>"),
+                ],
+                &[(name, mime, &bytes)],
+            );
+            {
+                let (reader, visual_cx) = cx.add_window_view(|window, cx| {
+                    Reader::new(path.clone(), "cover".into(), window, cx)
+                });
+                visual_cx.simulate_resize(size(px(1600.0), px(900.0)));
+                settle(&reader, visual_cx);
+                let body = visual_cx.debug_bounds("epub-body").unwrap();
+                let geometry =
+                    PageGeometry::new(f32::from(body.size.width), f32::from(body.size.height));
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "explorer:epub-cover");
+                    assert!(reader.at_boundary(false));
+                    assert!(!reader.at_boundary(true));
+                    let PageItem::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        asset,
+                        ..
+                    } = &reader.current_page.as_ref().unwrap().items[0]
+                    else {
+                        panic!()
+                    };
+                    assert!(asset.is_some());
+                    assert!((*width / *height - 2.0 / 3.0).abs() < 0.001);
+                    assert_eq!(*width, 400.0);
+                    assert_eq!(*height, 600.0);
+                    assert_eq!(*x, (geometry.width - width) * 0.5);
+                    assert_eq!(*y, (geometry.height - height) * 0.5);
+                });
+                visual_cx.update(|window, _| window.remove_window());
+            }
+            {
+                let (reader, visual_cx) = cx.add_window_view(|window, cx| {
+                    Reader::new(path.clone(), "reopened".into(), window, cx)
+                });
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "explorer:epub-cover")
+                });
+                let body = visual_cx.debug_bounds("epub-body").unwrap();
+                visual_cx.simulate_event(ScrollWheelEvent {
+                    position: body.center(),
+                    delta: ScrollDelta::Lines(point(0.0, -ordinary_lines_per_notch())),
+                    ..Default::default()
+                });
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "/book/title.xhtml")
+                });
+                visual_cx.dispatch_action(EpubPrevious);
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "explorer:epub-cover")
+                });
+                visual_cx.dispatch_action(EpubNext);
+                settle(&reader, visual_cx);
+                visual_cx.dispatch_action(EpubNext);
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "/book/text.xhtml")
+                });
+                visual_cx.dispatch_action(EpubBeginning);
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "explorer:epub-cover")
+                });
+                visual_cx.dispatch_action(EpubEnd);
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, cx| {
+                    assert_eq!(reader.href, "/book/text.xhtml");
+                    let href = reader.book.as_ref().unwrap().toc[0].target.clone().unwrap();
+                    reader.follow_link(href, cx);
+                });
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "explorer:epub-cover")
+                });
+                visual_cx.dispatch_action(EpubBack);
+                settle(&reader, visual_cx);
+                reader.update(visual_cx, |reader, _| {
+                    assert_eq!(reader.href, "/book/text.xhtml")
+                });
+                visual_cx.update(|window, _| window.remove_window());
+            }
+            let (reader, visual_cx) =
+                cx.add_window_view(|window, cx| Reader::new(path, "resumed".into(), window, cx));
+            settle(&reader, visual_cx);
+            reader.update(visual_cx, |reader, _| {
+                assert_eq!(reader.href, "/book/text.xhtml")
+            });
+            visual_cx.update(|window, _| window.remove_window());
+        }
+    }
+
+    #[gpui::test]
+    fn broken_cover_images_fall_through_to_text_and_home_stays_usable(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        for (name, mime) in [("cover.png", "image/png"), ("cover.svg", "image/svg+xml")] {
+            let path = dir.path().join(format!("{name}.epub"));
+            super::super::tests::write_book(
+                &path,
+                "3.0",
+                "",
+                &[("text.xhtml", "<html><body><p>Main text</p></body></html>")],
+                &[(name, mime, b"broken image")],
+            );
+            let (reader, visual_cx) = cx
+                .add_window_view(|window, cx| Reader::new(path, "broken cover".into(), window, cx));
+            settle(&reader, visual_cx);
+            reader.update(visual_cx, |reader, _| {
+                assert_eq!(reader.href, "/book/text.xhtml");
+                assert!(reader.error.is_none());
+                assert!(reader.at_boundary(false));
+            });
+            visual_cx.dispatch_action(EpubBeginning);
+            settle(&reader, visual_cx);
+            reader.update(visual_cx, |reader, cx| {
+                assert_eq!(reader.href, "/book/text.xhtml");
+                reader.follow_link("explorer:epub-cover".into(), cx);
+            });
+            settle(&reader, visual_cx);
+            reader.update(visual_cx, |reader, _| {
+                assert_eq!(reader.href, "/book/text.xhtml");
+                assert!(reader.error.is_none());
+            });
+            visual_cx.update(|window, _| window.remove_window());
+        }
+    }
+
+    #[gpui::test]
+    fn justified_selection_and_links_follow_expanded_glyph_positions(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let prose = format!(
+            "<html><body><p>café <b>bold</b> <a href='notes.xhtml#note'>linked words</a> {}</p></body></html>",
+            "More readable prose. ".repeat(100)
+        );
+        super::super::tests::write_book(
+            &path,
+            "3.0",
+            "",
+            &[("text.xhtml", &prose)],
+            &[(
+                "notes.xhtml",
+                "application/xhtml+xml",
+                b"<html><body><p id='note'>A note</p></body></html>",
+            )],
+        );
+        let (reader, visual_cx) =
+            cx.add_window_view(|window, cx| Reader::new(path, "justified".into(), window, cx));
+        visual_cx.simulate_resize(size(px(1600.0), px(900.0)));
+        settle(&reader, visual_cx);
+        let bounds = visual_cx.debug_bounds("epub-body").unwrap();
+        let geometry =
+            PageGeometry::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let (a, b, link) = reader.update(visual_cx, |reader, _| {
+            let page = reader.current_page.as_ref().unwrap();
+            let PageItem::Text { line, x, y, .. } = &page.items[0] else {
+                panic!()
+            };
+            assert_eq!(line.width, px(900.0));
+            let origin =
+                bounds.origin + point(px(geometry.margin_x + x), px(geometry.margin_y + y + 8.0));
+            let end = "café bold linked words".len();
+            let link = origin + point(line.x_for_index("café bold ".len()) + px(1.0), px(0.0));
+            assert_eq!(
+                link_at(
+                    page,
+                    &reader.chapters[&reader.href],
+                    link - bounds.origin - point(px(geometry.margin_x), px(geometry.margin_y))
+                ),
+                Some("/book/notes.xhtml#note".into())
+            );
+            (origin, origin + point(line.x_for_index(end), px(0.0)), link)
+        });
+        visual_cx.simulate_mouse_down(a, MouseButton::Left, Modifiers::default());
+        visual_cx.simulate_mouse_move(b, MouseButton::Left, Modifiers::default());
+        visual_cx.simulate_mouse_up(b, MouseButton::Left, Modifiers::default());
+        visual_cx.dispatch_action(EpubCopy);
+        visual_cx.run_until_parked();
+        assert_eq!(
+            visual_cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("café bold linked words")
+        );
+        visual_cx.simulate_click(link, Modifiers::default());
+        settle(&reader, visual_cx);
+        reader.update(visual_cx, |reader, _| {
+            assert_eq!(reader.href, "/book/notes.xhtml")
+        });
     }
 }

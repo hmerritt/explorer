@@ -19,6 +19,17 @@ pub(crate) fn write_book(
     chapters: &[(&str, &str)],
     extra: &[(&str, &str, &[u8])],
 ) {
+    write_book_with_guide(path, version, metadata, chapters, extra, "");
+}
+
+pub(crate) fn write_book_with_guide(
+    path: &Path,
+    version: &str,
+    metadata: &str,
+    chapters: &[(&str, &str)],
+    extra: &[(&str, &str, &[u8])],
+    guide: &str,
+) {
     let mut zip = ZipWriter::new(File::create(path).unwrap());
     let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let mut write = |name: &str, bytes: &[u8]| {
@@ -41,6 +52,8 @@ pub(crate) fn write_book(
         .map(|(index, (name, mime, _))| {
             let properties = if *name == "nav.xhtml" {
                 " properties=\"nav\""
+            } else if version == "3.0" && matches!(*name, "cover.png" | "cover.svg") {
+                " properties=\"cover-image\""
             } else {
                 ""
             };
@@ -58,7 +71,7 @@ pub(crate) fn write_book(
         .map(|index| format!(" toc=\"r{index}\""))
         .unwrap_or_default();
     let opf = format!(
-        r#"<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:test:reader</dc:identifier><dc:title>Reader fixture</dc:title><dc:language>en</dc:language>{metadata}</metadata><manifest>{manifest}{resources}</manifest><spine{ncx}>{spine}</spine></package>"#
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:test:reader</dc:identifier><dc:title>Reader fixture</dc:title><dc:language>en</dc:language>{metadata}</metadata><manifest>{manifest}{resources}</manifest><spine{ncx}>{spine}</spine>{guide}</package>"#
     );
     write("book/package.opf", opf.as_bytes());
     for (name, text) in chapters {
@@ -460,11 +473,327 @@ fn measured_pagination_preserves_text_and_reflows_at_content_offsets(cx: &mut Te
 #[test]
 fn margins_and_image_fit_use_the_available_page_without_upscaling() {
     let geometry = PageGeometry::new(1024.0, 750.0);
-    assert_eq!(geometry.width, 928.0);
+    assert_eq!(geometry.width, 900.0);
+    assert_eq!(geometry.margin_x, 62.0);
     assert_eq!(geometry.height, 686.0);
-    assert_eq!(fit_image(2000.0, 1000.0, geometry), (928.0, 464.0));
+    assert_eq!(fit_image(2000.0, 1000.0, geometry), (900.0, 450.0));
     assert_eq!(fit_image(20.0, 10.0, geometry), (20.0, 10.0));
     let small = PageGeometry::new(360.0, 200.0);
     assert_eq!(small.margin_x, 16.0);
     assert_eq!(small.margin_y, 16.0);
+}
+
+#[test]
+fn reading_column_caps_at_900_and_keeps_responsive_padding() {
+    for (width, content, margin) in [
+        (360.0, 328.0, 16.0),
+        (400.0, 304.0, 48.0),
+        (995.0, 899.0, 48.0),
+        (996.0, 900.0, 48.0),
+        (1600.0, 900.0, 350.0),
+    ] {
+        let geometry = PageGeometry::new(width, 750.0);
+        assert_eq!(geometry.width, content);
+        assert_eq!(geometry.margin_x, margin);
+        assert_eq!(geometry.height, 686.0);
+    }
+    assert_eq!(PageGeometry::new(1.0, 1.0).width, 1.0);
+    assert_eq!(PageGeometry::new(1.0, 1.0).height, 1.0);
+}
+
+#[gpui::test]
+fn justification_expands_word_spaces_without_mutating_cached_shapes(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    cx.update(|window, _| {
+        let text = "café bold 字 end";
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: gpui::font("Arial"),
+            color: rgb(0x202020).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let natural = window
+            .text_system()
+            .shape_line(text.into(), px(20.0), &[run.clone()], None);
+        let mut justified = natural.clone();
+        justify_line(&mut justified, f32::from(natural.width) + 120.0);
+        assert_eq!(justified.width, natural.width + px(120.0));
+        assert_eq!(justified.text, natural.text);
+        for (word, expansion) in [("bold", 40.0), ("字", 80.0), ("end", 120.0)] {
+            let index = text.find(word).unwrap();
+            let x = justified.x_for_index(index);
+            assert!((f32::from(x - natural.x_for_index(index)) - expansion).abs() < 0.01);
+            assert_eq!(justified.index_for_x(x + px(0.01)), Some(index));
+            assert_eq!(justified.closest_index_for_x(x), index);
+        }
+        let cached = window
+            .text_system()
+            .shape_line(text.into(), px(20.0), &[run], None);
+        assert_eq!(cached.width, natural.width);
+        assert_eq!(
+            cached.x_for_index(text.find("end").unwrap()),
+            natural.x_for_index(text.find("end").unwrap())
+        );
+        for text in ["singleword", "no\u{a0}break", "  word  "] {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: gpui::font("Arial"),
+                color: rgb(0x202020).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let mut line = window
+                .text_system()
+                .shape_line(text.into(), px(20.0), &[run], None);
+            let width = line.width;
+            justify_line(&mut line, 900.0);
+            assert_eq!(line.width, width);
+        }
+    });
+}
+
+#[gpui::test]
+fn body_justification_respects_paragraphs_breaks_indents_and_shaping_chunks(
+    cx: &mut TestAppContext,
+) {
+    let cx = cx.add_empty_window();
+    let chapter = chapter(&format!(
+        "<h1>Natural heading</h1><pre>Natural preformatted line</pre><p>{}<br/>Explicit break<br/>{}</p><blockquote>{}</blockquote><ul><li>{}</li></ul><p>Short final paragraph</p>",
+        "café <b>bold</b> <a href='notes.xhtml'>linked words</a> 字 prose. ".repeat(700),
+        "Continued prose after a break. ".repeat(20),
+        "Indented quoted prose. ".repeat(20),
+        "Indented list prose. ".repeat(20),
+    ));
+    let geometry = PageGeometry::new(1200.0, 900.0);
+    let mut cursor = ContentPoint::default();
+    let mut justified_count = 0;
+    let mut natural_count = 0;
+    let mut seen = vec![String::new(); chapter.blocks.len()];
+    cx.update(|window, _| {
+        for _ in 0..1000 {
+            let page = layout_page(
+                &chapter,
+                cursor,
+                geometry,
+                "Arial",
+                20.0,
+                rgb(0x202020).into(),
+                rgb(0x0759b5).into(),
+                &HashMap::new(),
+                window,
+            )
+            .unwrap();
+            for item in &page.items {
+                if let PageItem::Text {
+                    block,
+                    range,
+                    line,
+                    x,
+                    ..
+                } = item
+                {
+                    let Block::Text { text, kind, .. } = &chapter.blocks[*block] else {
+                        panic!()
+                    };
+                    seen[*block].push_str(&text[range.clone()]);
+                    let continuation =
+                        range.end < text.len() && !text[range.end..].starts_with('\n');
+                    if kind.heading == 0
+                        && !kind.pre
+                        && continuation
+                        && line.text.trim().contains(' ')
+                    {
+                        assert!((f32::from(line.width) - (geometry.width - x)).abs() < 0.01);
+                        justified_count += 1;
+                    } else {
+                        assert!(f32::from(line.width) < geometry.width - x);
+                        natural_count += 1;
+                    }
+                }
+            }
+            if page.end.block == chapter.blocks.len() {
+                break;
+            }
+            assert!(page.end > cursor);
+            cursor = page.end;
+        }
+    });
+    assert!(justified_count > 100);
+    assert!(natural_count >= 8);
+    for (index, block) in chapter.blocks.iter().enumerate() {
+        if let Block::Text { text, .. } = block {
+            // Explicit breaks have no glyphs; copying still uses the source.
+            assert_eq!(seen[index], text.replace('\n', ""));
+        }
+    }
+}
+
+pub(crate) const COVER_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect width="400" height="600" fill="red"/></svg>"#;
+
+pub(crate) fn cover_png() -> Vec<u8> {
+    let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        400,
+        600,
+        image::Rgb([200, 40, 40]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
+#[test]
+fn declared_epub2_and_epub3_images_add_stable_cover_locations() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in ["2.0", "3.0"] {
+        for (name, mime, bytes) in [
+            ("cover.png", "image/png", cover_png()),
+            ("cover.svg", "image/svg+xml", COVER_SVG.to_vec()),
+        ] {
+            let path = dir.path().join("book.epub");
+            let metadata = if version == "2.0" {
+                "<meta name='cover' content='r0'/>"
+            } else {
+                ""
+            };
+            write_book(
+                &path,
+                version,
+                metadata,
+                &[
+                    ("title.xhtml", "<html><body><p>Title page</p></body></html>"),
+                    ("text.xhtml", "<html><body><p>Main text</p></body></html>"),
+                ],
+                &[(name, mime, &bytes)],
+            );
+            let book = Book::open(&path, &AtomicBool::new(false)).unwrap();
+            assert_eq!(book.sections.len(), 3);
+            let href = book.cover_href.as_ref().unwrap();
+            assert_eq!(href, "explorer:epub-cover");
+            assert_eq!(book.sections[0].href, *href);
+            assert_eq!(book.toc[0].title, "Cover");
+            assert!(book.readable_location(href));
+            let chapter = book.chapter(href, &AtomicBool::new(false)).unwrap();
+            assert!(chapter.is_cover);
+            assert!(matches!(
+                chapter.blocks.as_slice(),
+                [Block::Image {
+                    source: ImageSource::Resource(_),
+                    ..
+                }]
+            ));
+            assert_eq!(
+                Book::open(&path, &AtomicBool::new(false))
+                    .unwrap()
+                    .cover_href,
+                book.cover_href
+            );
+        }
+    }
+}
+
+#[test]
+fn cover_documents_use_guides_and_landmarks_without_duplicate_opening_images() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("book.epub");
+    for version in ["2.0", "3.0"] {
+        let guide = if version == "2.0" {
+            "<guide><reference type='cover' title='Cover' href='cover.xhtml'/></guide>"
+        } else {
+            ""
+        };
+        let nav = br#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="landmarks"><ol><li><a epub:type="cover" href="cover.xhtml">Cover</a></li></ol></nav></body></html>"#;
+        write_book_with_guide(
+            &path,
+            version,
+            if version == "2.0" {
+                "<meta name='cover' content='r0'/>"
+            } else {
+                ""
+            },
+            &[
+                (
+                    "opening.xhtml",
+                    "<html><body><img src='cover.svg'/></body></html>",
+                ),
+                ("text.xhtml", "<html><body><p>Main text</p></body></html>"),
+            ],
+            &[
+                ("cover.svg", "image/svg+xml", COVER_SVG),
+                (
+                    "cover.xhtml",
+                    "application/xhtml+xml",
+                    b"<html><body><img src='cover.svg'/></body></html>",
+                ),
+                ("nav.xhtml", "application/xhtml+xml", nav),
+            ],
+            guide,
+        );
+        let book = Book::open(&path, &AtomicBool::new(false)).unwrap();
+        assert_eq!(book.cover_href.as_deref(), Some("/book/cover.xhtml"));
+        assert_eq!(book.sections.len(), 2);
+        assert_eq!(book.sections[1].href, "/book/text.xhtml");
+        assert_eq!(
+            book.reading_href("/book/opening.xhtml"),
+            "/book/cover.xhtml"
+        );
+        assert_eq!(
+            book.toc.iter().filter(|item| item.title == "Cover").count(),
+            1
+        );
+    }
+    write_book(
+        &path,
+        "3.0",
+        "",
+        &[
+            (
+                "opening.xhtml",
+                "<html><body><img src='cover.svg'/></body></html>",
+            ),
+            ("text.xhtml", "<html><body><p>Main text</p></body></html>"),
+        ],
+        &[("cover.svg", "image/svg+xml", COVER_SVG)],
+    );
+    let book = Book::open(&path, &AtomicBool::new(false)).unwrap();
+    assert_eq!(book.cover_href.as_deref(), Some("/book/opening.xhtml"));
+    assert_eq!(book.sections.len(), 2);
+}
+
+#[test]
+fn absent_or_unreadable_cover_documents_leave_main_text_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("book.epub");
+    for guide in [
+        "",
+        "<guide><reference type='cover' title='Cover' href='missing.xhtml'/></guide>",
+        "<guide><reference type='cover' title='Cover' href='broken.xhtml'/></guide>",
+    ] {
+        write_book_with_guide(
+            &path,
+            "2.0",
+            "",
+            &[
+                ("broken.xhtml", "<html><body><p>"),
+                ("text.xhtml", "<html><body><p>Main text</p></body></html>"),
+            ],
+            &[],
+            guide,
+        );
+        let book = Book::open(&path, &AtomicBool::new(false)).unwrap();
+        assert!(book.cover_href.is_none());
+        assert_eq!(
+            all_text(
+                &book
+                    .chapter("/book/text.xhtml", &AtomicBool::new(false))
+                    .unwrap()
+            ),
+            "Main text"
+        );
+        if guide.contains("broken.xhtml") {
+            assert_eq!(book.sections.len(), 1);
+        }
+    }
 }

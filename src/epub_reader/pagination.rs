@@ -23,14 +23,48 @@ pub(super) struct PageGeometry {
 impl PageGeometry {
     pub fn new(width: f32, height: f32) -> Self {
         let margin_x = if width < 400.0 { 16.0 } else { 48.0 };
+        let content_width = (width - margin_x * 2.0).clamp(1.0, 900.0);
         let margin_y = if height < 240.0 { 16.0 } else { 32.0 };
         Self {
-            width: (width - margin_x * 2.0).max(1.0),
+            width: content_width,
             height: (height - margin_y * 2.0).max(1.0),
-            margin_x,
+            margin_x: margin_x.max((width - content_width) * 0.5),
             margin_y,
         }
     }
+}
+
+/// Expand word spaces in a private layout: painting and byte-index hit testing
+/// must see the same glyph positions without changing GPUI's shaping cache.
+pub(super) fn justify_line(line: &mut ShapedLine, width: f32) {
+    let text = line.text.as_ref();
+    let first = text.len() - text.trim_start_matches(' ').len();
+    let last = text.trim_end_matches(' ').len();
+    let spaces: Vec<_> = text
+        .char_indices()
+        .filter_map(|(index, ch)| (ch == ' ' && index >= first && index < last).then_some(index))
+        .collect();
+    let extra = width - f32::from(line.width);
+    if spaces.is_empty() || extra <= 0.0 {
+        return;
+    }
+    let layout: &gpui::LineLayout = line;
+    let mut runs = layout.runs.clone();
+    for run in &mut runs {
+        for glyph in &mut run.glyphs {
+            let count = spaces.partition_point(|index| *index < glyph.index);
+            glyph.position.x += px(extra * count as f32 / spaces.len() as f32);
+        }
+    }
+    let layout = gpui::LineLayout {
+        font_size: layout.font_size,
+        width: px(width),
+        ascent: layout.ascent,
+        descent: layout.descent,
+        runs,
+        len: layout.len,
+    };
+    **line = Arc::new(layout);
 }
 
 #[derive(Clone)]
@@ -216,7 +250,11 @@ pub(super) fn layout_page(
                     block: cursor.block,
                     asset,
                     x: (geometry.width - width) * 0.5,
-                    y,
+                    y: if chapter.is_cover && chapter.blocks.len() == 1 {
+                        (geometry.height - height) * 0.5
+                    } else {
+                        y
+                    },
                     width,
                     height,
                 });
@@ -272,14 +310,29 @@ pub(super) fn layout_page(
                         }
                         let start = physical_start + range[0];
                         let end = physical_start + range[1];
-                        let line_runs =
-                            runs_for_range(spans, start..end, family, kind, color, link_color);
-                        let line = window.text_system().shape_line(
-                            text[start..end].to_owned().into(),
-                            px(size),
-                            &line_runs,
-                            None,
+                        let justify = kind.heading == 0 && !kind.pre;
+                        // Keep consumed spaces in the semantic range, but don't
+                        // let a wrap's trailing space push visible ink past the edge.
+                        let visible = if justify {
+                            text[start..end].trim_end_matches(' ')
+                        } else {
+                            &text[start..end]
+                        };
+                        let line_runs = runs_for_range(
+                            spans,
+                            start..start + visible.len(),
+                            family,
+                            kind,
+                            color,
+                            link_color,
                         );
+                        let mut line = window
+                            .text_system()
+                            .shape_line(visible.to_owned().into(), px(size), &line_runs, None)
+                            .with_len(end - start);
+                        if justify && end < text.len() && !text[end..].starts_with('\n') {
+                            justify_line(&mut line, (geometry.width - x).max(1.0));
+                        }
                         page.items.push(PageItem::Text {
                             block: cursor.block,
                             range: start..end,
