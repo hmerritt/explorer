@@ -4,8 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use explorer::benchmark_support::load_entries;
+use explorer::performance::fixtures::Fixtures;
 
 const FIXTURE_VERSION: &str = "navigation-pipeline-benchmark-v1";
 const VISIBLE_ENTRIES: &[&str] = &["business", "invoices", "notes.txt", "personal", "todo.md"];
@@ -68,6 +69,36 @@ fn navigation_pipeline_benchmarks(criterion: &mut Criterion) {
     group.bench_function("documents_small_hidden_off", |bencher| {
         bencher.iter(|| black_box(load_entries(black_box(&fixture), false)));
     });
+
+    group.bench_function("documents_small_hidden_on", |bencher| {
+        bencher.iter(|| black_box(load_entries(black_box(&fixture), true)));
+    });
+
+    let fixtures = Fixtures::ensure(&Path::new(env!("CARGO_MANIFEST_DIR")).join("target"), false)
+        .expect("create shared navigation fixtures");
+    for count in [0, 100, 1_000, 10_000] {
+        let directory = fixtures.mixed(count);
+        for hidden in [false, true] {
+            let expected = count + usize::from(hidden && count > 0);
+            assert_eq!(
+                load_entries(&directory, hidden).len(),
+                expected,
+                "validate directory fixture"
+            );
+            group.throughput(Throughput::Elements(expected as u64));
+            group.bench_with_input(
+                BenchmarkId::from_parameter(format!(
+                    "mixed_{count}_hidden_{}",
+                    if hidden { "on" } else { "off" }
+                )),
+                &directory,
+                |bencher, directory| {
+                    bencher
+                        .iter(|| black_box(load_entries(black_box(directory), black_box(hidden))));
+                },
+            );
+        }
+    }
 
     group.finish();
 }

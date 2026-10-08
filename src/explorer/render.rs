@@ -5071,6 +5071,8 @@ fn add_entry_hover_preview(
     entry: FileEntry,
     cx: &mut Context<ExplorerView>,
 ) -> gpui::Stateful<Div> {
+    #[cfg(feature = "benchmarks")]
+    let element = crate::performance::ui::track_entry_bounds(element, &entry.path);
     let move_entry = entry.clone();
     element
         .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {

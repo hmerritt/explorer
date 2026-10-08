@@ -3,6 +3,8 @@ mod address_bar;
 mod app_icons;
 mod archive_diagnostics;
 mod archive_fs;
+#[cfg(feature = "benchmarks")]
+mod benchmark_ui;
 mod breadcrumb;
 mod cache_cleanup;
 mod cache_directory;
@@ -131,6 +133,7 @@ pub(crate) use sorting::compare_file_names;
 pub(crate) use tooltip::explorer_tooltip;
 #[cfg(feature = "benchmarks")]
 pub mod benchmark_support {
+    pub(crate) use super::benchmark_ui::*;
     pub use super::filesystem::benchmark_support::{
         copy_paths, copy_with_cancel_after_progress, execute_prepared_archive_extraction,
         execute_prepared_copy, extract_archives, extract_archives_with_progress, list_archive,

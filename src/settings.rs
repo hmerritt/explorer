@@ -3206,6 +3206,10 @@ pub(crate) fn settings_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn config_dir() -> Option<PathBuf> {
+    #[cfg(feature = "benchmarks")]
+    if let Some(root) = crate::performance::config_root() {
+        return Some(root.to_path_buf());
+    }
     config_dir_for(current_config_platform(), env_path)
 }
 
@@ -3231,6 +3235,10 @@ pub(crate) fn config_dir_for(
     platform: ConfigPlatform,
     mut env_path: impl FnMut(&str) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
+    #[cfg(feature = "benchmarks")]
+    if let Some(root) = crate::performance::config_root() {
+        return Some(root.to_path_buf());
+    }
     match platform {
         ConfigPlatform::MacOS => {
             env_path("HOME").map(|home| home.join(".config").join(LINUX_CONFIG_DIR_NAME))

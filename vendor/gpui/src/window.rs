@@ -7,9 +7,8 @@ use crate::{
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
     ExternalPathsDragResult, ExternalPathsDragStartResult, FileDropEvent, FontId, Global,
     GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
-    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
-    MouseExitEvent,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseExitEvent,
     MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, PromptButton, PromptLevel, Quad,
     Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
@@ -938,8 +937,38 @@ impl Frame {
     }
 }
 
+/// Timing for a scene submitted to the real platform renderer.
+#[cfg(feature = "benchmark-support")]
+#[derive(Clone, Debug)]
+pub struct BenchmarkFrame {
+    /// Tag captured before constructing this scene, never from a later state.
+    pub tag: u64,
+    /// Monotonic timestamp immediately after the renderer returns.
+    pub submitted_at: std::time::Instant,
+    /// CPU scene construction time, excluding the before-draw observer.
+    pub cpu_draw: std::time::Duration,
+    /// CPU time spent submitting the scene, including platform backpressure.
+    pub renderer_submission: std::time::Duration,
+    /// Time since the previous submission observed on this window.
+    pub submission_interval: Option<std::time::Duration>,
+    /// Whether this submission constructed a scene rather than replaying one.
+    pub drew_scene: bool,
+}
+
+#[cfg(feature = "benchmark-support")]
+struct BenchmarkFrameObserver {
+    before_draw: Box<dyn FnMut(&mut Window, &mut App) -> u64>,
+    submitted: Box<dyn FnMut(BenchmarkFrame)>,
+    tag: std::cell::Cell<u64>,
+    cpu_draw: std::cell::Cell<std::time::Duration>,
+    drew_scene: std::cell::Cell<bool>,
+    previous_submission: std::cell::Cell<Option<std::time::Instant>>,
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
+    #[cfg(feature = "benchmark-support")]
+    benchmark_frame_observer: Option<std::cell::RefCell<BenchmarkFrameObserver>>,
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
@@ -1350,6 +1379,8 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
+            #[cfg(feature = "benchmark-support")]
+            benchmark_frame_observer: None,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
@@ -1778,6 +1809,36 @@ impl Window {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
     }
 
+    /// Observe real scene construction and renderer submissions. Removing the
+    /// observer releases both callbacks; normal builds contain no observer code.
+    #[cfg(feature = "benchmark-support")]
+    pub fn observe_benchmark_frames(
+        &mut self,
+        before_draw: impl FnMut(&mut Window, &mut App) -> u64 + 'static,
+        submitted: impl FnMut(BenchmarkFrame) + 'static,
+    ) {
+        self.benchmark_frame_observer = Some(std::cell::RefCell::new(BenchmarkFrameObserver {
+            before_draw: Box::new(before_draw),
+            submitted: Box::new(submitted),
+            tag: std::cell::Cell::new(0),
+            cpu_draw: std::cell::Cell::new(std::time::Duration::ZERO),
+            drew_scene: std::cell::Cell::new(false),
+            previous_submission: std::cell::Cell::new(None),
+        }));
+    }
+
+    #[cfg(feature = "benchmark-support")]
+    /// Remove the timing observer and release its callbacks.
+    pub fn remove_benchmark_frame_observer(&mut self) {
+        self.benchmark_frame_observer = None;
+    }
+
+    /// Feed an input through production dispatch without exposing its internal result type.
+    #[cfg(feature = "benchmark-support")]
+    pub fn dispatch_benchmark_input(&mut self, input: PlatformInput, cx: &mut App) {
+        let _ = self.dispatch_event(input, cx);
+    }
+
     /// Schedule a frame to be drawn on the next animation frame.
     ///
     /// This is useful for elements that need to animate continuously, such as a video player or an animated GIF.
@@ -2045,6 +2106,16 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        #[cfg(feature = "benchmark-support")]
+        let benchmark_started = if let Some(observer) = self.benchmark_frame_observer.take() {
+            let tag = (observer.borrow_mut().before_draw)(self, cx);
+            observer.borrow().tag.set(tag);
+            observer.borrow().drew_scene.set(true);
+            self.benchmark_frame_observer = Some(observer);
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2117,6 +2188,12 @@ impl Window {
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
 
+        #[cfg(feature = "benchmark-support")]
+        if let (Some(started), Some(observer)) = (benchmark_started, &self.benchmark_frame_observer)
+        {
+            observer.borrow().cpu_draw.set(started.elapsed());
+        }
+
         ArenaClearNeeded
     }
 
@@ -2145,7 +2222,34 @@ impl Window {
 
     #[profiling::function]
     fn present(&self) {
+        #[cfg(feature = "benchmark-support")]
+        let started = self
+            .benchmark_frame_observer
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         self.platform_window.draw(&self.rendered_frame.scene);
+        #[cfg(feature = "benchmark-support")]
+        if let (Some(started), Some(observer)) = (started, &self.benchmark_frame_observer) {
+            let submitted_at = std::time::Instant::now();
+            let mut observer = observer.borrow_mut();
+            let drew_scene = observer.drew_scene.replace(false);
+            let frame = BenchmarkFrame {
+                tag: observer.tag.get(),
+                submitted_at,
+                cpu_draw: if drew_scene {
+                    observer.cpu_draw.get()
+                } else {
+                    std::time::Duration::ZERO
+                },
+                renderer_submission: submitted_at.duration_since(started),
+                submission_interval: observer
+                    .previous_submission
+                    .replace(Some(submitted_at))
+                    .map(|previous| submitted_at.duration_since(previous)),
+                drew_scene,
+            };
+            (observer.submitted)(frame);
+        }
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
@@ -2263,8 +2367,7 @@ impl Window {
             }
 
             if tooltip_bounds.bottom() > window_bounds.bottom() {
-                let new_y =
-                    mouse_position.y - tooltip_bounds.size.height - TOOLTIP_CURSOR_OFFSET_Y;
+                let new_y = mouse_position.y - tooltip_bounds.size.height - TOOLTIP_CURSOR_OFFSET_Y;
                 if new_y >= Pixels::ZERO {
                     tooltip_bounds.origin.y = new_y;
                 } else {

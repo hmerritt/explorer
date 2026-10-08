@@ -87,6 +87,14 @@ struct RawVideoHoverPreviewFrame {
 }
 
 impl ExplorerView {
+    #[cfg(feature = "benchmarks")]
+    pub(super) fn benchmark_video_preview_ready(&self, path: &Path) -> Result<bool, String> {
+        match self.video_hover_preview.as_ref().filter(|s| s.path == path) {
+            Some(session) if session.failed => Err("video preview failed".into()),
+            Some(session) => Ok(session.frame.is_some()),
+            None => Ok(false),
+        }
+    }
     pub(super) fn hover_video_preview_for_entry(
         &mut self,
         entry: &FileEntry,

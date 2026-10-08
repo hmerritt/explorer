@@ -1366,6 +1366,43 @@ fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
     ]);
 }
 
+fn initialize_application(cx: &mut App, args: Vec<OsString>) {
+    register_embedded_fonts(cx);
+    crate::http_client::initialize(cx);
+    crate::debug_options::initialize(cx, args);
+    crate::settings::initialize(cx);
+    initialize_explorer_window_registry(cx);
+    crate::explorer::initialize_cache_directory();
+    crate::explorer::initialize_clipboard_summary(cx);
+    crate::explorer::initialize_native_icon_cache(cx);
+    crate::explorer::initialize_image_thumbnail_cache(cx);
+    crate::explorer::initialize_folder_size_cache(cx);
+    crate::explorer::initialize_file_checksum_cache(cx);
+    crate::explorer::initialize_window_cleanup(cx);
+    crate::explorer::initialize_cache_cleanup(cx);
+    cx.bind_keys(platform_key_bindings());
+}
+
+#[cfg(feature = "benchmarks")]
+pub(crate) fn run_benchmark(
+    initial_path: PathBuf,
+    install: impl FnOnce(gpui::Entity<ExplorerTabs>, &mut Window, &mut App) + 'static,
+) {
+    #[cfg(target_os = "linux")]
+    configure_linux_display_backend();
+    Application::new().run(move |cx| {
+        initialize_application(cx, vec![OsString::from("explorer-bench")]);
+        let bounds = WindowBounds::Windowed(Bounds::centered(None, size(px(1024.), px(820.)), cx));
+        let handle = open_explorer_window_at(initial_path, bounds, None, cx);
+        handle
+            .update(cx, |root, window, cx| {
+                install(root.explorer.clone(), window, cx)
+            })
+            .expect("install real-window benchmark");
+        cx.activate(true);
+    });
+}
+
 pub fn run(args: Vec<OsString>, first_run: bool) {
     let _ = first_run;
     #[cfg(target_os = "linux")]
@@ -1395,20 +1432,7 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
     };
 
     app.run(move |cx: &mut App| {
-        register_embedded_fonts(cx);
-        crate::http_client::initialize(cx);
-        crate::debug_options::initialize(cx, args.clone());
-        crate::settings::initialize(cx);
-        initialize_explorer_window_registry(cx);
-        crate::explorer::initialize_cache_directory();
-        crate::explorer::initialize_clipboard_summary(cx);
-        crate::explorer::initialize_native_icon_cache(cx);
-        crate::explorer::initialize_image_thumbnail_cache(cx);
-        crate::explorer::initialize_folder_size_cache(cx);
-        crate::explorer::initialize_file_checksum_cache(cx);
-        crate::explorer::initialize_window_cleanup(cx);
-        crate::explorer::initialize_cache_cleanup(cx);
-        cx.bind_keys(platform_key_bindings());
+        initialize_application(cx, args.clone());
 
         #[cfg(target_os = "windows")]
         if cx.global::<SettingsState>().value.app.tray {

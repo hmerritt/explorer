@@ -3,6 +3,7 @@ name = "explorer"
 version = "0.24.0"
 edition = "2024"
 build = "build.rs"
+default-run = "explorer"
 description = "A GPU-accelerated file explorer built with GPUI."
 homepage = "https://github.com/hmerritt/explorer"
 repository = "https://github.com/hmerritt/explorer"
@@ -10,7 +11,12 @@ license = "MIT"
 
 [features]
 default = []
-benchmarks = []
+benchmarks = ["gpui/benchmark-support"]
+
+[[bin]]
+name = "explorer-bench"
+path = "src/bin/explorer-bench.rs"
+required-features = ["benchmarks"]
 
 [package.metadata.bundle]
 name = "Explorer"

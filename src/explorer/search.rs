@@ -237,6 +237,19 @@ impl ExplorerView {
         self.scroll_to_top();
     }
 
+    #[cfg(feature = "benchmarks")]
+    pub(super) fn benchmark_search(
+        &mut self,
+        query: String,
+        recursive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_recursive_search_enabled(recursive, cx);
+        self.set_search_query(query);
+        self.refresh_search_filter(cx);
+        cx.notify();
+    }
+
     pub(super) fn clear_search(&mut self) {
         self.set_search_query(String::new());
     }

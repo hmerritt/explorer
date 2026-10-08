@@ -1,9 +1,164 @@
 # Benchmarks
 
+## Local application benchmarks
+
+The `explorer-bench` runner measures real GPUI windows alongside the existing
+Criterion suites. Build in the release profile; the first build can take several
+minutes. A graphical desktop is required for UI cases.
+
+Criterion uses a separate, reusable build cache under
+`target/performance-criterion-build` (beneath `CARGO_TARGET_DIR` when set).
+Its first build can take additional time. Cargo also builds package binaries
+alongside benchmark targets ([Cargo target selection](https://doc.rust-lang.org/cargo/commands/cargo-build.html#target-selection));
+separate artifacts avoid overwriting the executing runner on Windows.
+
+```sh
+cargo run --locked --release --features benchmarks --bin explorer-bench -- list
+cargo run --locked --release --features benchmarks --bin explorer-bench -- run
+cargo run --locked --release --features benchmarks --bin explorer-bench -- run --preset full
+```
+
+`run` defaults to the **quick** preset: 1,000-entry browsing in Details and Large
+Icons, representative search and media flows, one warm-up and five measured
+repetitions, two-second scrolling workloads, and representative directory-loading
+Criterion cases. Its tail estimates are exploratory. **Full** adds empty, 100,
+and 10,000-entry folders, explicitly primed media cases, three warm-ups and 30
+measured repetitions, five-second scrolling workloads, and all eight Criterion
+suites. Full runs can be lengthy; every UI repetition starts a fresh process.
+
+Use a literal substring of a stable scenario ID to select cases. `list` accepts
+the same preset and filter options. Full-only cases require `--preset full`.
+
+```sh
+cargo run --locked --release --features benchmarks --bin explorer-bench -- list --preset full
+cargo run --locked --release --features benchmarks --bin explorer-bench -- run --filter ui/open
+cargo run --locked --release --features benchmarks --bin explorer-bench -- run --filter ui/hover_image
+cargo run --locked --release --features benchmarks --bin explorer-bench -- run --filter criterion/navigation_pipeline
+cargo run --locked --release --features benchmarks --bin explorer-bench -- run --output target/performance-before
+```
+
+Each run creates a fresh `run-<timestamp>-<pid>` directory under
+`target/performance` (or `--output`). It contains `summary.json`, `report.md`, raw
+`samples.jsonl`, per-worker requests/results/logs, and original Criterion
+artifacts. Reports are saved after each scenario, including failures and explicit
+skips. Workers time out after five minutes; each action times out after 30 seconds.
+Timing regressions do not fail runs. Incorrect outcomes and execution errors do.
+Missing FFmpeg or FFprobe skips video cases and marks coverage incomplete.
+
+Compare the **actual run directories** printed by two runs:
+
+```sh
+cargo run --locked --release --features benchmarks --bin explorer-bench -- compare target/performance/run-BEFORE target/performance/run-AFTER
+```
+
+Comparison prints Markdown with absolute and percentage changes for matching
+scenarios, and flags missing or incomplete cases. OS, architecture, CPU, build
+profile, Rust version, display backend, scale factor, viewport, media tools,
+fixture/scenario versions, and sampling preset must match. An intentionally
+different environment requires `--allow-incompatible`. Commit and dirty state
+are recorded but may differ: comparing revisions is the purpose of a baseline.
+Criterion retains its own statistical estimates and raw artifacts.
+
+### Coverage and timing boundaries
+
+UI scenarios cover startup, opening a child folder, Back/Forward/Up/Refresh,
+all four Details-view sort columns in both directions, local filtering,
+recursive search, single/range/all selection, creating/switching/closing tabs,
+and scrolling in both views. Empty folders cover startup and refresh. Media cases
+cover opening a 12MP JPEG viewer, Alt-hover image/video/text/PDF/EPUB previews,
+and visible image/video thumbnails in Large Icons. Details displays file icons
+rather than a thumbnail grid, so it has no thumbnail-readiness scenario.
+
+- **Action-to-submission** starts immediately before a production handler or
+  GPUI input dispatch and ends after the renderer submits the first newly drawn
+  scene containing the expected state. Directory completion checks the exact
+  load generation, path, and entry count. Selection, sorting, search, and tab
+  outcomes are checked; media checks reject loading placeholders and extraction
+  failures. Startup starts before process creation and ends when the parent
+  receives the directory-ready submission notification, including pipe transport.
+- **CPU frame work** measures scene construction, excluding renderer submission
+  and the readiness observer. **Renderer submission** includes CPU submission
+  and any platform backpressure. These are not GPU execution times or physical
+  display latency. Input starts inside GPUI, excluding OS event delivery.
+- **Submission intervals** measure successive submissions on the relevant
+  window, including replayed scenes. The interval crossing the action boundary
+  is omitted. Reports keep sample counts and timing distributions, not an FPS
+  claim. Refresh may require one benchmark-requested repaint after an unchanged
+  directory load completes.
+- Scrolling dispatches 120 wheel events of 20 logical pixels (2,400 pixels in
+  each scenario's direction), paced over two/five seconds. Upward cases first
+  scroll down. Bounds clamp naturally; completion requires actual movement.
+  Event-loop delays can extend the elapsed workload; raw samples retain the
+  input count. Alt-hover targets use recorded bounds of painted entries.
+
+Ready-state checks and row-bound tracking add instrumentation overhead. Keep the
+same harness version when comparing results. No instrumented code is included
+when the `benchmarks` feature is disabled.
+
+### Fixtures and isolation
+
+Generated fixtures live under `target/performance-fixtures-v1`, or the Cargo
+target directory selected by `CARGO_TARGET_DIR`. They are created before UI
+process launch and outside measured Criterion regions. Folder fixtures include
+numbered, Unicode, hidden, and long names, different file types, varied sizes
+and modification times, and a nested search tree. Media is generated locally;
+video generation requires `ffmpeg` and `ffprobe` on `PATH`. There are no downloads.
+
+Each UI worker uses a dedicated settings/cache/window-state directory inside its
+sample output. It does not route to a running Explorer instance. Fixed settings
+disable tray behavior, remote locations, updater activity, and device/clipboard
+polling; fonts, caches, rendering, loading, and Explorer handlers use production
+initialization. The requested window is 1024 × 820 logical pixels; reports record
+the actual viewport and scale factor. Keep the display configuration stable.
+
+`empty` media cases begin with empty application caches. `primed` cases first
+complete the same production flow, then leave/reopen it outside the measured
+region. Video hover starts a new playback session and image viewers decode again;
+priming does not imply those flows have a decoded-content cache. Thumbnail cases
+measure navigation plus readiness of the visible thumbnails, rather than all
+files in a folder. Filesystem caches are not flushed; these are not cold-disk
+benchmarks. Criterion children receive their own isolated cache roots too.
+
+To add a scenario, extend the catalog in `src/performance/mod.rs`, its preparation
+and expected outcome in `ui.rs`, and, if needed, a feature-gated adapter under
+`explorer::benchmark_support`. Call production code and capture readiness before
+scene construction. Add tests for preparation, completion, and failures. Change
+the scenario version when measurement semantics change and the fixture version
+when fixture contents change. Validate with:
+
+```sh
+cargo check --locked --all-targets --features benchmarks
+cargo test --locked --all-targets --features benchmarks
+cargo check --locked
+```
+
+Headless unit tests validate harness logic; they do not substitute for desktop
+runs. There are no CI performance jobs or automatic regression thresholds.
+
+### Validation record — 2026-10-08
+
+Windows real-window validation passed the complete quick preset: 54 UI cases
+with five measured repetitions each, plus four representative Criterion cases.
+Additional full-preset checks passed all 14 primed media cases with 30 measured
+repetitions and startup in both views at every fixture size. Missing-tool skips,
+comparison rejection/override, and isolation from personal settings/caches and
+an independently running Explorer instance were checked.
+
+The three Cargo validation commands above passed. Library tests reported 2,250
+passed and six existing ignored tests; all eight Criterion suites also passed
+their test-mode smoke runs. The entire full preset was not run.
+
+macOS and Linux graphical desktops were unavailable on this Windows host.
+Real-window validation on those platforms remains outstanding; headless tests
+do not establish their rendering or input behavior.
+
+## Individual Criterion suites
+
 The recursive-search benchmark suite measures scanning, cached filtering,
 metadata materialization, cached and uncached full searches, and cancellation.
-The navigation-pipeline benchmark measures basic directory entry loading for a
-small Documents-like folder with hidden entries. The image-thumbnail benchmark
+The navigation-pipeline benchmark measures directory entry loading for a small
+Documents-like folder and empty/100/1,000/10,000-entry mixed folders, with hidden
+entries both shown and hidden. The image-thumbnail benchmark
 measures cold thumbnail extraction for large raster/SVG/TIFF files and parallel
 JPEG batch extraction. The image-viewer benchmark measures native-resolution
 opens, deferred ICC correction, and `RenderImage` construction. The properties

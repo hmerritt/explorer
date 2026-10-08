@@ -202,6 +202,17 @@ pub(super) enum TextHoverPreviewLookup {
 }
 
 impl ExplorerView {
+    #[cfg(feature = "benchmarks")]
+    pub(super) fn benchmark_text_preview_ready(&self, path: &Path) -> Result<bool, String> {
+        match self.text_hover_preview.as_ref().filter(|s| s.path == path) {
+            Some(session) if session.failed => Err("text preview failed".into()),
+            Some(session) => Ok(session
+                .content
+                .as_ref()
+                .is_some_and(|c| !c.lines.is_empty())),
+            None => Ok(false),
+        }
+    }
     pub(super) fn hover_text_preview_for_entry(
         &mut self,
         entry: &FileEntry,

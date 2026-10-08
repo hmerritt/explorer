@@ -14,6 +14,8 @@ mod image_viewer;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod loaders;
 mod os_paths;
+#[cfg(feature = "benchmarks")]
+pub mod performance;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod settings;
 #[cfg(any(target_os = "windows", test))]

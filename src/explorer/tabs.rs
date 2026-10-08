@@ -556,6 +556,26 @@ impl WindowDragState for ExplorerTabs {
 }
 
 impl ExplorerTabs {
+    #[cfg(feature = "benchmarks")]
+    pub(super) fn benchmark_active(&self) -> Option<(Entity<ExplorerView>, u64, usize)> {
+        self.active_tab()
+            .map(|tab| (tab.active_view(), self.active_tab.0, self.tabs.len()))
+    }
+
+    #[cfg(feature = "benchmarks")]
+    pub(super) fn benchmark_tab_action(
+        &mut self,
+        kind: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            "new_tab" => self.handle_new_tab(&NewTab, window, cx),
+            "switch_tab" => self.handle_select_next_tab(&SelectNextTab, window, cx),
+            "close_tab" => self.handle_close_tab(&CloseTab, window, cx),
+            _ => unreachable!("validated benchmark tab action"),
+        }
+    }
     pub fn new(
         initial_path: PathBuf,
         focus_handle: FocusHandle,
@@ -2702,6 +2722,10 @@ fn observe_window_activation(window: &mut Window, cx: &mut Context<ExplorerTabs>
 }
 
 fn start_clipboard_summary_poll(window: &Window, cx: &Context<ExplorerTabs>) {
+    #[cfg(feature = "benchmarks")]
+    if crate::performance::config_root().is_some() {
+        return;
+    }
     window
         .spawn(cx, async move |cx| {
             loop {

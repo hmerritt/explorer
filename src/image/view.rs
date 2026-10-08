@@ -343,6 +343,17 @@ impl ImageViewerWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let surface = new_embedded_image_viewer(path, focus_handle, false, cx);
+        #[cfg(feature = "benchmarks")]
+        {
+            let surface = surface.clone();
+            crate::performance::ui::observe_image_window(window, move |cx| {
+                match &surface.read(cx).state {
+                    ImageViewerState::Ready(_) => Ok(true),
+                    ImageViewerState::Loading => Ok(false),
+                    ImageViewerState::Failed(error) => Err(error.clone()),
+                }
+            });
+        }
         observe_image_window_bounds(window, cx);
         cx.subscribe_in(
             &surface,

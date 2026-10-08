@@ -35,6 +35,7 @@ repository = "https://github.com/zed-industries/zed"
 resolver = "2"
 
 [features]
+benchmark-support = []
 default = [
     "font-kit",
     "wayland",

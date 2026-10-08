@@ -638,6 +638,29 @@ impl ImageThumbnailState {
 }
 
 impl ExplorerView {
+    #[cfg(feature = "benchmarks")]
+    pub(super) fn benchmark_cached_thumbnail(
+        &self,
+        entry: &FileEntry,
+        hover: bool,
+        cx: &App,
+    ) -> Result<bool, String> {
+        let key = if hover {
+            hover_image_preview_key(entry, self.media_preview_size)
+        } else if let Some(kind) = image_thumbnail_kind_for_path(&entry.path) {
+            image_thumbnail_key(entry, kind)
+        } else {
+            return Err("entry does not support thumbnails".into());
+        };
+        let cache = cx.global::<ImageThumbnailCache>().inner.borrow();
+        match cache.states.get(&key) {
+            Some(ImageThumbnailState::Ready(_)) => Ok(true),
+            Some(ImageThumbnailState::Failed { .. }) => {
+                Err(format!("thumbnail extraction failed for {}", entry.name))
+            }
+            _ => Ok(false),
+        }
+    }
     pub(super) fn observe_image_thumbnail_cache(&mut self, cx: &mut Context<Self>) {
         cx.observe_global::<ImageThumbnailCache>(|_, cx| cx.notify())
             .detach();

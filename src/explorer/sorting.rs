@@ -7,6 +7,13 @@ pub(super) fn sort_entries(entries: &mut [FileEntry], sort: FileSortSettings) {
     entries.sort_by(|a, b| compare_entries(a, b, sort));
 }
 
+#[cfg(feature = "benchmarks")]
+pub(super) fn benchmark_entries_are_sorted(entries: &[FileEntry], sort: FileSortSettings) -> bool {
+    entries
+        .windows(2)
+        .all(|pair| !compare_entries(&pair[0], &pair[1], sort).is_gt())
+}
+
 pub(crate) fn compare_file_names(a: &str, b: &str) -> Ordering {
     compare_names(a, b)
 }

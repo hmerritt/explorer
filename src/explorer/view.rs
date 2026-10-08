@@ -2166,6 +2166,10 @@ impl ExplorerView {
     }
 
     fn start_device_catalog_tasks(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "benchmarks")]
+        if crate::performance::config_root().is_some() {
+            return;
+        }
         self.start_remote_events(cx);
         #[cfg(test)]
         let _ = cx;
