@@ -9,8 +9,9 @@ export const TRACKER = {
   currentGap: 26,
   slot: 20,
   bottomPad: 36,
-  flipZone: 200,
-  detachZone: 240,
+  flipZone: 400,
+  detachZone: 480,
+  ridingGap: 24,
   stagger: 0.16,
   arc: 28,
   muted: 0.35,
@@ -87,33 +88,20 @@ export function trackerLayout({
   scrollY: number
 }) {
   const ruler = rulerGeometry(documentHeight, height, scrollY)
+  const startRail = rulerGeometry(documentHeight, height, 0).drift
+  const endRail = rulerGeometry(documentHeight, height, ruler.maxScroll).drift
   const states = sections.map((section, index) => {
     const length =
       section.widths.reduce((sum, advance) => sum + advance, 0) *
       (TRACKER.riding / TRACKER.heading)
     const railY = section.anchor - ruler.scroll + ruler.drift
-    let flip =
-      index === 0
-        ? 1
-        : ruler.maxScroll === 0
-          ? 0
-          : clamp((height * 0.12 + TRACKER.flipZone - railY) / TRACKER.flipZone)
-    // A short final section may never reach the flip line naturally.
-    if (
-      index > 0 &&
-      ruler.maxScroll > 0 &&
-      section.anchor - ruler.maxScroll > height * 0.12
-    ) {
-      const start = Math.max(
-        0,
-        Math.min(section.bottom - height, ruler.maxScroll - 24),
-      )
-      flip = Math.max(
-        flip,
-        clamp((ruler.scroll - start) / (ruler.maxScroll - start)),
-      )
+    return {
+      railY,
+      length,
+      flip: index === 0 ? 1 : 0,
+      detach: index === 0 ? 1 : 0,
+      queueY: 0,
     }
-    return { railY, length, flip, detach: index === 0 ? 1 : 0, queueY: 0 }
   })
   let queued = 0
   for (let index = states.length - 1; index > 0; index--) {
@@ -124,6 +112,47 @@ export function trackerLayout({
         TRACKER.detachZone,
     )
     if (ruler.maxScroll === 0) state.detach = 0
+    else {
+      // Leave room to ride vertically before flipping, even on short viewports
+      // or when a long label takes up most of the rail.
+      const detachLine = state.queueY - state.length
+      const flipLine = Math.min(
+        height * 0.12,
+        detachLine - TRACKER.ridingGap - 1,
+      )
+      const flipZone = Math.min(
+        TRACKER.flipZone,
+        detachLine - TRACKER.ridingGap - flipLine,
+      )
+      state.flip = clamp((flipLine + flipZone - state.railY) / flipZone)
+
+      // A short final section may never reach the flip line naturally. Spread
+      // its fallback over at least twice the old minimum distance when possible,
+      // but wait until detachment and the vertical riding gap have finished.
+      if (sections[index].anchor - ruler.maxScroll + endRail > flipLine) {
+        const railSpeed = 1 + (startRail - endRail) / ruler.maxScroll
+        const ridingEnd =
+          (sections[index].anchor +
+            startRail -
+            detachLine +
+            TRACKER.ridingGap) /
+          railSpeed
+        const start = Math.max(
+          0,
+          Math.min(
+            ruler.maxScroll - 1,
+            Math.max(
+              ridingEnd,
+              Math.min(sections[index].bottom - height, ruler.maxScroll - 48),
+            ),
+          ),
+        )
+        state.flip = Math.max(
+          state.flip,
+          clamp((ruler.scroll - start) / (ruler.maxScroll - start)),
+        )
+      }
+    }
     queued += (1 - state.detach) * (1 - state.flip)
   }
   let activeIndex = -1

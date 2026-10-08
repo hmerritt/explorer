@@ -35,11 +35,11 @@ test('the first section starts current at the top and future sections queue at t
 })
 
 test('a section detaches with staggered letters, rides vertically, then enters the top stack', () => {
-  const detaching = layoutAt(1100).labels[1]
+  const detaching = layoutAt(900).labels[1]
   assert.ok(detaching.detach > 0 && detaching.detach < 1)
   assert.equal(detaching.flip, 0)
   assert.notEqual(detaching.letters[0].rotation, detaching.letters[7].rotation)
-  const riding = layoutAt(1400).labels[1]
+  const riding = layoutAt(1250).labels[1]
   assert.equal(riding.detach, 1)
   assert.equal(riding.flip, 0)
   assert.ok(riding.letters.every((letter) => letter.rotation === -90))
@@ -56,6 +56,86 @@ test('a section detaches with staggered letters, rides vertically, then enters t
       (letter) => letter.rotation === 0 && letter.scale === 1,
     ),
   )
+})
+
+test('both transitions use twice the previous rail travel distance', () => {
+  const detachRails: number[] = []
+  const flipRails: number[] = []
+  for (let scroll = 0; scroll <= 2000; scroll++) {
+    const layout = layoutAt(scroll)
+    const label = layout.labels[1]
+    const railY = sections[1].anchor - scroll + layout.ruler.drift
+    if (label.detach > 0 && label.detach < 1) detachRails.push(railY)
+    if (label.flip > 0 && label.flip < 1) flipRails.push(railY)
+  }
+  const travel = (rails: number[]) => rails[0] - rails.at(-1)!
+  assert.ok(travel(detachRails) > 475 && travel(detachRails) <= 480)
+  assert.ok(travel(flipRails) > 395 && travel(flipRails) <= 400)
+  for (const scroll of [800, 1000, 1450, 1650]) {
+    assert.ok(
+      layoutAt(scroll).labels[1].letters.some(
+        (letter) => letter.rotation < 0 && letter.rotation > -90,
+      ),
+    )
+  }
+})
+
+test('short viewports and long labels finish detaching before a visible vertical ride and top entry', () => {
+  for (const height of [360, 600, 900]) {
+    for (const length of [8, 20]) {
+      const measured = sections.map((section) => ({
+        ...section,
+        widths: Array.from({ length }, () => 22),
+      }))
+      const ridingRails: number[] = []
+      let sawDetachment = false
+      let sawEntry = false
+      for (let scrollY = 0; scrollY <= 2100; scrollY++) {
+        const layout = trackerLayout({
+          sections: measured,
+          documentHeight: 6700,
+          width: 1100,
+          height,
+          scrollY,
+        })
+        const label = layout.labels[1]
+        if (label.detach > 0 && label.detach < 1) sawDetachment = true
+        if (label.detach === 1 && label.flip === 0) {
+          assert.ok(label.letters.every((letter) => letter.rotation === -90))
+          ridingRails.push(measured[1].anchor - scrollY + layout.ruler.drift)
+        }
+        if (label.flip > 0) {
+          assert.equal(label.detach, 1)
+          sawEntry = true
+        }
+      }
+      assert.ok(sawDetachment && sawEntry)
+      assert.ok(ridingRails[0] - ridingRails.at(-1)! >= TRACKER.ridingGap - 2)
+    }
+  }
+})
+
+test('the final-section fallback spans at least 48px when space permits', () => {
+  const measured = [
+    sections[0],
+    { anchor: 1700, bottom: 2000, widths: sections[1].widths },
+  ]
+  const at = (scrollY: number) =>
+    trackerLayout({
+      sections: measured,
+      documentHeight: 2000,
+      width: 1600,
+      height: 900,
+      scrollY,
+    })
+  assert.equal(at(1052).labels[1].flip, 0)
+  near(at(1076).labels[1].flip, 0.5)
+  assert.equal(at(1076).labels[1].detach, 1)
+  assert.ok(
+    at(1076).labels[1].letters.some((letter) => letter.rotation === -90),
+  )
+  assert.equal(at(1100).activeIndex, 1)
+  assert.ok(at(1100).labels[1].letters.every((letter) => letter.rotation === 0))
 })
 
 test('reverse scrolling and large jumps produce deterministic positions without remembered state', () => {

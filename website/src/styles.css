@@ -448,7 +448,7 @@ h1 {
   object-position: top;
 }
 .section-heading {
-  padding: 104px 40px 72px;
+  padding: 80px 40px;
 }
 .highlights-grid {
   list-style: none;
@@ -521,6 +521,8 @@ h1 {
 }
 .gallery-grid .image-caption {
   padding-inline: 24px;
+}
+.gallery-grid figure:first-child .image-caption {
   border-bottom: 1px solid var(--line);
 }
 .downloads-grid {
@@ -1003,7 +1005,7 @@ pre {
     border-right: 1px solid var(--line);
   }
   .section-heading {
-    padding: 72px 24px 48px;
+    padding: 80px 24px;
   }
   .downloads-grid {
     grid-template-columns: 1fr;
@@ -1091,7 +1093,7 @@ pre {
     border-bottom: 1px solid var(--line);
   }
   .section-heading {
-    padding: 64px 20px 40px;
+    padding: 80px 20px;
   }
   .highlights-grid li,
   .download-card,
@@ -1102,6 +1104,9 @@ pre {
   .gallery-grid .image-caption {
     padding-inline: 20px;
     font-size: 11px;
+  }
+  .gallery-grid figure:not(:last-child) .image-caption {
+    border-bottom: 1px solid var(--line);
   }
   .hero-screenshot .image-caption span:last-child {
     display: none;
