@@ -71,6 +71,7 @@ struct StateInner {
     scroll_handler: Option<Box<dyn FnMut(&ListScrollEvent, &mut Window, &mut App)>>,
     scrollbar_drag_start_height: Option<Pixels>,
     measuring_behavior: ListMeasuringBehavior,
+    sizes_supplied_since_layout: bool,
 }
 
 /// Whether the list is scrolling from top to bottom or bottom to top.
@@ -225,6 +226,7 @@ impl ListState {
             reset: false,
             scrollbar_drag_start_height: None,
             measuring_behavior: ListMeasuringBehavior::default(),
+            sizes_supplied_since_layout: false,
         })));
         this.splice(0..0, item_count);
         this
@@ -245,6 +247,7 @@ impl ListState {
         let old_count = {
             let state = &mut *self.0.borrow_mut();
             state.reset = true;
+            state.sizes_supplied_since_layout = false;
             state.measuring_behavior.reset();
             state.logical_scroll_top = None;
             state.scrollbar_drag_start_height = None;
@@ -252,6 +255,30 @@ impl ListState {
         };
 
         self.splice(0..old_count, element_count);
+    }
+
+    /// Reset the list using exact item sizes already calculated by the caller.
+    ///
+    /// This establishes the full scroll extent without constructing offscreen
+    /// elements to measure them. Visible elements are still laid out normally.
+    /// The supplied sizes must be correct for the next layout's available width;
+    /// they survive that layout's usual width-change invalidation.
+    /// Like `reset`, this clears the scroll offset and drops scroll events until
+    /// the next paint. Items have no registered focus handles.
+    pub fn reset_with_sizes(&self, sizes: impl IntoIterator<Item = Size<Pixels>>) {
+        let state = &mut *self.0.borrow_mut();
+        state.reset = true;
+        state.sizes_supplied_since_layout = true;
+        state.measuring_behavior.reset();
+        state.logical_scroll_top = None;
+        state.scrollbar_drag_start_height = None;
+        state.items = SumTree::from_iter(
+            sizes.into_iter().map(|size| ListItem::Measured {
+                size,
+                focus_handle: None,
+            }),
+            (),
+        );
     }
 
     /// The number of items in this list.
@@ -1026,6 +1053,7 @@ impl Element for List {
         if state
             .last_layout_bounds
             .is_none_or(|last_bounds| last_bounds.size.width != bounds.size.width)
+            && !state.sizes_supplied_since_layout
         {
             let new_items = SumTree::from_iter(
                 state.items.iter().map(|item| ListItem::Unmeasured {
@@ -1052,6 +1080,7 @@ impl Element for List {
             };
 
         state.last_layout_bounds = Some(bounds);
+        state.sizes_supplied_since_layout = false;
         state.last_padding = Some(padding);
         ListPrepaintState { hitbox, layout }
     }
@@ -1186,6 +1215,107 @@ mod test {
     use gpui::{ScrollDelta, ScrollWheelEvent};
 
     use crate::{self as gpui, TestAppContext};
+
+    #[gpui::test]
+    fn supplied_sizes_keep_exact_geometry_and_virtualize(cx: &mut TestAppContext) {
+        use crate::{
+            AppContext, Context, Element, IntoElement, ListState, Render, Styled, Window, div,
+            list, point, px, size,
+        };
+        use std::{cell::Cell, rc::Rc};
+
+        let cx = cx.add_empty_window();
+        let state = ListState::new(0, crate::ListAlignment::Top, px(40.));
+        let heights = (0..10_000)
+            .map(|ix| if ix % 2 == 0 { 20. } else { 30. })
+            .collect::<Vec<_>>();
+        state.reset_with_sizes(heights.iter().map(|height| size(px(100.), px(*height))));
+        assert_eq!(state.item_count(), 10_000);
+        assert_eq!(state.0.borrow().items.summary().height, px(250_000.));
+        state.scroll_to(crate::ListOffset {
+            item_ix: 8_000,
+            offset_in_item: px(7.),
+        });
+        assert_eq!(state.scroll_px_offset_for_scrollbar().y, px(-200_007.));
+
+        struct TestView {
+            state: ListState,
+            renders: Rc<Cell<usize>>,
+        }
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let renders = self.renders.clone();
+                list(self.state.clone(), move |ix, _, _| {
+                    renders.set(renders.get() + 1);
+                    div()
+                        .h(px(if ix % 2 == 0 { 20. } else { 30. }))
+                        .w_full()
+                        .into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+        let renders = Rc::new(Cell::new(0));
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(200.)), |_, cx| {
+            cx.new(|_| TestView {
+                state: state.clone(),
+                renders: renders.clone(),
+            })
+        });
+        assert!(renders.get() < 30, "constructed {} rows", renders.get());
+        assert_eq!(state.max_offset_for_scrollbar().height, px(249_800.));
+        state.set_offset_from_scrollbar(point(px(0.), px(-249_800.)));
+        assert_eq!(state.logical_scroll_top().item_ix, 9_992);
+        state.scrollbar_drag_started();
+        state.reset_with_sizes(std::iter::empty());
+        assert_eq!(state.item_count(), 0);
+        assert_eq!(state.logical_scroll_top().item_ix, 0);
+        assert!(state.0.borrow().reset);
+        assert!(state.0.borrow().scrollbar_drag_start_height.is_none());
+    }
+
+    #[gpui::test]
+    fn supplied_sizes_preserve_measure_all_and_reset_before_scroll(cx: &mut TestAppContext) {
+        use crate::{
+            AppContext, Context, Element, IntoElement, ListState, Render, Styled, Window, div,
+            list, point, px, size,
+        };
+        let cx = cx.add_empty_window();
+        let state = ListState::new(0, crate::ListAlignment::Bottom, px(10.)).measure_all();
+        state.reset_with_sizes([size(px(100.), px(25.)); 4]);
+        assert_eq!(state.0.borrow().alignment, crate::ListAlignment::Bottom);
+        assert_eq!(state.0.borrow().overdraw, px(10.));
+        assert_eq!(
+            state.0.borrow().measuring_behavior,
+            super::ListMeasuringBehavior::Measure(false)
+        );
+        struct TestView(ListState);
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(25.)).w_full().into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(50.)), |_, cx| {
+            cx.new(|_| TestView(state.clone()))
+        });
+        state.reset_with_sizes([size(px(100.), px(25.)); 4]);
+        let offset = state.logical_scroll_top();
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(1.), px(1.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            ..Default::default()
+        });
+        assert_eq!(state.logical_scroll_top().item_ix, offset.item_ix);
+        assert_eq!(
+            state.logical_scroll_top().offset_in_item,
+            offset.offset_in_item
+        );
+    }
 
     #[gpui::test]
     fn test_reset_after_paint_before_scroll(cx: &mut TestAppContext) {

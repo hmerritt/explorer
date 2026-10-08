@@ -248,6 +248,9 @@ h3 {
   display: none;
 }
 .section-bar {
+  position: sticky;
+  top: 49px;
+  z-index: 20;
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -256,6 +259,9 @@ h3 {
   padding: 12px 40px;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
+  background: color-mix(in oklab, var(--paper) 60%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
 }
 .section-bar span:last-child {
   text-align: right;

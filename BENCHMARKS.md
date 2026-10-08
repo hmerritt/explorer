@@ -152,6 +152,136 @@ macOS and Linux graphical desktops were unavailable on this Windows host.
 Real-window validation on those platforms remains outstanding; headless tests
 do not establish their rendering or input behavior.
 
+### Large Icons layout
+
+Large Icons supplies its exact row heights, including gaps, through GPUI's
+`ListState::reset_with_sizes`. The complete scroll geometry exists before the
+first ready frame; only viewport and overdraw rows construct tile elements.
+Supplied sizes must match the next layout width. A subsequent width change
+requires supplying updated sizes again; other GPUI lists retain their existing
+measurement behavior.
+
+Row geometry and tile heights use shared immutable arrays. Each Explorer view
+keeps an LRU cache of at most 10,000 displayed filename measurements. Font changes
+invalidate those measurements; sorting, filtering, navigation, and resizing can
+reuse them. Current layout heights remain available independently of eviction.
+Filename wrapping uses the production font, fixed tile text width, and three-line
+limit. Changing the grid width repacks rows without measuring filenames again.
+
+Unchanged redraws use a constant-size layout key. When changing visible entries,
+call `invalidate_visible_entries` after replacement, reordering, or a change that
+affects displayed names. Extension visibility and font changes are separate keys.
+Keep the existing scroll preservation, deletion, and reveal rules when rebuilding
+geometry. Benchmark completion and timing boundaries are unchanged.
+
+Focused list validation can run independently of Explorer:
+
+```sh
+cargo test --locked --manifest-path vendor/gpui/Cargo.toml --target-dir target/gpui-list-validation --lib --features test-support elements::list::test
+cargo test --locked --lib --features benchmarks large_icon
+```
+
+### Large Icons optimization measurements — 2026-10-08
+
+Full-preset startup measurements used three warm-ups and 30 measured repetitions
+per case, in the same Windows x86_64 environment, release profile, Rust 1.94.0,
+1024 × 820 logical viewport, and scale factor 1. Fixture, scenario, and report
+versions remain unchanged. CPU frame percentiles aggregate the observed drawing
+frames, as in the original baseline; they exclude renderer submission.
+
+| Large Icons fixture | CPU frame p95 before | After | Reduction | Startup median before | After |
+|---|---:|---:|---:|---:|---:|
+| 1,000 entries | 44.418 ms | 5.065 ms | 88.6% | 452.589 ms | 410.805 ms |
+| 10,000 entries | 415.043 ms | 7.168 ms | 98.3% | 1,020.404 ms | 614.001 ms |
+
+Both cases exceeded the local 80% CPU frame reduction goal. Size seeding and
+shared arrays alone produced p95 values of 4.996 ms and 6.781 ms; the final cache
+implementation keeps startup costs close to those results while reusing filename
+metrics across subsequent actions and removing folder-sized redraw work.
+
+Details remains the control: its startup CPU frame p95 changed from 5.189 to
+5.231 ms at 1,000 entries and from 5.317 to 5.584 ms at 10,000 entries. Its final
+startup medians were 409.319 and 614.081 ms, close to Large Icons. Remaining
+end-to-end startup and navigation costs principally involve shared application
+initialization and directory loading, outside this optimization's scope.
+
+| Large Icons action | Entries | Median before | After | Reduction |
+|---|---:|---:|---:|---:|
+| Back | 1,000 | 61.908 ms | 30.366 ms | 51.0% |
+| Back | 10,000 | 517.710 ms | 236.593 ms | 54.3% |
+| Up | 1,000 | 60.900 ms | 31.496 ms | 48.3% |
+| Up | 10,000 | 516.108 ms | 236.089 ms | 54.3% |
+| New tab | 1,000 | 70.728 ms | 34.894 ms | 50.7% |
+| New tab | 10,000 | 522.928 ms | 239.510 ms | 54.2% |
+| Unchanged Refresh | 1,000 | 43.318 ms | 38.492 ms | 11.1% |
+| Unchanged Refresh | 10,000 | 244.556 ms | 236.473 ms | 3.3% |
+
+Full-preset scrolling uses the same 120 production wheel events over five seconds.
+Final Large Icons frame work stays nearly independent of folder size:
+
+| Entries | CPU frame p95 down | CPU frame p95 up | Submission-interval p95 down | Submission-interval p95 up |
+|---|---:|---:|---:|---:|
+| 100 | 2.639 ms | 2.568 ms | 9.233 ms | 9.240 ms |
+| 1,000 | 2.616 ms | 2.608 ms | 9.131 ms | 9.153 ms |
+| 10,000 | 2.729 ms | 2.706 ms | 9.210 ms | 9.217 ms |
+
+Against the clean original baseline, 10,000-entry scrolling CPU frame p95 fell
+from 3.893 to 2.729 ms downward (1.164 ms, 29.9%) and from 4.089 to 2.706 ms
+upward (1.383 ms, 33.8%). Submission-interval p95 fell from 10.362 to 9.210 ms
+downward (11.1%) and from 10.732 to 9.217 ms upward (14.1%). Renderer submission
+remained approximately 0.085–0.087 ms at p95; this optimization primarily reduces
+CPU scene construction rather than renderer submission.
+
+The final full matrix passed all 46 startup, Back, Up, new-tab, Refresh, and
+scrolling cases across both views and all applicable fixture sizes: 1,380 measured
+samples, with no errors or skips. The preserved original startup baseline is
+`target/performance/run-1791475314508559800-40628`; original navigation runs use
+`target/performance-large-icons-before`, the intermediate build uses
+`target/performance-large-icons-stage`, and final runs use
+`target/performance-large-icons-after`.
+
+The original executable was retained for every baseline case. Scrolling workers
+whose lifetimes overlapped compilation/test CPU activity were repeated afterward
+with that executable and three fresh warm-ups per affected case. Exactly 329
+worker repetitions, including warm-ups, were replaced; unaffected samples and
+original raw outputs remain preserved. Measurements still use empty application
+caches and do not flush filesystem caches. Source requests/results and the
+cleanup record live under `target/performance-large-icons-before/repeat-clean-*`.
+
+Combined before/after summaries and comparisons live under
+`target/performance-large-icons-comparison`. They contain 46 matching cases,
+1,380 measured samples per revision, and no incompatible environment fields.
+`all-metrics.md` includes absolute and percentage changes for median/p95 action
+latency, CPU frame work, renderer submission, and submission intervals. Separate
+comparisons retain the intermediate size-seeding build. Original run summaries
+retain commit/dirty status and environment metadata; source directories are listed
+in `sources.json`. Compare the combined summaries with:
+
+```sh
+target/release/explorer-bench compare target/performance-large-icons-comparison/before target/performance-large-icons-comparison/after
+```
+
+Final regression validation passed the complete quick preset: 54 real-window UI
+cases with five measured repetitions each (270 samples), and four representative
+directory-loading Criterion cases. There were no errors or skips. Its report is
+`target/performance-large-icons-quick/run-1791484601748565600-42884/report.md`;
+quick-run tail estimates remain exploratory.
+
+Locked checks with all targets and benchmark features, the check without benchmark
+features, and all-target tests passed. Library tests reported 2,256 passed and six
+existing ignored tests; all eight Criterion suites passed their test-mode smoke
+runs. The four focused vendored GPUI list tests also passed. Tests cover exact
+supplied-size geometry and distant offsets, viewport-bounded construction at
+10,000 entries, shared arrays, measurement reuse/LRU eviction, invalidation,
+resizing, mixed/Unicode/long names, selection/reveal, rename, and deletion.
+Desktop runs additionally checked production navigation, sorting, search,
+selection, tabs, wheel dispatch, thumbnails, and all supported hover previews.
+
+macOS and Linux graphical desktops were unavailable. Real-window validation on
+those platforms remains outstanding. Steady viewport tile/text construction and
+first-use filename measurement/row packing remain within Large Icons; shared
+initialization, directory loading, and video performance were not optimized.
+
 ## Individual Criterion suites
 
 The recursive-search benchmark suite measures scanning, cached filtering,

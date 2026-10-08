@@ -290,6 +290,7 @@ impl ExplorerView {
             filtered_entries(&self.all_entries, &self.search.content)
         };
         sort_entries(&mut self.entries, self.file_sort);
+        self.invalidate_visible_entries();
         self.apply_trash_location_sort();
         self.filter_pending_deleted_entries();
         self.restore_selection_from_paths(selected_paths);
@@ -299,6 +300,7 @@ impl ExplorerView {
         self.search.recursive_results_active = false;
         self.recursive_file_sort_override = None;
         self.entries = self.all_entries.clone();
+        self.invalidate_visible_entries();
         sort_entries(&mut self.entries, self.file_sort);
         self.apply_trash_location_sort();
         self.filter_pending_deleted_entries();
@@ -849,6 +851,7 @@ impl ExplorerView {
         self.search.recursive_progress = RecursiveSearchProgressSnapshot::Searching(None);
         self.search.recursive_results_active = true;
         self.entries.clear();
+        self.invalidate_visible_entries();
         self.clear_selection();
 
         let generation = self.search.recursive_generation;
@@ -963,6 +966,7 @@ impl ExplorerView {
             paths: output.scanned_paths,
         });
         self.entries = output.entries;
+        self.invalidate_visible_entries();
         self.filter_pending_deleted_entries();
         self.restore_selection_from_paths(&selected_paths);
         self.scroll_to_top();
@@ -1237,12 +1241,16 @@ mod tests {
     #[test]
     fn filtering_preserves_order_and_only_visible_selection() {
         let mut view = test_view_with_entries(&["a.txt", "b.png", "c.txt"]);
+        let revision = view.visible_entries_revision;
         view.select_all_entries();
         view.set_search_query("*.txt".to_owned());
+        assert!(view.visible_entries_revision > revision);
         assert_eq!(names(&view.entries), vec!["a.txt", "c.txt"]);
         assert_eq!(view.selected_paths().len(), 2);
 
+        let filtered_revision = view.visible_entries_revision;
         view.clear_search();
+        assert!(view.visible_entries_revision > filtered_revision);
         assert_eq!(names(&view.entries), vec!["a.txt", "b.png", "c.txt"]);
         assert_eq!(view.selected_paths().len(), 2);
     }

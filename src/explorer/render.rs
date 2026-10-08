@@ -2939,6 +2939,10 @@ impl ExplorerView {
         let Some(row_layout) = layout.row_bounds(row_ix) else {
             return div().into_any_element();
         };
+        #[cfg(test)]
+        {
+            self.large_icon_row_render_count += 1;
+        }
         let start = row_ix * layout.columns;
         let end = (start + layout.columns).min(self.entries.len());
         let mut row = div()
@@ -3062,9 +3066,14 @@ impl ExplorerView {
     }
 
     fn render_large_icons(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
+        #[cfg(test)]
+        {
+            self.large_icon_row_render_count = 0;
+        }
         let viewport_width = (self.list_viewport_width(window) - SCROLLBAR_GUTTER_WIDTH).max(0.0);
         let layout_key = LargeIconLayoutCacheKey::new(
-            &self.entries,
+            self.visible_entries_revision,
+            self.entries.len(),
             viewport_width,
             self.show_file_name_extensions,
             &self.font,
@@ -3077,8 +3086,23 @@ impl ExplorerView {
         if self.large_icon_layout_key.as_ref() != Some(&layout_key)
             || self.large_icon_layout.is_none()
         {
-            let layout = LargeIconLayout::from_cache_key(&layout_key, cx);
-            self.large_icon_list_state.reset(layout.row_count());
+            let layout = if let Some(previous) = self.large_icon_layout.as_ref().filter(|_| {
+                self.large_icon_layout_key
+                    .as_ref()
+                    .is_some_and(|key| key.same_filename_metrics(&layout_key))
+            }) {
+                previous.with_viewport_width(viewport_width)
+            } else {
+                let heights = self.large_icon_filename_cache.tile_heights(
+                    &self.entries,
+                    self.show_file_name_extensions,
+                    &self.font,
+                    cx,
+                );
+                LargeIconLayout::from_measured_heights(heights, viewport_width)
+            };
+            self.large_icon_list_state
+                .reset_with_sizes(layout.row_sizes(viewport_width));
             scroll_top =
                 scroll_top.clamp(0.0, (layout.content_height() - viewport_height).max(0.0));
             self.large_icon_list_state
@@ -8420,6 +8444,107 @@ mod tests {
             ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings)
         });
         (temp, view, cx)
+    }
+
+    #[gpui::test]
+    fn large_icon_grid_virtualizes_and_reuses_metrics(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) = test_view_entity_with_mode(cx, &[], FileViewMode::LargeIcons);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.all_entries = (0..10_000)
+                    .map(|ix| {
+                        let name = if ix % 7 == 0 {
+                            format!("résumé-文件-{ix}-a longer filename that wraps.txt")
+                        } else {
+                            format!("item-{ix}.txt")
+                        };
+                        crate::explorer::entry::FileEntry::test(&name, false, Some(1), None)
+                    })
+                    .collect();
+                view.entries = view.all_entries.clone();
+                view.invalidate_visible_entries();
+                cx.notify();
+            })
+        });
+        run_until_debug_bounds(cx, "explorer-large-icon-entry-0");
+        let measurements = cx.update(|_, app| {
+            view.update(app, |view, _| {
+                assert!(
+                    view.large_icon_row_render_count < 32,
+                    "constructed {} rows",
+                    view.large_icon_row_render_count
+                );
+                let layout = view.large_icon_layout.as_ref().unwrap();
+                let extent = view.large_icon_list_state.max_offset_for_scrollbar().height;
+                let viewport = view.large_icon_list_state.viewport_bounds().size.height;
+                assert!(
+                    (f32::from(extent + viewport) - layout.content_height()).abs() < 0.1,
+                    "extent={} viewport={} layout={} first={:?} expected={:?} columns={}",
+                    f32::from(extent),
+                    f32::from(viewport),
+                    layout.content_height(),
+                    view.large_icon_list_state.bounds_for_item(0),
+                    layout.row_bounds(0),
+                    layout.columns
+                );
+                view.large_icon_filename_cache.measurement_count()
+            })
+        });
+        assert_eq!(measurements, 10_000);
+
+        // Both unchanged redraws and geometry-only resize reuse all filename metrics.
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(gpui::px(900.), gpui::px(700.)));
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                assert_eq!(
+                    view.large_icon_filename_cache.measurement_count(),
+                    measurements
+                );
+                assert!(view.large_icon_row_render_count < 32);
+                let layout = view.large_icon_layout.as_ref().unwrap();
+                let height = f32::from(view.large_icon_list_state.viewport_bounds().size.height);
+                view.set_scroll_offset(layout.content_height() - height);
+                cx.notify();
+            })
+        });
+        run_until_debug_bounds(cx, "explorer-large-icon-entry-9999");
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                assert!(view.large_icon_row_render_count < 32);
+                assert_eq!(
+                    view.large_icon_filename_cache.measurement_count(),
+                    measurements
+                );
+                view.entries.reverse();
+                view.invalidate_visible_entries();
+                view.scroll_to_top();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                assert_eq!(
+                    view.large_icon_filename_cache.measurement_count(),
+                    measurements
+                );
+                view.entries[0].name = "renamed filename.txt".into();
+                view.invalidate_visible_entries();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                assert_eq!(
+                    view.large_icon_filename_cache.measurement_count(),
+                    measurements + 1
+                );
+            })
+        });
     }
 
     fn assert_delete_preserves_scrolled_position(

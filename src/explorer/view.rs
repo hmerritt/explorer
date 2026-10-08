@@ -44,7 +44,7 @@ use crate::explorer::{
         scan_git_repository_status,
     },
     image_thumbnails::ThumbnailSourcePolicy,
-    large_icons::{LargeIconLayout, LargeIconLayoutCacheKey},
+    large_icons::{LargeIconFilenameCache, LargeIconLayout, LargeIconLayoutCacheKey},
     mouse_selection::MouseSelectionDrag,
     remote_directory_cache::DirectoryLoadRequest,
     rename::{PendingClickRename, RenameState},
@@ -144,6 +144,10 @@ pub struct ExplorerView {
     pub(super) large_icon_list_state: gpui::ListState,
     pub(super) large_icon_layout: Option<LargeIconLayout>,
     pub(super) large_icon_layout_key: Option<LargeIconLayoutCacheKey>,
+    pub(super) visible_entries_revision: u64,
+    pub(super) large_icon_filename_cache: LargeIconFilenameCache,
+    #[cfg(test)]
+    pub(super) large_icon_row_render_count: usize,
     pub(super) pending_delete_reveal: RefCell<Option<PathBuf>>,
     delete_selection_load_generation: Option<u64>,
     pub(super) focus_handle: Option<FocusHandle>,
@@ -608,10 +612,13 @@ impl ExplorerView {
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             scroll_handle: UniformListScrollHandle::new(),
-            large_icon_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(400.0))
-                .measure_all(),
+            large_icon_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(400.0)),
             large_icon_layout: None,
             large_icon_layout_key: None,
+            visible_entries_revision: 0,
+            large_icon_filename_cache: LargeIconFilenameCache::default(),
+            #[cfg(test)]
+            large_icon_row_render_count: 0,
             pending_delete_reveal: RefCell::new(None),
             delete_selection_load_generation: None,
             focus_handle,
@@ -983,6 +990,7 @@ impl ExplorerView {
 
         if clear_entries {
             self.entries.clear();
+            self.invalidate_visible_entries();
             self.all_entries.clear();
             self.clear_selection();
             self.set_horizontal_scroll_offset(0.0);
@@ -1049,9 +1057,13 @@ impl ExplorerView {
         );
 
         self.apply_trash_location_sort();
+        let entries_changed = self.entries != previous_entries;
+        if entries_changed {
+            self.invalidate_visible_entries();
+        }
         had_read_error
             || self.all_entries != previous_all_entries
-            || self.entries != previous_entries
+            || entries_changed
             || self.selection != previous_selection
             || self.search.recursive_results_active != previous_recursive_results_active
             || self.recursive_file_sort_override != previous_recursive_file_sort_override
@@ -1066,6 +1078,7 @@ impl ExplorerView {
 
         self.all_entries.clear();
         self.entries.clear();
+        self.invalidate_visible_entries();
         self.clear_selection();
         self.read_error = Some(error);
 
@@ -1418,6 +1431,7 @@ impl ExplorerView {
         };
         self.all_entries = sidebar_group_entries(&group.items, "");
         self.entries = sidebar_group_entries(&group.items, self.search_query());
+        self.invalidate_visible_entries();
         self.restore_selection_from_paths(selected_paths);
         self.large_icon_layout = None;
         self.large_icon_layout_key = None;
@@ -2122,6 +2136,7 @@ impl ExplorerView {
         }
 
         if changed {
+            self.invalidate_visible_entries();
             if self.active_visible_file_sort().is_some() {
                 self.apply_file_sort();
             }
@@ -2360,11 +2375,13 @@ impl ExplorerView {
         let selected_paths = self.selected_paths();
         if let Some(sort) = self.active_visible_file_sort() {
             sort_entries(&mut self.entries, sort);
+            self.invalidate_visible_entries();
         }
         self.restore_selection_from_paths(&selected_paths);
     }
 
     fn apply_file_sort(&mut self) {
+        self.invalidate_visible_entries();
         if self.search.recursive_results_active {
             if let Some(sort) = self.recursive_file_sort_override {
                 sort_entries(&mut self.entries, sort);
@@ -2393,7 +2410,17 @@ impl ExplorerView {
                 .iter()
                 .any(|path| path == &entry.path)
         });
-        self.entries.len() != previous_len
+        let changed = self.entries.len() != previous_len;
+        if changed {
+            self.invalidate_visible_entries();
+        }
+        changed
+    }
+
+    /// Call after replacing, reordering, or changing the identity of visible entries.
+    /// Metadata-only changes need this if they affect sorting or displayed names.
+    pub(super) fn invalidate_visible_entries(&mut self) {
+        self.visible_entries_revision = self.visible_entries_revision.wrapping_add(1);
     }
 
     fn active_visible_file_sort(&self) -> Option<FileSortSettings> {
@@ -3096,6 +3123,38 @@ mod tests {
             names(&view.all_entries),
             vec!["pending.txt", "survivor.txt"]
         );
+    }
+
+    #[test]
+    fn visible_entry_revision_tracks_load_sort_and_deletion_but_not_unchanged_refresh() {
+        let mut view = ExplorerView::new(PathBuf::from("root"));
+        let entries = vec![
+            FileEntry::test("a.txt", false, Some(1), None),
+            FileEntry::test("b.txt", false, Some(2), None),
+        ];
+        let mode = ReloadMode {
+            cache_policy: crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+            preserve_selection: true,
+            rebuild_sidebar: false,
+            preserve_context_menu: false,
+        };
+        view.apply_loaded_entries(mode, Vec::new(), Vec::new(), entries.clone());
+        let loaded_revision = view.visible_entries_revision;
+        assert!(loaded_revision > 0);
+        view.apply_loaded_entries(mode, Vec::new(), Vec::new(), entries);
+        assert_eq!(view.visible_entries_revision, loaded_revision);
+        view.sort_entries_from_header(FileSortColumn::Name);
+        let sorted_revision = view.visible_entries_revision;
+        assert!(sorted_revision > loaded_revision);
+        view.pending_deleted_paths = vec![PathBuf::from("a.txt")];
+        assert!(view.filter_pending_deleted_entries());
+        let deleted_revision = view.visible_entries_revision;
+        assert!(deleted_revision > sorted_revision);
+        assert!(!view.filter_pending_deleted_entries());
+        assert_eq!(view.visible_entries_revision, deleted_revision);
+        view.apply_directory_load_error(io::Error::other("test error"));
+        assert!(view.visible_entries_revision > deleted_revision);
+        assert!(view.entries.is_empty());
     }
 
     #[test]

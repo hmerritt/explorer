@@ -148,6 +148,7 @@ impl ExplorerView {
                 }
             };
             self.entries.sort_by(compare);
+            self.invalidate_visible_entries();
             self.all_entries.sort_by(compare);
             self.restore_selection_from_paths(&selected);
         }
