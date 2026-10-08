@@ -70,11 +70,9 @@ const gallery = [
     height: 822,
   },
   {
-    name: 'properties',
-    caption: 'The details behind your files',
-    alt: 'Explorer showing image properties and metadata for the Harbor demo image',
-    width: 1202,
-    height: 822,
+    name: 'image-previews',
+    caption: 'Preview images, videos, PDFs and text files',
+    video: '/videos/image-previews.mp4',
   },
 ]
 
@@ -188,23 +186,36 @@ function Gallery() {
       <div className="gallery-grid">
         {gallery.map((image, index) => (
           <figure key={image.name}>
-            <a
-              href={`/images/${image.name}.png`}
-              className="gallery-image"
-              aria-label={`View ${image.caption.toLowerCase()} at full size`}
-            >
-              <img
-                src={`/images/${image.name}.webp`}
-                alt={image.alt}
-                width={image.width}
-                height={image.height}
-                loading="lazy"
-                decoding="async"
-              />
-              <span className="full-size label">
-                Full size <Arrow />
-              </span>
-            </a>
+            {'video' in image ? (
+              <div className="gallery-image">
+                <video
+                  src={image.video}
+                  aria-label={image.caption}
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                />
+              </div>
+            ) : (
+              <a
+                href={`/images/${image.name}.png`}
+                className="gallery-image"
+                aria-label={`View ${image.caption.toLowerCase()} at full size`}
+              >
+                <img
+                  src={`/images/${image.name}.webp`}
+                  alt={image.alt}
+                  width={image.width}
+                  height={image.height}
+                  loading="lazy"
+                  decoding="async"
+                />
+                <span className="full-size label">
+                  Full size <Arrow />
+                </span>
+              </a>
+            )}
             <figcaption className="image-caption">
               <span>{image.caption}</span>
               <span className="label">0{index + 2}</span>
