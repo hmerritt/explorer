@@ -54,7 +54,7 @@ test('Windows selects its installer rather than a portable ZIP; a missing instal
         architecture: 'amd64' as const,
         kind: 'installer' as const,
         name: 'installer.exe',
-        url: 'https://github.com/hmerritt/explorer/releases/download/0.23.0/installer.exe',
+        url: 'https://github.com/hmerritt/explorer/releases/download/0.24.0/installer.exe',
       },
     ],
   }

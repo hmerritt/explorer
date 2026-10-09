@@ -7,7 +7,7 @@ import {
   REPOSITORY,
 } from '../src/lib/releases.ts'
 
-const version = '0.23.0'
+const version = '0.24.0'
 const suffixes = [
   'macos-arm64-apple-silicon.zip',
   'macos-amd64-intel.zip',
