@@ -9,7 +9,7 @@ Explorer is a Rust/GPUI desktop file manager for Windows Explorer-style workflow
 ## Development
 
 The TanStack Start marketing website lives in [`website/`](./website/README.md).
-Its Bun tooling and Netlify deployment are independent of the Rust desktop app.
+Its Bun tooling and static VPS deployment are independent of the Rust desktop app.
 
 This app currently targets Windows, macOS, and Linux. Other platforms compile a small fallback binary that prints a platform support message.
 

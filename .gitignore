@@ -10,6 +10,7 @@
 /website/.env
 /website/.env.*
 !/website/.env.example
+!/website/.env.deploy.example
 /.netlify/
 
 # Editor and OS files

@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
+import { staticFunctionMiddleware } from '@tanstack/start-static-server-functions'
 import { useSyncExternalStore } from 'react'
 import {
   Header,
@@ -17,10 +18,12 @@ import { REPOSITORY, RELEASES_URL } from '../lib/releases'
 import type { Platform, ReleaseAsset, ReleaseInfo } from '../lib/releases'
 import { detectPlatform, heroDownload } from '../lib/platform'
 
-const loadRelease = createServerFn({ method: 'GET' }).handler(async () => {
-  const { getLatestRelease } = await import('../lib/releases.server')
-  return getLatestRelease()
-})
+const loadRelease = createServerFn({ method: 'GET' })
+  .middleware([staticFunctionMiddleware])
+  .handler(async () => {
+    const { getLatestRelease } = await import('../lib/releases.server')
+    return getLatestRelease()
+  })
 
 export const Route = createFileRoute('/')({
   loader: () => loadRelease(),

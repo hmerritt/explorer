@@ -1,6 +1,8 @@
 export const REPOSITORY = 'https://github.com/hmerritt/explorer'
 export const RELEASES_URL = `${REPOSITORY}/releases/latest`
-export const SITE_URL = 'https://hmerritt-explorer.netlify.app'
+export const SITE_URL = (
+  import.meta.env?.VITE_SITE_URL || 'http://localhost:3000'
+).replace(/\/+$/, '')
 
 export type Platform = 'macos' | 'windows' | 'linux'
 export type ReleaseAsset = {

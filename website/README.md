@@ -1,14 +1,14 @@
 # Explorer website
 
-A TanStack Start React download website for Explorer, deployed to Netlify. The
+A TanStack Start React download website for Explorer, built as a static site. The
 website is independent of the Rust desktop app: all JavaScript dependencies,
 source, and tooling live in this directory.
 
 ## Requirements and development
 
 Install **Bun 1.4.2** and **Node.js 24**. Bun installs dependencies and runs scripts;
-Vite and Netlify's serverless functions use Node.js. The Bun version is pinned in
-`package.json`, GitHub Actions, and the root `netlify.toml`. `.node-version` records
+Vite uses Node.js. The Bun version is pinned in
+`package.json` and GitHub Actions. `.node-version` records
 the Node.js major version for local version managers.
 
 From the repository root:
@@ -19,18 +19,10 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
-Open <http://localhost:3000>. Vite uses Netlify's TanStack Start adapter to emulate
-the deployment platform locally. The development port is fixed to 3000; stop any
+Open <http://localhost:3000>. The development port is fixed to 3000; stop any
 other process on that port before starting the app.
 
-The root Netlify configuration overrides the base to `.` for the local `dev`
-context because the adapter resolves paths from this directory. Hosted builds
-retain the `website` base directory.
-
-Edge Functions emulation is disabled because this starter uses Node serverless
-functions for SSR and has no edge functions. Deno is not required for development.
-
-The homepage is server rendered, including feature copy and current downloads.
+The homepage is prerendered at build time, including feature copy and downloads.
 After hydration the main download action recognizes desktop operating systems;
 macOS and Linux visitors choose their architecture in the download section.
 Unknown paths return a 404 with a link back to the homepage.
@@ -41,13 +33,14 @@ Unknown paths return a 404 with a link back to the homepage.
 The page uses local Archivo, Inter and Geist Mono fonts; their OFL licenses ship
 alongside the fonts in `public/fonts/`. The site has one light theme.
 
-The homepage loader uses an internal TanStack server function to request the
-latest stable GitHub release. No separate public release API is maintained.
-The server-only service has a five-second timeout, deduplicates concurrent
-requests and caches successful metadata for one hour per server instance.
-Failed refreshes retain the last successful release and retry after a minute;
-cold failures link to GitHub releases. Only published Mac ZIPs, Linux tarballs
-and Windows installer/portable downloads are shown. No API secret is required.
+The homepage loader uses a TanStack static server function to request the latest
+stable GitHub release during prerendering. Its result is embedded in the initial
+HTML and emitted as static JSON for subsequent browser navigation. The deployed
+site needs no Node process or server-function endpoint. Release links refresh
+when you rebuild and deploy; new releases do not update an existing build.
+The release service retains its five-second timeout and GitHub releases fallback
+on cold failures. Only published Mac ZIPs, Linux tarballs and Windows
+installer/portable downloads are shown. No API secret is required.
 
 The icon comes from `assets/explorer.png`. The four screenshots in
 `public/images/` are actual Explorer captures using the isolated README demo
@@ -58,21 +51,24 @@ card from the captures (requires Python and Pillow). The capture dimensions are
 recorded in the page to reserve layout space. Below-the-fold gallery images are
 loaded lazily. Do not substitute generated mockups or personal file listings.
 
-The default public URL for sharing and social metadata is
-`https://hmerritt-explorer.netlify.app`, defined in `src/lib/releases.ts`.
+Set `VITE_SITE_URL` to the public origin for sharing and social metadata, for
+example `https://explorer.example.com`. Development defaults to
+`http://localhost:3000`. This value is public and is embedded in the build.
 
 ## Commands
 
-| Command                | Purpose                                                        |
-| ---------------------- | -------------------------------------------------------------- |
-| `bun run dev`          | Start the development server with hot reload.                  |
-| `bun run build`        | Generate routes and build client assets and Netlify functions. |
-| `bun run typecheck`    | Check TypeScript without emitting files.                       |
-| `bun run lint`         | Run ESLint, treating warnings as failures.                     |
-| `bun run format`       | Format website source and configuration with Prettier.         |
-| `bun run format:check` | Check formatting without modifying files.                      |
-| `bun run test`         | Test release handling, caching, failures and platform CTAs.    |
-| `bun run check`        | Test, build, typecheck, lint, then check formatting.           |
+| Command                    | Purpose                                                       |
+| -------------------------- | ------------------------------------------------------------- |
+| `bun run dev`              | Start the development server with hot reload.                 |
+| `bun run build`            | Generate routes, prerender HTML and build static assets/JSON. |
+| `bun run deploy`           | Build and mirror the static site to the configured VPS.       |
+| `bun run deploy --dry-run` | Build and preview transfers/deletions without remote writes.  |
+| `bun run typecheck`        | Check TypeScript without emitting files.                      |
+| `bun run lint`             | Run ESLint, treating warnings as failures.                    |
+| `bun run format`           | Format website source and configuration with Prettier.        |
+| `bun run format:check`     | Check formatting without modifying files.                     |
+| `bun run test`             | Test release handling, caching, failures and platform CTAs.   |
+| `bun run check`            | Test, build, typecheck, lint, then check formatting.          |
 
 Commit `bun.lock` when changing dependencies. The generated
 `src/routeTree.gen.ts` is also committed, so standalone type checking works after
@@ -89,49 +85,95 @@ The Website GitHub Actions workflow runs a frozen dependency installation and
 `bun run check` for relevant pull requests and pushes to `master`. Rust validation
 continues through the existing workflows.
 
-## Netlify deployment
+## VPS deployment
 
-- Production: <https://hmerritt-explorer.netlify.app>
-- Netlify project and deploy logs:
-  <https://app.netlify.com/projects/hmerritt-explorer/deploys>
-- Setup pull request: <https://github.com/hmerritt/explorer/pull/4>
-- Setup Deploy Preview: <https://deploy-preview-4--hmerritt-explorer.netlify.app>
+Run deployment from a Bash environment with Bun, Node.js 24, SSH and rsync 3.x
+installed. On Windows, use WSL and install these tools inside WSL. On macOS, use
+Homebrew's rsync rather than the older bundled version. The VPS needs
+SSH, rsync 3.x and a static web server such as Nginx. Configure SSH keys, usernames
+and nonstandard ports in `~/.ssh/config`; `SSH_TARGET` accepts a host alias or
+`user@host`. Normal SSH host verification remains enabled.
 
-The first verified preview deployed commit
-`a1a421163317f9f49b25671e31aa2f07c4ebad83`. Each Netlify deploy records its Git
-commit; use the project deploy log to identify the currently published revision.
+From `website/`, configure and preview deployment:
 
-The repository's root `netlify.toml` is the source of truth:
+```sh
+cp .env.deploy.example .env.deploy
+# Edit SSH_TARGET, DEPLOY_PATH and VITE_SITE_URL in .env.deploy.
+bun run deploy --dry-run
+bun run deploy
+```
 
-- Base directory: `website`
-- Build command: `bun run check`
-- Publish directory: `dist/client`, relative to the base directory
-- Bun: `1.4.2`, with `--frozen-lockfile`
-- Node.js: `24`
+`.env.deploy` is ignored by Git and sourced as trusted Bash assignments. Quote
+values, especially paths containing spaces. Only the public `VITE_SITE_URL`
+belongs in the client build; SSH settings are deployment configuration.
 
-The Vite adapter `@netlify/vite-plugin-tanstack-start` generates the serverless
-function and SSR routing. No application secrets are required by this starter.
-Netlify authentication and local CLI state must not be committed. Local `.env`
-files, dependencies, and generated build output are ignored by Git.
+Create a dedicated, writable directory on the VPS before deploying and point
+your web server at it. `DEPLOY_PATH` must be absolute and cannot contain `.` or
+`..` components or resolve to `/`. Every remote file absent from the local build
+is deleted: keep uploads, server configuration and other sites outside this
+directory. The script checks the directory over SSH even in dry-run mode.
 
-To connect the repository:
+The script resolves configuration relative to itself, so it can also be invoked
+from the repository root with `bash website/deploy.sh [--dry-run]`. It runs
+`bun run build` before syncing the **contents** of `dist/client/`, including
+`index.html`, static release JSON, `404.html`, fonts, images, videos and assets.
+`dist/server/` is a build-time artifact and is not uploaded. Dependencies must
+already be installed; deployment does not run installation or the full CI checks.
 
-1. Sign in to your personal Netlify team and import `hmerritt/explorer` from GitHub.
-2. Grant Netlify access to this repository if it is not already authorized.
-3. Set the production branch to `master` and confirm the tracked build settings
-   above. Keep pull-request Deploy Previews enabled.
-4. Verify the first pull-request preview, then the production build after the
-   website changes are merged into `master`.
+Rsync preserves timestamps, makes public files readable (directories `755`, files
+`644`) and does not copy local ownership. It delays updates and deletion until
+the transfer completes, but the deployment is not an atomic release. A failed
+build stops before SSH or rsync. `--dry-run` still builds locally and shows
+proposed transfers and deletions without writing to the VPS.
 
-Use the generated HTTPS `netlify.app` URL. Custom domains are a later addition;
-update the public URL constant when one is configured.
+### Static server and caching
 
-See the official [TanStack Start hosting guide](https://tanstack.com/start/latest/docs/framework/react/guide/hosting#netlify-official-partner)
-and [Netlify's TanStack Start guide](https://docs.netlify.com/build/frameworks/framework-setup-guides/tanstack-start/).
+For example, adapt this Nginx server block to your domain, deployment path and
+TLS setup. Serve unknown paths with HTTP 404 rather than an SPA homepage fallback.
+
+```nginx
+server {
+    listen 80;
+    server_name explorer.example.com;
+    root /var/www/explorer;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+        add_header Cache-Control "public, max-age=0, must-revalidate";
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
+        add_header Cache-Control "no-cache";
+    }
+}
+```
+
+Enable Cloudflare proxying for the domain and configure origin HTTPS with
+Full (strict) TLS. Hashed `/assets/` files can be cached for a year. HTML and
+release JSON need short caching or revalidation; unversioned media also needs
+revalidation when changed. To cache HTML/JSON at the edge, create a Cache Rule
+making them eligible with an explicit edge TTL. Cloudflare Free has a
+[minimum explicit edge TTL of two hours](https://developers.cloudflare.com/cache/how-to/edge-browser-cache-ttl/#edge-cache-ttl).
+Use that minimum for HTML/JSON and keep browser caching set to respect origin
+headers. Purge changed URLs after deploying when you need immediate updates,
+including `/`, `/index.html` and the generated release JSON URLs under
+`/__tsr/staticServerFnCache/`. DNS, TLS, web-server configuration,
+Cloudflare rules and cache purges are manual; the script only builds and syncs.
+
+See TanStack's [static prerendering guide](https://tanstack.com/start/latest/docs/framework/react/guide/static-prerendering)
+and [static server functions guide](https://tanstack.com/start/latest/docs/framework/react/guide/static-server-functions).
 
 ## Deployment verification
 
-For both the preview and production deployment:
+For a local static preview and the production deployment:
 
 - Confirm HTTP 200 and the Explorer headline, highlights and download links in
   raw HTML before JavaScript runs. The initial hero action is generic.
@@ -142,6 +184,11 @@ For both the preview and production deployment:
 - Compare the layout at desktop, tablet and phone widths; confirm no horizontal
   overflow, readable screenshot captions and visible keyboard focus.
 - Request an unknown path and confirm HTTP 404.
-- Check build logs for the website base directory, Bun version, frozen dependency
-  installation, successful checks, and the generated serverless function.
-- Record the deployed URLs and commit after those checks pass.
+- Serve only `dist/client/` when testing locally; Vite's SSR preview can hide
+  missing static output. Confirm the release JSON and media requests succeed and
+  that navigation makes no `/_serverFn` requests.
+- Run `bash tests/deploy.test.sh` to check destination validation, build failures,
+  quoting, dry-run arguments and transfer failures using temporary command stubs.
+  These checks do not contact a VPS and also run in CI.
+- Check build logs for successful homepage prerendering, then record the deployed
+  URL and commit after those checks pass.
