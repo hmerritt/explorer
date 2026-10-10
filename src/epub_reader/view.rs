@@ -45,7 +45,7 @@ const WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
 };
 const PAGE_CACHE_SIZE: usize = 8;
 
-pub(crate) fn open_epub_window(path: PathBuf, cx: &mut App) {
+pub(crate) fn open_epub_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
     state::initialize(cx);
     let displays = cx
         .displays()
@@ -64,7 +64,7 @@ pub(crate) fn open_epub_window(path: PathBuf, cx: &mut App) {
         "{} — Explorer",
         path.file_name().unwrap_or_default().to_string_lossy()
     );
-    if let Err(error) = cx.open_window(
+    cx.open_window(
         WindowOptions {
             window_bounds: Some(bounds),
             window_min_size: Some(size(px(360.0), px(240.0))),
@@ -85,9 +85,10 @@ pub(crate) fn open_epub_window(path: PathBuf, cx: &mut App) {
             ..Default::default()
         },
         move |window, cx| cx.new(|cx| Reader::new(path, title, window, cx)),
-    ) {
-        eprintln!("Could not open EPUB reader window: {error}");
-    }
+    )
+    .map_err(|error| format!("Could not open EPUB reader window: {error}"))?;
+    cx.activate(true);
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]

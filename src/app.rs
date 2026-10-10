@@ -615,7 +615,9 @@ fn handle_initial_launch(request: LaunchRequest, cx: &mut App) {
 
 fn handle_launch_request(request: LaunchRequest, cx: &mut App) {
     if let Some(path) = request.epub_path {
-        crate::epub_reader::open_epub_window(path, cx);
+        if let Err(error) = crate::epub_reader::open_epub_window(path, cx) {
+            eprintln!("{error}");
+        }
     } else if let Some(path) = request.image_path {
         crate::image_viewer::open_image_window(path, cx);
     } else {

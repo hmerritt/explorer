@@ -37,14 +37,46 @@ impl OpenWithOutcome {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacOpenAction {
+    Finished(OpenWithOutcome),
+    ChooseApplication,
+    OpenEpub { default_app_may_have_changed: bool },
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_should_open_epub_internally(path: &Path, bundle_id: Option<&str>) -> bool {
+    bundle_id == Some(crate::settings::APP_ID) && crate::epub_reader::epub_existing_file(path)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn complete_mac_open_action(
+    path: &Path,
+    action: MacOpenAction,
+    cx: &mut gpui::App,
+) -> io::Result<OpenWithOutcome> {
+    match action {
+        MacOpenAction::Finished(outcome) => Ok(outcome),
+        MacOpenAction::OpenEpub {
+            default_app_may_have_changed,
+        } => {
+            crate::epub_reader::open_epub_window(path.to_path_buf(), cx)
+                .map_err(io::Error::other)?;
+            Ok(OpenWithOutcome::opened(default_app_may_have_changed))
+        }
+        MacOpenAction::ChooseApplication => Err(io::Error::other("no application was selected")),
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DefaultOpenStep {
     Opened(OpenWithOutcome),
     ChooseApplication,
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "windows", test))]
 #[derive(Debug)]
 enum DefaultOpenDispatch {
     Completed(Vec<(PathBuf, io::Result<OpenWithOutcome>)>),
@@ -179,6 +211,61 @@ pub(super) async fn change_default_application_for_file(
 }
 
 impl ExplorerView {
+    #[cfg(any(target_os = "macos", test))]
+    fn open_files_with_mac_dispatch<O, C, F>(
+        &mut self,
+        paths: Vec<PathBuf>,
+        mut open_path: O,
+        mut choose_application: C,
+        cx: &mut Context<Self>,
+    ) where
+        O: FnMut(&Path) -> io::Result<MacOpenAction> + Send + 'static,
+        C: FnMut(PathBuf) -> F + 'static,
+        F: std::future::Future<Output = io::Result<MacOpenAction>> + 'static,
+    {
+        if paths.is_empty() || self.open_with_task.is_some() {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            let mut results = Vec::new();
+            for path in paths {
+                // Resolve associations and launch external apps off the UI thread.
+                // Return the opener so ordered batches can use the same dispatcher.
+                let (opener, path, action) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let action = open_path(&path);
+                        (open_path, path, action)
+                    })
+                    .await;
+                open_path = opener;
+                let action = match action {
+                    Ok(MacOpenAction::ChooseApplication) => choose_application(path.clone()).await,
+                    action => action,
+                };
+                let result = action.and_then(|action| {
+                    cx.update(|cx| complete_mac_open_action(&path, action, cx))
+                        .map_err(io::Error::other)?
+                });
+                let completed = result.as_ref().is_ok_and(|outcome| outcome.is_opened());
+                results.push((path, result));
+                if !completed {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.open_with_task = None;
+                for (path, result) in results {
+                    if explorer.handle_open_with_result(&path, result) {
+                        refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.open_with_task = Some(task);
+    }
+
     pub(super) fn open_file_with_default_app(
         &mut self,
         path: &Path,
@@ -389,81 +476,25 @@ impl ExplorerView {
             let _ = window;
             match &intent {
                 OpenFileIntent::Default => {
-                    let task = cx.spawn(async move |this, cx| {
-                        let mut pending_paths = paths;
-                        let mut results = Vec::new();
-                        loop {
-                            let dispatch = cx
-                                .background_executor()
-                                .spawn(async move { mac_default_open_dispatch(pending_paths) })
-                                .await;
-                            match dispatch {
-                                DefaultOpenDispatch::Completed(batch) => {
-                                    results.extend(batch);
-                                    break;
-                                }
-                                DefaultOpenDispatch::ChooseApplication {
-                                    path,
-                                    completed,
-                                    remaining,
-                                } => {
-                                    results.extend(completed);
-                                    let result = mac_choose_application_and_open(&path).await;
-                                    let completed =
-                                        result.as_ref().is_ok_and(|outcome| outcome.is_opened());
-                                    results.push((path, result));
-                                    if !completed || remaining.is_empty() {
-                                        break;
-                                    }
-                                    pending_paths = remaining;
-                                }
-                            }
-                        }
-
-                        let _ = this.update(cx, |explorer, cx| {
-                            explorer.open_with_task = None;
-                            for (path, result) in results {
-                                if explorer.handle_open_with_result(&path, result) {
-                                    refresh_file_type_icons_after_default_app_may_have_changed(
-                                        &path, cx,
-                                    );
-                                }
-                            }
-                            cx.notify();
-                        });
-                    });
-                    self.open_with_task = Some(task);
+                    self.open_files_with_mac_dispatch(
+                        paths,
+                        mac_open_default_file,
+                        |path| async move { mac_choose_application_and_open(&path).await },
+                        cx,
+                    );
                 }
                 OpenFileIntent::ChooseApplication => {
-                    let task = cx.spawn(async move |this, cx| {
-                        let mut results = Vec::new();
-                        for path in paths {
-                            let result = mac_choose_application_and_open(&path).await;
-                            let completed =
-                                result.as_ref().is_ok_and(|outcome| outcome.is_opened());
-                            results.push((path, result));
-                            if !completed {
-                                break;
-                            }
-                        }
-
-                        let _ = this.update(cx, |explorer, cx| {
-                            explorer.open_with_task = None;
-                            for (path, result) in results {
-                                if explorer.handle_open_with_result(&path, result) {
-                                    refresh_file_type_icons_after_default_app_may_have_changed(
-                                        &path, cx,
-                                    );
-                                }
-                            }
-                            cx.notify();
-                        });
-                    });
-                    self.open_with_task = Some(task);
+                    self.open_files_with_mac_dispatch(
+                        paths,
+                        |_| Ok(MacOpenAction::ChooseApplication),
+                        |path| async move { mac_choose_application_and_open(&path).await },
+                        cx,
+                    );
                 }
                 OpenFileIntent::SpecificApplication(application) => {
                     for path in paths {
-                        let result = mac_open_with_application(&path, application);
+                        let result = mac_open_with_application(&path, application, false)
+                            .and_then(|action| complete_mac_open_action(&path, action, cx));
                         let completed = result.as_ref().is_ok_and(|outcome| outcome.is_opened());
                         if self.handle_open_with_result(&path, result) {
                             refresh_file_type_icons_after_default_app_may_have_changed(&path, cx);
@@ -525,7 +556,7 @@ fn open_paths_until_not_opened(
     results
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "windows", test))]
 fn default_open_dispatch_until_picker(
     paths: Vec<PathBuf>,
     mut open_path: impl FnMut(&Path) -> io::Result<DefaultOpenStep>,
@@ -1267,30 +1298,31 @@ async fn mac_change_default_application_for_file(
 }
 
 #[cfg(target_os = "macos")]
-fn mac_default_open_dispatch(paths: Vec<PathBuf>) -> DefaultOpenDispatch {
-    default_open_dispatch_until_picker(paths, mac_open_default_file)
-}
-
-#[cfg(target_os = "macos")]
-fn mac_open_default_file(path: &Path) -> io::Result<DefaultOpenStep> {
-    if mac_is_application_bundle(path) || mac_has_default_application(path) {
-        open::that_detached(path).map(|_| DefaultOpenStep::Opened(OpenWithOutcome::opened(false)))
-    } else {
-        Ok(DefaultOpenStep::ChooseApplication)
+fn mac_open_default_file(path: &Path) -> io::Result<MacOpenAction> {
+    if !mac_is_application_bundle(path) {
+        let Some(application) = mac_default_application_path(path) else {
+            return Ok(MacOpenAction::ChooseApplication);
+        };
+        if mac_should_open_epub_internally(path, mac_application_bundle_id(&application).as_deref())
+        {
+            return Ok(MacOpenAction::OpenEpub {
+                default_app_may_have_changed: false,
+            });
+        }
     }
+    open::that_detached(path).map(|_| MacOpenAction::Finished(OpenWithOutcome::opened(false)))
 }
 
 #[cfg(target_os = "macos")]
-async fn mac_choose_application_and_open(path: &Path) -> io::Result<OpenWithOutcome> {
+async fn mac_choose_application_and_open(path: &Path) -> io::Result<MacOpenAction> {
     let Some(selection) = mac_choose_application(MacApplicationPickerOptions::open_with()).await?
     else {
-        return Ok(OpenWithOutcome::Cancelled);
+        return Ok(MacOpenAction::Finished(OpenWithOutcome::Cancelled));
     };
     if selection.always_open_with {
         mac_set_default_application_for_file_type(path, &selection.application)?;
     }
-    mac_open_with_application(path, &selection.application)?;
-    Ok(OpenWithOutcome::opened(selection.always_open_with))
+    mac_open_with_application(path, &selection.application, selection.always_open_with)
 }
 
 #[cfg(target_os = "macos")]
@@ -1368,7 +1400,16 @@ unsafe fn mac_content_type_for_file(path: &Path) -> io::Result<cocoa::base::id> 
 }
 
 #[cfg(target_os = "macos")]
-fn mac_open_with_application(path: &Path, application: &Path) -> io::Result<OpenWithOutcome> {
+fn mac_open_with_application(
+    path: &Path,
+    application: &Path,
+    default_app_may_have_changed: bool,
+) -> io::Result<MacOpenAction> {
+    if mac_should_open_epub_internally(path, mac_application_bundle_id(application).as_deref()) {
+        return Ok(MacOpenAction::OpenEpub {
+            default_app_may_have_changed,
+        });
+    }
     use cocoa::{
         base::{id, nil},
         foundation::NSArray,
@@ -1396,7 +1437,9 @@ fn mac_open_with_application(path: &Path, application: &Path) -> io::Result<Open
                 configuration: configuration
                 completionHandler: nil
             ];
-            Ok(OpenWithOutcome::opened(false))
+            Ok(MacOpenAction::Finished(OpenWithOutcome::opened(
+                default_app_may_have_changed,
+            )))
         })();
         let _: () = msg_send![pool, drain];
         result
@@ -1413,50 +1456,66 @@ fn mac_is_application_bundle(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn mac_has_default_application(path: &Path) -> bool {
+fn mac_application_bundle_id(application: &Path) -> Option<String> {
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send, sel, sel_impl};
+    use std::ffi::CStr;
+
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+        let bundle_id = (|| {
+            let url = mac_file_url(application)?;
+            let bundle: id = msg_send![class!(NSBundle), bundleWithURL: url];
+            if bundle == nil {
+                return None;
+            }
+            let identifier: id = msg_send![bundle, bundleIdentifier];
+            if identifier == nil {
+                return None;
+            }
+            let bytes: *const std::os::raw::c_char = msg_send![identifier, UTF8String];
+            if bytes.is_null() {
+                return None;
+            }
+            CStr::from_ptr(bytes).to_str().ok().map(str::to_owned)
+        })();
+        let _: () = msg_send![pool, drain];
+        bundle_id
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_default_application_path(path: &Path) -> Option<PathBuf> {
     use cocoa::base::{id, nil};
     use objc::{class, msg_send, sel, sel_impl};
 
     unsafe {
         let pool: id = msg_send![class!(NSAutoreleasePool), new];
-        let has_default = mac_file_url(path).is_some_and(|url| {
+        let application = mac_file_url(path).and_then(|url| {
             let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+            if workspace == nil {
+                return None;
+            }
             let application: id = msg_send![workspace, URLForApplicationToOpenURL: url];
-            application != nil
+            mac_path_from_url(application)
         });
         let _: () = msg_send![pool, drain];
-        has_default
+        application
     }
 }
 
 #[cfg(target_os = "macos")]
 fn mac_default_application_for_file(path: &Path) -> Option<DefaultApplication> {
-    use cocoa::base::{id, nil};
-    use objc::{class, msg_send, sel, sel_impl};
-
-    unsafe {
-        let pool: id = msg_send![class!(NSAutoreleasePool), new];
-        let default = (|| {
-            let url = mac_file_url(path)?;
-            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let application: id = msg_send![workspace, URLForApplicationToOpenURL: url];
-            if application == nil {
-                return None;
-            }
-            let path = mac_path_from_url(application)?;
-            let name = path
-                .file_stem()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-                .into_owned();
-            Some(DefaultApplication {
-                name,
-                path: Some(path),
-            })
-        })();
-        let _: () = msg_send![pool, drain];
-        default
-    }
+    let path = mac_default_application_path(path)?;
+    let name = path
+        .file_stem()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    Some(DefaultApplication {
+        name,
+        path: Some(path),
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -1696,6 +1755,234 @@ unsafe fn mac_path_from_url(url: cocoa::base::id) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use gpui::AppContext;
+
+    #[test]
+    fn mac_epub_routing_requires_explorer_bundle_id_and_existing_epub() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["café book.epub", "BOOK.EPUB"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"routed by extension").unwrap();
+            assert!(mac_should_open_epub_internally(
+                &path,
+                Some(crate::settings::APP_ID)
+            ));
+            for bundle_id in [
+                None,
+                Some("com.apple.iBooksX"),
+                Some("com.other.Explorer"),
+                Some("Explorer"),
+            ] {
+                assert!(!mac_should_open_epub_internally(&path, bundle_id));
+            }
+        }
+        let directory = dir.path().join("folder.epub");
+        std::fs::create_dir(&directory).unwrap();
+        let text = dir.path().join("book.txt");
+        std::fs::write(&text, b"text").unwrap();
+        for path in [directory, text, dir.path().join("missing.epub")] {
+            assert!(!mac_should_open_epub_internally(
+                &path,
+                Some(crate::settings::APP_ID)
+            ));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_application_identity_uses_bundle_metadata_not_app_name() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bundle_id) in [
+            ("Renamed reader.app", crate::settings::APP_ID),
+            ("Explorer.app", "com.other.Explorer"),
+        ] {
+            let app = dir.path().join(name);
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            std::fs::write(app.join("Contents/Info.plist"), format!(
+                r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>{bundle_id}</string><key>CFBundleName</key><string>Explorer</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#
+            )).unwrap();
+            assert_eq!(mac_application_bundle_id(&app).as_deref(), Some(bundle_id));
+        }
+        assert_eq!(
+            mac_application_bundle_id(&dir.path().join("missing.app")),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn mac_default_epub_dispatch_keeps_browser_and_opens_ordered_batch_when_focus_configured(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::settings::{ExplorerSettings, NewWindowBehaviour, SettingsState};
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths =
+            ["café book.epub", "external.txt", "BOOK.EPUB"].map(|name| dir.path().join(name));
+        for path in [&paths[0], &paths[2]] {
+            crate::explorer::epub_hover_preview::test_support::write_epub(path, "3.0", None, None);
+        }
+        std::fs::write(&paths[1], b"external file").unwrap();
+        let mut settings = ExplorerSettings::default();
+        settings.app.new_window_behaviour = NewWindowBehaviour::Focus;
+        cx.update(|cx| cx.set_global(SettingsState::for_test(settings)));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(dir.path().to_path_buf(), focus_handle)
+        });
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        view.update(cx, |view, cx| {
+            let attempted = attempted.clone();
+            view.open_files_with_mac_dispatch(
+                paths.to_vec(),
+                move |path| {
+                    attempted.lock().unwrap().push(path.to_path_buf());
+                    Ok(
+                        if mac_should_open_epub_internally(path, Some(crate::settings::APP_ID)) {
+                            MacOpenAction::OpenEpub {
+                                default_app_may_have_changed: false,
+                            }
+                        } else {
+                            MacOpenAction::Finished(OpenWithOutcome::opened(false))
+                        },
+                    )
+                },
+                |_| async { panic!("default application is already known") },
+                cx,
+            );
+            assert!(view.open_with_task.is_some());
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 3, "browser plus two reader windows");
+        assert_eq!(*attempted.lock().unwrap(), paths);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_with_task.is_none());
+            assert!(view.operation_notice.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn mac_picker_epub_action_preserves_association_change(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        crate::explorer::epub_hover_preview::test_support::write_epub(&path, "3.0", None, None);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(dir.path().to_path_buf(), focus_handle)
+        });
+        cx.update(|_, cx| crate::explorer::initialize_native_icon_cache(cx));
+        view.update(cx, |view, cx| {
+            view.set_error_notice("old error");
+            view.open_files_with_mac_dispatch(
+                vec![path],
+                |_| Ok(MacOpenAction::ChooseApplication),
+                |_| async {
+                    Ok(MacOpenAction::OpenEpub {
+                        default_app_may_have_changed: true,
+                    })
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 2);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_with_task.is_none());
+            assert!(view.operation_notice.is_none());
+        });
+        let outcome = cx
+            .update(|_, cx| {
+                complete_mac_open_action(
+                    &dir.path().join("book.epub"),
+                    MacOpenAction::OpenEpub {
+                        default_app_may_have_changed: true,
+                    },
+                    cx,
+                )
+            })
+            .unwrap();
+        assert_eq!(outcome, OpenWithOutcome::opened(true));
+    }
+
+    #[gpui::test]
+    fn mac_picker_cancellation_stops_batch_and_keeps_existing_error(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("."), focus_handle)
+        });
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        view.update(cx, |view, cx| {
+            view.set_error_notice("old error");
+            let attempted = attempted.clone();
+            view.open_files_with_mac_dispatch(
+                vec![PathBuf::from("first.epub"), PathBuf::from("second.epub")],
+                move |path| {
+                    attempted.lock().unwrap().push(path.to_path_buf());
+                    Ok(MacOpenAction::ChooseApplication)
+                },
+                |_| async { Ok(MacOpenAction::Finished(OpenWithOutcome::Cancelled)) },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *attempted.lock().unwrap(),
+            vec![PathBuf::from("first.epub")]
+        );
+        assert_eq!(cx.windows().len(), 1);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_with_task.is_none());
+            assert_eq!(view.operation_notice.as_ref().unwrap().text, "old error");
+        });
+    }
+
+    #[gpui::test]
+    fn mac_dispatch_error_stops_batch_and_reports_notice(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("."), focus_handle)
+        });
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        view.update(cx, |view, cx| {
+            let attempted = attempted.clone();
+            view.open_files_with_mac_dispatch(
+                ["first.epub", "denied.epub", "last.epub"]
+                    .map(PathBuf::from)
+                    .to_vec(),
+                move |path| {
+                    attempted.lock().unwrap().push(path.to_path_buf());
+                    if path == Path::new("denied.epub") {
+                        Err(io::Error::other(
+                            "Could not open EPUB reader window: denied",
+                        ))
+                    } else {
+                        Ok(MacOpenAction::Finished(OpenWithOutcome::opened(false)))
+                    }
+                },
+                |_| async { panic!("no picker expected") },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *attempted.lock().unwrap(),
+            ["first.epub", "denied.epub"].map(PathBuf::from)
+        );
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_with_task.is_none());
+            let notice = &view.operation_notice.as_ref().unwrap().text;
+            assert!(notice.contains("denied.epub"), "{notice}");
+            assert!(
+                notice.contains("Could not open EPUB reader window: denied"),
+                "{notice}"
+            );
+        });
+    }
 
     impl ExplorerView {
         fn open_files_with_default_app_using_launcher_for_test(
