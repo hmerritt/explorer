@@ -40,7 +40,6 @@ export function AnimatedSectionNavigator({
     const desktop = window.matchMedia(
       '(min-width: 1024px) and (pointer: fine) and (hover: hover)',
     )
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
     let geometry: { section: SectionMeasurement; index: number }[] = []
     let documentHeight = 0
     let width = 0
@@ -98,8 +97,8 @@ export function AnimatedSectionNavigator({
         height,
         scrollY: window.scrollY,
       })
-      nav.dataset.mode = reduced.matches ? 'static' : 'animated'
-      rail.dataset.mode = reduced.matches ? 'static' : 'animated'
+      nav.dataset.mode = 'animated'
+      rail.dataset.mode = 'animated'
       layout.labels.forEach((label, position) => {
         const index = geometry[position].index
         const link = links[index]
@@ -107,41 +106,34 @@ export function AnimatedSectionNavigator({
           link.setAttribute('aria-current', 'location')
         else link.removeAttribute('aria-current')
         groups[index].dataset.phase = label.phase
-        if (!reduced.matches) {
-          letters[index].forEach((element, letterIndex) => {
-            const pose = label.letters[letterIndex]
-            element.style.transform = `translate3d(${pose.x}px, ${pose.y}px, 0) translate(-50%, -50%) rotate(${pose.rotation}deg) scale(${pose.scale})`
-            element.style.color = `color-mix(in srgb, #000 ${pose.ink * 100}%, var(--paper))`
-          })
-          const { left, right, top, bottom } = label.bounds
-          link.style.left = `${left}px`
-          link.style.top = `${top}px`
-          link.style.width = `${right - left}px`
-          link.style.height = `${bottom - top}px`
-        }
+        letters[index].forEach((element, letterIndex) => {
+          const pose = label.letters[letterIndex]
+          element.style.transform = `translate3d(${pose.x}px, ${pose.y}px, 0) translate(-50%, -50%) rotate(${pose.rotation}deg) scale(${pose.scale})`
+          element.style.color = `color-mix(in srgb, #000 ${pose.ink * 100}%, var(--paper))`
+        })
+        const { left, right, top, bottom } = label.bounds
+        link.style.left = `${left}px`
+        link.style.top = `${top}px`
+        link.style.width = `${right - left}px`
+        link.style.height = `${bottom - top}px`
       })
       topPool.style.height = `${TRACKER.header + TRACKER.topPad + (layout.activeIndex + 1) * TRACKER.slot + TRACKER.currentGap + TRACKER.heading + 64}px`
-      bottomPool.style.height = `${(reduced.matches ? sections.length : layout.queued) * TRACKER.slot + TRACKER.bottomPad + 64}px`
-      bottomPool.style.opacity = String(
-        reduced.matches ? 1 : clamp(layout.queued),
-      )
+      bottomPool.style.height = `${layout.queued * TRACKER.slot + TRACKER.bottomPad + 64}px`
+      bottomPool.style.opacity = String(clamp(layout.queued))
       const progress = layout.ruler
       tickTrack.style.transform = `translate3d(0, ${progress.tickOffset}px, 0)`
       tickLabels.forEach((element, index) => {
         const y = (documentHeight * index * 5) / 100 + progress.tickOffset
         let opacity = 0.5
-        if (!reduced.matches) {
-          layout.labels.forEach((label) => {
-            const distance = Math.max(
-              label.bounds.top - y,
-              y - label.bounds.bottom,
-              0,
-            )
-            if (distance < 24)
-              opacity *=
-                1 - label.detach * (1 - label.flip) * (1 - distance / 24)
-          })
-        }
+        layout.labels.forEach((label) => {
+          const distance = Math.max(
+            label.bounds.top - y,
+            y - label.bounds.bottom,
+            0,
+          )
+          if (distance < 24)
+            opacity *= 1 - label.detach * (1 - label.flip) * (1 - distance / 24)
+        })
         element.style.opacity = String(opacity)
       })
       needle.style.transform = `translate3d(0, ${progress.needle}px, 0)`
@@ -168,7 +160,6 @@ export function AnimatedSectionNavigator({
     window.addEventListener('scroll', schedule, { passive: true })
     window.addEventListener('resize', refresh)
     desktop.addEventListener('change', refresh)
-    reduced.addEventListener('change', refresh)
     document.fonts.ready
       .then(() => {
         if (!disposed) refresh()
@@ -183,7 +174,6 @@ export function AnimatedSectionNavigator({
       window.removeEventListener('scroll', schedule)
       window.removeEventListener('resize', refresh)
       desktop.removeEventListener('change', refresh)
-      reduced.removeEventListener('change', refresh)
       document.fonts.removeEventListener('loadingdone', refresh)
     }
   }, [sections])

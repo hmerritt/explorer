@@ -1128,13 +1128,3 @@ pre {
     padding-inline: 20px;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  :root {
-    scroll-behavior: auto;
-  }
-  *,
-  *::before,
-  *::after {
-    transition: none !important;
-  }
-}
