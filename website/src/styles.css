@@ -1038,6 +1038,9 @@ pre {
     padding-inline: 24px;
     font-size: 10px;
   }
+  .footer-tagline {
+    display: none;
+  }
 }
 @media (max-width: 639px) {
   h1,

@@ -295,7 +295,7 @@ export function Footer() {
         ))}
       </div>
       <div className="footer-bottom label">
-        <span>Explorer · Free and open source</span>
+        <span className="footer-tagline">Explorer · Free and open source</span>
         <a href="https://mrrtt.me">
           <span>Made with ❤️ by Harry Merritt</span>
         </a>
