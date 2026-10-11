@@ -89,8 +89,8 @@ use crate::explorer::{
     image_preview::AnimatedImageSource,
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
     large_icons::{
-        LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_text_width,
-        large_icon_max_tile_height,
+        LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_lines,
+        large_icon_filename_text_width, large_icon_max_tile_height,
     },
     mouse_selection::{
         details_name_item_hit_right, local_point, selection_box_bounds, viewport_size,
@@ -2967,7 +2967,7 @@ impl ExplorerView {
         &mut self,
         ix: usize,
         tile_height: f32,
-        _window: &Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entry = self.entries[ix].clone();
@@ -2997,6 +2997,7 @@ impl ExplorerView {
                 self.show_file_name_extensions,
                 &self.font,
                 name_click_entry,
+                window,
                 cx,
             )
         };
@@ -3097,7 +3098,7 @@ impl ExplorerView {
                     &self.entries,
                     self.show_file_name_extensions,
                     &self.font,
-                    cx,
+                    window.text_system(),
                 );
                 LargeIconLayout::from_measured_heights(heights, viewport_width)
             };
@@ -7637,9 +7638,17 @@ fn large_icon_filename(
     show_file_name_extensions: bool,
     font: &gpui::Font,
     name_click_entry: FileEntry,
+    window: &Window,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
+    let lines = large_icon_filename_lines(
+        entry.display_name_with_extensions(show_file_name_extensions),
+        font,
+        window.text_system(),
+    );
     let name = div()
+        .flex()
+        .flex_col()
         .w(px(large_icon_filename_text_width()))
         .max_h(px(LARGE_ICON_TEXT_LINE_HEIGHT * LARGE_ICON_TEXT_ROWS as f32))
         .overflow_hidden()
@@ -7647,14 +7656,14 @@ fn large_icon_filename(
         .text_size(px(LARGE_ICON_TEXT_SIZE))
         .line_height(px(LARGE_ICON_TEXT_LINE_HEIGHT))
         .font(font.clone())
-        .word_break_keep_all()
-        .text_ellipsis()
-        .line_clamp(LARGE_ICON_TEXT_ROWS)
-        .child(
-            entry
-                .display_name_with_extensions(show_file_name_extensions)
-                .to_owned(),
-        )
+        .children(lines.into_iter().map(|line| {
+            div()
+                .w_full()
+                .h(px(LARGE_ICON_TEXT_LINE_HEIGHT))
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .child(line)
+        }))
         .id(("explorer-large-icon-name", ix));
 
     add_entry_primary_click(name, name_click_entry, EntryClickTarget::Name, cx).into_any_element()

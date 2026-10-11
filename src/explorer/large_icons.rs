@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use gpui::{App, Font, LineFragment, WordBreak, px};
+use gpui::{Font, TextRun, WindowTextSystem, px, rgb};
 
 use crate::explorer::{
     constants::{
@@ -49,7 +49,7 @@ impl LargeIconFilenameCache {
         entries: &[FileEntry],
         extensions: bool,
         font: &Font,
-        cx: &App,
+        text_system: &WindowTextSystem,
     ) -> Rc<[f32]> {
         if self.font.as_ref() != Some(font) {
             self.heights.clear();
@@ -69,9 +69,6 @@ impl LargeIconFilenameCache {
         if heights.iter().all(|height| height.is_finite()) {
             return heights.into();
         }
-        let mut wrapper = cx
-            .text_system()
-            .line_wrapper(font.clone(), px(LARGE_ICON_TEXT_SIZE));
         for (entry, height) in entries.iter().zip(&mut heights) {
             if height.is_finite() {
                 continue;
@@ -82,16 +79,7 @@ impl LargeIconFilenameCache {
                 *height = cached;
                 continue;
             }
-            let fragments = [LineFragment::text(text)];
-            let rows = wrapper
-                .wrap_line_with_word_break(
-                    &fragments,
-                    px(large_icon_filename_text_width()),
-                    WordBreak::KeepAll,
-                )
-                .take(LARGE_ICON_TEXT_ROWS - 1)
-                .count()
-                + 1;
+            let rows = large_icon_filename_lines(text, font, text_system).len();
             *height = large_icon_tile_height_for_rows(rows);
             #[cfg(test)]
             {
@@ -341,30 +329,81 @@ pub(super) fn large_icon_tile_height_for_rows(rows: usize) -> f32 {
         + LARGE_ICON_TEXT_BOTTOM_PADDING
 }
 
-#[cfg(test)]
-fn large_icon_tile_height_for_text(text: &str, font: &Font, cx: &App) -> f32 {
-    large_icon_tile_height_for_rows(large_icon_text_row_count(text, font, cx))
+/// Lay out each displayed row separately: GPUI's multiline truncation budgets
+/// the unwrapped text width, which can leave an overflowing final wrapped row.
+pub(super) fn large_icon_filename_lines(
+    text: &str,
+    font: &Font,
+    text_system: &WindowTextSystem,
+) -> Vec<String> {
+    layout_filename_lines(text, large_icon_filename_text_width(), |line| {
+        let run = TextRun {
+            len: line.len(),
+            font: font.clone(),
+            color: rgb(0).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        f32::from(
+            text_system
+                .layout_line(line, px(LARGE_ICON_TEXT_SIZE), &[run], None)
+                .width
+                .ceil(),
+        )
+    })
 }
 
-#[cfg(test)]
-fn large_icon_text_row_count(text: &str, font: &Font, cx: &App) -> usize {
-    if text.is_empty() {
-        return 1;
+fn layout_filename_lines(
+    text: &str,
+    width: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    // Newlines are legal in Unix filenames, but must not create extra visual rows.
+    let text = text.replace(['\r', '\n'], " ");
+    let mut remaining = text.as_str();
+    let mut lines = Vec::with_capacity(LARGE_ICON_TEXT_ROWS);
+    loop {
+        // Most names fit outright; avoid shaping every prefix in that case.
+        if measure(remaining) <= width {
+            lines.push(remaining.to_owned());
+            break;
+        }
+        let mut end = 0;
+        for (ix, ch) in remaining.char_indices() {
+            let next = ix + ch.len_utf8();
+            if measure(&remaining[..next]) > width {
+                break;
+            }
+            end = next;
+        }
+        if lines.len() == LARGE_ICON_TEXT_ROWS - 1 || end == 0 {
+            // Measure the suffix together with its prefix, including kerning.
+            let mut last = "…".to_owned();
+            for (ix, ch) in remaining[..end].char_indices() {
+                let candidate = format!("{}…", remaining[..ix + ch.len_utf8()].trim_end());
+                if measure(&candidate) > width {
+                    break;
+                }
+                last = candidate;
+            }
+            lines.push(last);
+            break;
+        }
+        // Keep punctuation within tokens, breaking oversized tokens only when
+        // no whitespace boundary fits. Whitespace at a wrap is not displayed.
+        if !remaining[end..].starts_with(char::is_whitespace)
+            && let Some((ix, _)) = remaining[..end]
+                .char_indices()
+                .rev()
+                .find(|(ix, ch)| *ix > 0 && ch.is_whitespace())
+        {
+            end = ix;
+        }
+        lines.push(remaining[..end].trim_end().to_owned());
+        remaining = remaining[end..].trim_start();
     }
-
-    let mut line_wrapper = cx
-        .text_system()
-        .line_wrapper(font.clone(), px(LARGE_ICON_TEXT_SIZE));
-    let fragments = [LineFragment::text(text)];
-    (line_wrapper
-        .wrap_line_with_word_break(
-            &fragments,
-            px(large_icon_filename_text_width()),
-            WordBreak::KeepAll,
-        )
-        .count()
-        + 1)
-    .clamp(1, LARGE_ICON_TEXT_ROWS)
+    lines
 }
 
 fn large_icon_column_gap(viewport_width: f32, columns: usize) -> f32 {
@@ -400,6 +439,108 @@ fn large_icon_rows_from_tile_heights(
 mod tests {
     use super::*;
 
+    fn monospace_lines(text: &str, width: usize) -> Vec<String> {
+        layout_filename_lines(text, width as f32, |line| line.chars().count() as f32)
+    }
+
+    #[test]
+    fn long_spaced_filename_ellipsizes_the_third_row() {
+        let lines = monospace_lines(
+            "M. R. James - A Warning to the Curious and other Ghost Stories",
+            15,
+        );
+        assert_eq!(
+            lines,
+            [
+                "M. R. James - A",
+                "Warning to the",
+                "Curious and ot\u{2026}"
+            ]
+        );
+        assert!(lines.iter().all(|line| line.chars().count() <= 15));
+    }
+
+    #[test]
+    fn fitting_names_keep_all_text_without_an_ellipsis() {
+        for (text, expected) in [
+            ("", vec![""]),
+            ("abcde", vec!["abcde"]),
+            ("abcde fghij", vec!["abcde", "fghij"]),
+            ("abcde fghij klmno", vec!["abcde", "fghij", "klmno"]),
+            ("abcdefghijklmno", vec!["abcde", "fghij", "klmno"]),
+            ("a (1944).mkv z", vec!["a", "(1944).mkv", "z"]),
+        ] {
+            let width = if text.contains("1944") { 10 } else { 5 };
+            assert_eq!(monospace_lines(text, width), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn oversized_unicode_tokens_fit_and_keep_character_boundaries() {
+        let text = "\u{6587}\u{4ef6}\u{1f642}".repeat(12);
+        let lines = monospace_lines(&text, 5);
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.chars().count() <= 5));
+        assert!(lines[2].ends_with('\u{2026}'));
+        assert_eq!(lines[0], text.chars().take(5).collect::<String>());
+    }
+
+    #[test]
+    fn suffix_is_measured_together_with_the_final_prefix() {
+        let measure = |line: &str| {
+            line.chars()
+                .map(|ch| if ch == '\u{2026}' { 3.0 } else { 1.0 })
+                .sum::<f32>()
+        };
+        let lines = layout_filename_lines("abcdefghijklmnop", 5.0, measure);
+        assert_eq!(lines, ["abcde", "fghij", "kl\u{2026}"]);
+        assert!(lines.iter().all(|line| measure(line) <= 5.0));
+    }
+
+    #[test]
+    fn filename_newlines_do_not_bypass_the_row_limit() {
+        assert_eq!(
+            monospace_lines("abc\ndef\nghi\njkl", 5),
+            ["abc", "def", "ghi\u{2026}"]
+        );
+    }
+
+    #[gpui::test]
+    fn displayed_rows_fit_the_shaped_label_width(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| FilenameTestView);
+        cx.update(|window, _| {
+            let font = test_font(".SystemUIFont");
+            for name in [
+                "M. R. James - A Warning to the Curious and other Ghost Stories".to_owned(),
+                "abcdefghij".repeat(20),
+                "\u{6587}\u{4ef6}\u{1f642}".repeat(30),
+                "a (1944).mkv brackets-and-punctuation.txt ".repeat(5),
+            ] {
+                let lines = large_icon_filename_lines(&name, &font, window.text_system());
+                assert_eq!(lines.len(), LARGE_ICON_TEXT_ROWS);
+                assert!(lines.last().unwrap().ends_with('\u{2026}'));
+                for line in lines {
+                    let run = TextRun {
+                        len: line.len(),
+                        font: font.clone(),
+                        color: rgb(0).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let width = window
+                        .text_system()
+                        .layout_line(&line, px(LARGE_ICON_TEXT_SIZE), &[run], None)
+                        .width;
+                    assert!(
+                        f32::from(width.ceil()) <= large_icon_filename_text_width(),
+                        "{line}: {width:?}"
+                    );
+                }
+            }
+        });
+    }
+
     #[test]
     fn cloned_layout_shares_geometry_and_supplies_exact_row_sizes() {
         let layout = LargeIconLayout::from_tile_heights(2, 3., vec![100., 140., 120.]);
@@ -414,6 +555,18 @@ mod tests {
             ]
         );
         assert_eq!(layout.content_height(), 264.);
+    }
+
+    struct FilenameTestView;
+
+    impl gpui::Render for FilenameTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
     }
 
     fn test_font(name: &'static str) -> Font {
@@ -477,7 +630,8 @@ mod tests {
 
     #[gpui::test]
     fn filename_measurements_match_wrapping_and_reuse_names(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
+        let (_, cx) = cx.add_window_view(|_, _| FilenameTestView);
+        cx.update(|window, _| {
             let font = test_font(".SystemUIFont");
             let names = [
                 "short.txt".to_string(),
@@ -489,49 +643,58 @@ mod tests {
                 .map(|name| FileEntry::test(name, false, None, None))
                 .collect::<Vec<_>>();
             let mut cache = LargeIconFilenameCache::default();
-            let heights = cache.tile_heights(&entries, true, &font, cx);
+            let heights = cache.tile_heights(&entries, true, &font, window.text_system());
             for (entry, &height) in entries.iter().zip(heights.iter()) {
                 assert_eq!(
                     height,
-                    large_icon_tile_height_for_text(
-                        entry.display_name_with_extensions(true),
-                        &font,
-                        cx
+                    large_icon_tile_height_for_rows(
+                        large_icon_filename_lines(
+                            entry.display_name_with_extensions(true),
+                            &font,
+                            window.text_system()
+                        )
+                        .len()
                     )
                 );
             }
             assert_eq!(cache.measurements, 3);
             entries.reverse();
-            let reordered = cache.tile_heights(&entries, true, &font, cx);
+            let reordered = cache.tile_heights(&entries, true, &font, window.text_system());
             assert_eq!(
                 reordered.iter().copied().collect::<Vec<_>>(),
                 heights.iter().rev().copied().collect::<Vec<_>>()
             );
-            cache.tile_heights(&entries[..1], true, &font, cx);
-            cache.tile_heights(&entries, true, &font, cx);
+            cache.tile_heights(&entries[..1], true, &font, window.text_system());
+            cache.tile_heights(&entries, true, &font, window.text_system());
             assert_eq!(cache.measurements, 3);
-            cache.tile_heights(&entries, false, &font, cx);
+            cache.tile_heights(&entries, false, &font, window.text_system());
             assert_eq!(cache.measurements, 5); // The long name has no extension.
-            cache.tile_heights(&entries, false, &test_font("Segoe UI"), cx);
+            cache.tile_heights(
+                &entries,
+                false,
+                &test_font("Segoe UI"),
+                window.text_system(),
+            );
             assert_eq!(cache.measurements, 8);
         });
     }
 
     #[gpui::test]
     fn filename_measurement_cache_evicts_least_recently_used_names(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
+        let (_, cx) = cx.add_window_view(|_, _| FilenameTestView);
+        cx.update(|window, _| {
             let font = test_font(".SystemUIFont");
             let entries = (0..FILENAME_MEASUREMENT_CAPACITY)
                 .map(|ix| FileEntry::test(&format!("item-{ix}"), false, None, None))
                 .collect::<Vec<_>>();
             let mut cache = LargeIconFilenameCache::default();
-            let current_heights = cache.tile_heights(&entries, true, &font, cx);
-            cache.tile_heights(&entries[..1], true, &font, cx);
+            let current_heights = cache.tile_heights(&entries, true, &font, window.text_system());
+            cache.tile_heights(&entries[..1], true, &font, window.text_system());
             cache.tile_heights(
                 &[FileEntry::test("new-name", false, None, None)],
                 true,
                 &font,
-                cx,
+                window.text_system(),
             );
             assert_eq!(cache.heights.len(), FILENAME_MEASUREMENT_CAPACITY);
             assert_eq!(cache.recency.len(), FILENAME_MEASUREMENT_CAPACITY);
@@ -544,7 +707,7 @@ mod tests {
                     .all(|height| *height >= large_icon_tile_height_for_rows(1))
             );
             let before_return = cache.measurements;
-            cache.tile_heights(&entries, true, &font, cx);
+            cache.tile_heights(&entries, true, &font, window.text_system());
             assert_eq!(
                 cache.measurements,
                 before_return + 1,
