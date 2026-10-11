@@ -25,6 +25,6 @@ export function heroDownload(release: ReleaseInfo, platform: Platform | null) {
         ? installer.url
         : platform
           ? `#download-${platform}`
-          : '#get-it',
+          : '#download',
   }
 }

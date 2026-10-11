@@ -42,7 +42,7 @@ export const Route = createFileRoute('/')({
           applicationCategory: 'UtilitiesApplication',
           operatingSystem: 'macOS, Linux, Windows',
           isAccessibleForFree: true,
-          offers: { '@type': 'Offer', price: 0, url: `${HOME_URL}#get-it` },
+          offers: { '@type': 'Offer', price: 0, url: `${HOME_URL}#download` },
           sameAs: REPOSITORY,
           downloadUrl: RELEASES_URL,
           screenshot: `${SITE_URL}/images/overview.webp`,
@@ -154,7 +154,7 @@ function Hero({
             View on GitHub
           </ButtonLink>
         </div>
-        <a className="other-downloads label" href="#get-it">
+        <a className="other-downloads label" href="#download">
           Other platforms and downloads <Arrow down />
         </a>
         <p className="platform-label label">
@@ -309,8 +309,8 @@ function Downloads({
   platform: Platform | null
 }) {
   return (
-    <section id="get-it" className="frame">
-      <SectionBar number="04" label="Get Explorer" note="Free · Open source" />
+    <section id="download" className="frame">
+      <SectionBar number="04" label="Download" note="Free · Open source" />
       <div className="downloads-grid">
         {platforms.map((item, index) => {
           const assets = release.assets.filter(

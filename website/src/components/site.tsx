@@ -7,7 +7,7 @@ const sections = [
   { id: 'explorer', label: 'Explorer' },
   { id: 'highlights', label: 'Highlights' },
   { id: 'gallery', label: 'Screenshots' },
-  { id: 'get-it', label: 'Get it' },
+  { id: 'download', label: 'Download' },
   { id: 'start', label: 'Get started' },
 ]
 
@@ -94,7 +94,7 @@ export function Header() {
       <a className="header-github" href={REPOSITORY}>
         GitHub <GitHubIcon />
       </a>
-      <a className="header-download" href="#get-it">
+      <a className="header-download" href="#download">
         Download <Arrow down />
       </a>
     </header>
@@ -245,7 +245,7 @@ export function Footer() {
     {
       title: 'Explorer',
       links: [
-        ['Download', '#get-it'],
+        ['Download', '#download'],
         ['Features', '#highlights'],
         ['Screenshots', '#gallery'],
       ],

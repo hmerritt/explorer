@@ -28,7 +28,7 @@ test('detects desktop systems and keeps mobile or unknown visitors on the generi
 test('SSR and unknown systems use the generic CTA; Mac and Linux expose architecture choices', () => {
   assert.deepEqual(heroDownload(RELEASE_FALLBACK, null), {
     label: 'Download Explorer',
-    href: '#get-it',
+    href: '#download',
   })
   assert.equal(heroDownload(RELEASE_FALLBACK, 'macos').href, '#download-macos')
   assert.equal(heroDownload(RELEASE_FALLBACK, 'linux').href, '#download-linux')
