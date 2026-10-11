@@ -41,16 +41,17 @@ use crate::explorer::{
     OpenProperties, OpenSelected, OpenSelectedInNewTab, OpenSettings, PasteClipboard,
     PermanentlyDeleteSelected, PropertiesOpenNext, PropertiesOpenPrevious, RecursiveSearchEdit,
     Refresh, RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy,
-    RenameCut, RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste,
-    RenameRight, RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft,
-    RenameSelectRight, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
-    RenameWordRight, SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy,
-    SearchCut, SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste,
-    SearchRight, SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft,
-    SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft,
-    SearchWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex, SplitPaneDown,
-    SplitPaneLeft, SplitPaneRight, SplitPaneUp, TextInputRedo, TextInputUndo, TrashSelected,
-    UndoFileOperation,
+    RenameCut, RenameDelete, RenameDown, RenameEnd, RenameHome, RenameLeft, RenameLineEnd,
+    RenameLineHome, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectDown,
+    RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectLineEnd, RenameSelectLineHome,
+    RenameSelectRight, RenameSelectUp, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected,
+    RenameUp, RenameWordLeft, RenameWordRight, SearchBackspace, SearchBackspaceWord, SearchCancel,
+    SearchCommit, SearchCopy, SearchCut, SearchDelete, SearchEdit, SearchEnd, SearchHome,
+    SearchLeft, SearchPaste, SearchRight, SearchSelectAll, SearchSelectEnd, SearchSelectHome,
+    SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight,
+    SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
+    SplitPaneDown, SplitPaneLeft, SplitPaneRight, SplitPaneUp, TextInputRedo, TextInputUndo,
+    TrashSelected, UndoFileOperation,
 };
 use crate::image_viewer::{
     ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
@@ -1167,6 +1168,39 @@ fn push_windows_like_text_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
     push_windows_like_search_input_key_bindings(bindings);
 }
 
+fn push_wrapped_rename_key_bindings(bindings: &mut Vec<KeyBinding>, mac: bool) {
+    let context = Some("ExplorerRenameInput && wrapped == true");
+    bindings.extend([
+        KeyBinding::new("up", RenameUp, context),
+        KeyBinding::new("down", RenameDown, context),
+        KeyBinding::new("shift-up", RenameSelectUp, context),
+        KeyBinding::new("shift-down", RenameSelectDown, context),
+        KeyBinding::new("home", RenameLineHome, context),
+        KeyBinding::new("end", RenameLineEnd, context),
+        KeyBinding::new("shift-home", RenameSelectLineHome, context),
+        KeyBinding::new("shift-end", RenameSelectLineEnd, context),
+    ]);
+    if mac {
+        bindings.extend([
+            KeyBinding::new("cmd-left", RenameLineHome, context),
+            KeyBinding::new("cmd-right", RenameLineEnd, context),
+            KeyBinding::new("cmd-shift-left", RenameSelectLineHome, context),
+            KeyBinding::new("cmd-shift-right", RenameSelectLineEnd, context),
+            KeyBinding::new("cmd-up", RenameHome, context),
+            KeyBinding::new("cmd-down", RenameEnd, context),
+            KeyBinding::new("cmd-shift-up", RenameSelectHome, context),
+            KeyBinding::new("cmd-shift-down", RenameSelectEnd, context),
+        ]);
+    } else {
+        bindings.extend([
+            KeyBinding::new("ctrl-home", RenameHome, context),
+            KeyBinding::new("ctrl-end", RenameEnd, context),
+            KeyBinding::new("ctrl-shift-home", RenameSelectHome, context),
+            KeyBinding::new("ctrl-shift-end", RenameSelectEnd, context),
+        ]);
+    }
+}
+
 fn push_mac_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
     let context = Some("ExplorerRenameInput");
     bindings.extend([
@@ -1204,6 +1238,7 @@ fn push_mac_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("shift-up", RenameNoop, context),
         KeyBinding::new("shift-down", RenameNoop, context),
     ]);
+    push_wrapped_rename_key_bindings(bindings, true);
 }
 
 fn push_windows_like_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
@@ -1237,6 +1272,7 @@ fn push_windows_like_rename_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("shift-up", RenameNoop, context),
         KeyBinding::new("shift-down", RenameNoop, context),
     ]);
+    push_wrapped_rename_key_bindings(bindings, false);
 }
 
 fn push_mac_address_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
@@ -1555,6 +1591,29 @@ mod tests {
         assert_context!("ExplorerRenameInput", RenameCut, RenamePaste);
         assert_context!("ExplorerAddressInput", AddressCut, AddressPaste);
         assert_context!("ExplorerSearchInput", SearchCut, SearchPaste);
+    }
+
+    #[test]
+    fn wrapped_rename_bindings_override_only_multiline_editor_navigation() {
+        let mut bindings = Vec::new();
+        push_windows_like_rename_input_key_bindings(&mut bindings);
+        let wrapped = [KeyContext::parse("ExplorerRenameInput wrapped = true").unwrap()];
+        assert!(resolves_to(&bindings, RenameUp, "up", &wrapped));
+        assert!(resolves_to(
+            &bindings,
+            RenameSelectDown,
+            "shift-down",
+            &wrapped
+        ));
+        assert!(resolves_to(&bindings, RenameLineHome, "home", &wrapped));
+        assert!(resolves_to(&bindings, RenameEnd, "ctrl-end", &wrapped));
+        let single = [KeyContext::parse("ExplorerRenameInput").unwrap()];
+        assert!(resolves_to(&bindings, RenameNoop, "up", &single));
+        assert!(resolves_to(&bindings, RenameHome, "home", &single));
+        let mut mac = Vec::new();
+        push_mac_rename_input_key_bindings(&mut mac);
+        assert!(resolves_to(&mac, RenameLineEnd, "cmd-right", &wrapped));
+        assert!(resolves_to(&mac, RenameHome, "cmd-up", &wrapped));
     }
 
     #[test]

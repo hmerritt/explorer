@@ -143,6 +143,7 @@ pub struct ExplorerView {
     pub(super) scroll_handle: UniformListScrollHandle,
     pub(super) large_icon_list_state: gpui::ListState,
     pub(super) large_icon_layout: Option<LargeIconLayout>,
+    pub(super) large_icon_rename_tail: f32,
     pub(super) large_icon_layout_key: Option<LargeIconLayoutCacheKey>,
     pub(super) visible_entries_revision: u64,
     pub(super) large_icon_filename_cache: LargeIconFilenameCache,
@@ -622,6 +623,7 @@ impl ExplorerView {
             large_icon_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(400.0)),
             large_icon_layout: None,
             large_icon_layout_key: None,
+            large_icon_rename_tail: 0.0,
             visible_entries_revision: 0,
             large_icon_filename_cache: LargeIconFilenameCache::default(),
             #[cfg(test)]

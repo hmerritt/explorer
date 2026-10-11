@@ -79,7 +79,9 @@ pub(crate) const EXPLORER_SPLIT_PANE_BINDING_CONTEXT: &str = "((ExplorerTabs && 
 
 pub(crate) use actions::{
     ExtendLargeIconDown, ExtendLargeIconLeft, ExtendLargeIconRight, ExtendLargeIconUp,
-    MoveLargeIconDown, MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp,
+    MoveLargeIconDown, MoveLargeIconLeft, MoveLargeIconRight, MoveLargeIconUp, RenameDown,
+    RenameLineEnd, RenameLineHome, RenameSelectDown, RenameSelectLineEnd, RenameSelectLineHome,
+    RenameSelectUp, RenameUp,
 };
 
 pub use actions::{

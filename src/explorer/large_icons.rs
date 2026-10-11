@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    ops::Range,
     rc::Rc,
 };
 
@@ -181,6 +182,31 @@ impl LargeIconLayout {
             .map(move |row| gpui::size(px(width), px(row.height)))
     }
 
+    pub(super) fn row_sizes_with_tail(
+        &self,
+        width: f32,
+        tail: f32,
+    ) -> Vec<gpui::Size<gpui::Pixels>> {
+        let mut sizes = self.row_sizes(width).collect::<Vec<_>>();
+        if let Some(last) = sizes.last_mut() {
+            last.height += px(tail);
+        }
+        sizes
+    }
+
+    pub(super) fn scroll_offset_with_tail(&self, scroll_top: f32) -> gpui::ListOffset {
+        if let Some(last) = self.rows.last()
+            && scroll_top >= last.top
+        {
+            gpui::ListOffset {
+                item_ix: self.rows.len() - 1,
+                offset_in_item: px(scroll_top - last.top),
+            }
+        } else {
+            self.scroll_offset(scroll_top)
+        }
+    }
+
     pub(super) fn row_for_index(&self, ix: usize) -> usize {
         ix / self.columns
     }
@@ -329,46 +355,62 @@ pub(super) fn large_icon_tile_height_for_rows(rows: usize) -> f32 {
         + LARGE_ICON_TEXT_BOTTOM_PADDING
 }
 
-/// Lay out each displayed row separately: GPUI's multiline truncation budgets
-/// the unwrapped text width, which can leave an overflowing final wrapped row.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct FilenameRow {
+    /// Characters drawn on this row, excluding whitespace at a soft wrap.
+    pub(super) display: Range<usize>,
+    /// All source characters owned by this row, including wrap whitespace.
+    pub(super) source: Range<usize>,
+}
+
+fn filename_width(text: &str, font: &Font, text_system: &WindowTextSystem) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: font.clone(),
+        color: rgb(0).into(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    f32::from(
+        text_system
+            .layout_line(text, px(LARGE_ICON_TEXT_SIZE), &[run], None)
+            .width
+            .ceil(),
+    )
+}
+
+pub(super) fn large_icon_filename_rows(
+    text: &str,
+    font: &Font,
+    text_system: &WindowTextSystem,
+) -> Vec<FilenameRow> {
+    let normalized = text.replace(['\r', '\n'], " ");
+    layout_filename_rows(&normalized, large_icon_filename_text_width(), |line| {
+        filename_width(line, font, text_system)
+    })
+}
+
+/// Labels and the editor share soft-wrap boundaries, but only labels truncate.
 pub(super) fn large_icon_filename_lines(
     text: &str,
     font: &Font,
     text_system: &WindowTextSystem,
 ) -> Vec<String> {
     layout_filename_lines(text, large_icon_filename_text_width(), |line| {
-        let run = TextRun {
-            len: line.len(),
-            font: font.clone(),
-            color: rgb(0).into(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        f32::from(
-            text_system
-                .layout_line(line, px(LARGE_ICON_TEXT_SIZE), &[run], None)
-                .width
-                .ceil(),
-        )
+        filename_width(line, font, text_system)
     })
 }
 
-fn layout_filename_lines(
+fn layout_filename_rows(
     text: &str,
     width: f32,
     mut measure: impl FnMut(&str) -> f32,
-) -> Vec<String> {
-    // Newlines are legal in Unix filenames, but must not create extra visual rows.
-    let text = text.replace(['\r', '\n'], " ");
-    let mut remaining = text.as_str();
-    let mut lines = Vec::with_capacity(LARGE_ICON_TEXT_ROWS);
+) -> Vec<FilenameRow> {
+    let mut rows = Vec::new();
+    let mut start = 0;
     loop {
-        // Most names fit outright; avoid shaping every prefix in that case.
-        if measure(remaining) <= width {
-            lines.push(remaining.to_owned());
-            break;
-        }
+        let remaining = &text[start..];
         let mut end = 0;
         for (ix, ch) in remaining.char_indices() {
             let next = ix + ch.len_utf8();
@@ -377,21 +419,17 @@ fn layout_filename_lines(
             }
             end = next;
         }
-        if lines.len() == LARGE_ICON_TEXT_ROWS - 1 || end == 0 {
-            // Measure the suffix together with its prefix, including kerning.
-            let mut last = "…".to_owned();
-            for (ix, ch) in remaining[..end].char_indices() {
-                let candidate = format!("{}…", remaining[..ix + ch.len_utf8()].trim_end());
-                if measure(&candidate) > width {
-                    break;
-                }
-                last = candidate;
-            }
-            lines.push(last);
+        if end == remaining.len() {
+            rows.push(FilenameRow {
+                display: start..text.len(),
+                source: start..text.len(),
+            });
             break;
         }
-        // Keep punctuation within tokens, breaking oversized tokens only when
-        // no whitespace boundary fits. Whitespace at a wrap is not displayed.
+        // Even an unusually wide glyph must remain editable, and make progress.
+        if end == 0 {
+            end = remaining.chars().next().unwrap().len_utf8();
+        }
         if !remaining[end..].starts_with(char::is_whitespace)
             && let Some((ix, _)) = remaining[..end]
                 .char_indices()
@@ -400,8 +438,47 @@ fn layout_filename_lines(
         {
             end = ix;
         }
-        lines.push(remaining[..end].trim_end().to_owned());
-        remaining = remaining[end..].trim_start();
+        let display_end = start + remaining[..end].trim_end().len();
+        let next = text.len() - remaining[end..].trim_start().len();
+        rows.push(FilenameRow {
+            display: start..display_end,
+            source: start..next,
+        });
+        start = next;
+        if start == text.len() {
+            break;
+        }
+    }
+    rows
+}
+
+fn layout_filename_lines(
+    text: &str,
+    width: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> Vec<String> {
+    let text = text.replace(['\r', '\n'], " ");
+    let rows = layout_filename_rows(&text, width, &mut measure);
+    let mut lines = Vec::new();
+    for (ix, row) in rows.iter().take(LARGE_ICON_TEXT_ROWS).enumerate() {
+        let displayed = &text[row.display.clone()];
+        if (ix == LARGE_ICON_TEXT_ROWS - 1 && rows.len() > LARGE_ICON_TEXT_ROWS)
+            || measure(displayed) > width
+        {
+            let remaining = &text[row.source.start..];
+            let mut last = "\u{2026}".to_owned();
+            for (offset, ch) in remaining.char_indices() {
+                let candidate =
+                    format!("{}\u{2026}", remaining[..offset + ch.len_utf8()].trim_end());
+                if measure(&candidate) > width {
+                    break;
+                }
+                last = candidate;
+            }
+            lines.push(last);
+            break;
+        }
+        lines.push(displayed.to_owned());
     }
     lines
 }
@@ -441,6 +518,75 @@ mod tests {
 
     fn monospace_lines(text: &str, width: usize) -> Vec<String> {
         layout_filename_lines(text, width as f32, |line| line.chars().count() as f32)
+    }
+
+    #[test]
+    fn editable_rows_match_fitting_labels_and_preserve_wrap_whitespace() {
+        for text in [
+            "",
+            "abcde",
+            "abcde fghij",
+            "abcde fghij klmno",
+            "abcdefghijklmno",
+            "a.b-c.txt",
+            "abc  def   ghi  ",
+            "  abc def",
+            "\u{6587}\u{4ef6}\u{1f642}abc",
+        ] {
+            let rows = layout_filename_rows(text, 5.0, |line| line.chars().count() as f32);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| &text[row.source.clone()])
+                    .collect::<String>(),
+                text
+            );
+            let labels = monospace_lines(text, 5);
+            for (ix, row) in rows.iter().take(3).enumerate() {
+                assert!(text[row.display.clone()].chars().count() <= 5);
+                if rows.len() <= 3 || ix < 2 {
+                    assert_eq!(&text[row.display.clone()], labels[ix]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn editable_rows_preserve_every_source_character_and_label_boundaries() {
+        let text = "alpha  beta gamma delta epsilon zeta \u{6587}\u{4ef6}\u{1f642}longtoken";
+        let measure = |line: &str| line.chars().count() as f32;
+        let rows = layout_filename_rows(text, 10.0, measure);
+        assert!(rows.len() > LARGE_ICON_TEXT_ROWS);
+        assert_eq!(
+            rows.iter()
+                .map(|row| &text[row.source.clone()])
+                .collect::<String>(),
+            text
+        );
+        let labels = layout_filename_lines(text, 10.0, measure);
+        for (row, label) in rows
+            .iter()
+            .zip(labels.iter())
+            .take(LARGE_ICON_TEXT_ROWS - 1)
+        {
+            assert_eq!(&text[row.display.clone()], label);
+        }
+        for row in rows {
+            assert!(text.is_char_boundary(row.display.start));
+            assert!(text.is_char_boundary(row.display.end));
+            assert!(measure(&text[row.display]) <= 10.0);
+        }
+    }
+
+    #[test]
+    fn rename_scroll_tail_keeps_tile_positions_and_supports_offsets_below_last_tile() {
+        let layout = LargeIconLayout::from_tile_heights(1, 0.0, vec![100.0, 100.0]);
+        let sizes = layout.row_sizes_with_tail(200.0, 80.0);
+        assert_eq!(sizes[0].height, px(102.0));
+        assert_eq!(sizes[1].height, px(182.0));
+        assert_eq!(layout.index_bounds(1).unwrap().1, 102.0);
+        let offset = layout.scroll_offset_with_tail(250.0);
+        assert_eq!(offset.item_ix, 1);
+        assert_eq!(layout.scroll_top(offset), 250.0);
     }
 
     #[test]

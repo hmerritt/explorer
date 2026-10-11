@@ -6,10 +6,11 @@ use std::{
 };
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, GlobalElementId, IntoElement, LayoutId, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, Style, Task, TextRun,
-    UTF16Selection, Window, fill, point, px, relative, rgb, size,
+    AnyElement, App, AvailableSpace, Bounds, ClipboardItem, Context, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, GlobalElementId, IntoElement,
+    LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Position, ShapedLine, Style, Task, TextRun, UTF16Selection, Window, fill, point, px, relative,
+    rgb, size,
 };
 
 #[cfg(test)]
@@ -17,12 +18,20 @@ use crate::explorer::text_input::text_x_for_mouse_x;
 use crate::explorer::{
     actions::{
         RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut,
-        RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight,
-        RenameSelectAll, RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight,
-        RenameSelectWordLeft, RenameSelectWordRight, RenameSelected, RenameWordLeft,
-        RenameWordRight, TextInputRedo, TextInputUndo,
+        RenameDelete, RenameDown, RenameEnd, RenameHome, RenameLeft, RenameLineEnd, RenameLineHome,
+        RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectDown, RenameSelectEnd,
+        RenameSelectHome, RenameSelectLeft, RenameSelectLineEnd, RenameSelectLineHome,
+        RenameSelectRight, RenameSelectUp, RenameSelectWordLeft, RenameSelectWordRight,
+        RenameSelected, RenameUp, RenameWordLeft, RenameWordRight, TextInputRedo, TextInputUndo,
+    },
+    constants::{
+        LARGE_ICON_SIZE, LARGE_ICON_TEXT_LINE_HEIGHT, LARGE_ICON_TEXT_TOP_GAP,
+        LARGE_ICON_TILE_WIDTH,
     },
     entry::FileEntry,
+    large_icons::{
+        FilenameRow, LargeIconLayout, large_icon_filename_rows, large_icon_filename_text_width,
+    },
     selection::SelectionModifiers,
     text_input::{
         EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextEditKind, EditableTextState,
@@ -39,6 +48,10 @@ pub(super) struct RenameState {
     original_name: String,
     hidden_suffix: Option<String>,
     text: EditableTextState,
+    wrapped_layout: Option<WrappedRenameLayout>,
+    preferred_column: Option<(usize, Pixels)>,
+    caret_row: Option<(usize, usize)>,
+    pub(super) last_wrapped_reveal: Option<(String, usize, usize, f32, f32)>,
     pub(super) focus_handle: Option<FocusHandle>,
 }
 
@@ -72,6 +85,10 @@ impl RenameState {
             original_name: entry.name.clone(),
             hidden_suffix,
             text: EditableTextState::with_selection(content, selected_range),
+            wrapped_layout: None,
+            preferred_column: None,
+            caret_row: None,
+            last_wrapped_reveal: None,
             focus_handle,
         }
     }
@@ -81,6 +98,254 @@ impl RenameState {
             Some(suffix) => format!("{}{}", self.content, suffix),
             None => self.content.clone(),
         }
+    }
+}
+
+#[derive(Clone)]
+struct WrappedRenameRow {
+    source: FilenameRow,
+    line: ShapedLine,
+    origin: Point<Pixels>,
+}
+
+#[derive(Clone)]
+struct WrappedRenameLayout {
+    content: String,
+    bounds: Bounds<Pixels>,
+    rows: Vec<WrappedRenameRow>,
+}
+
+impl WrappedRenameLayout {
+    fn row_for_offset(&self, offset: usize) -> usize {
+        self.rows
+            .partition_point(|row| row.source.source.start <= offset)
+            .saturating_sub(1)
+    }
+
+    fn position(&self, row: usize, offset: usize) -> Point<Pixels> {
+        let row = &self.rows[row];
+        let local = offset.clamp(row.source.display.start, row.source.display.end)
+            - row.source.display.start;
+        row.origin + point(row.line.x_for_index(local), px(0.0))
+    }
+
+    fn index_in_row(&self, row: usize, x: Pixels) -> usize {
+        let row = &self.rows[row];
+        row.source.display.start
+            + row
+                .line
+                .closest_index_for_x(x - row.origin.x)
+                .min(row.source.display.len())
+    }
+
+    fn index_at(&self, position: Point<Pixels>) -> (usize, usize) {
+        let row = ((f32::from(position.y - self.bounds.top()) / LARGE_ICON_TEXT_LINE_HEIGHT)
+            .floor()
+            .max(0.0) as usize)
+            .min(self.rows.len() - 1);
+        (row, self.index_in_row(row, position.x))
+    }
+}
+
+impl RenameState {
+    fn move_to(&mut self, offset: usize) {
+        self.preferred_column = None;
+        self.caret_row = None;
+        self.text.move_to(offset);
+    }
+
+    fn select_to(&mut self, offset: usize) {
+        self.preferred_column = None;
+        self.caret_row = None;
+        self.text.select_to(offset);
+    }
+
+    pub(super) fn wrapped_cursor_row(&self, rows: &[FilenameRow]) -> usize {
+        let offset = self.cursor_offset();
+        if let Some((hint_offset, row)) = self.caret_row
+            && hint_offset == offset
+            && self
+                .wrapped_layout
+                .as_ref()
+                .is_some_and(|layout| layout.content == self.content)
+            && rows
+                .get(row)
+                .is_some_and(|row| row.source.contains(&offset) || row.display.end == offset)
+        {
+            return row;
+        }
+        rows.partition_point(|row| row.source.start <= offset)
+            .saturating_sub(1)
+    }
+
+    fn current_wrapped_row(&self, layout: &WrappedRenameLayout) -> usize {
+        let offset = self.cursor_offset();
+        if let Some((hint_offset, row)) = self.caret_row
+            && self
+                .wrapped_layout
+                .as_ref()
+                .is_some_and(|old| old.content == layout.content)
+            && hint_offset == offset
+            && row < layout.rows.len()
+            && layout.rows[row].source.source.contains(&offset)
+        {
+            return row;
+        }
+        // A soft-wrap boundary can represent the end of the preceding row.
+        if let Some((hint_offset, row)) = self.caret_row
+            && self
+                .wrapped_layout
+                .as_ref()
+                .is_some_and(|old| old.content == layout.content)
+            && hint_offset == offset
+            && row < layout.rows.len()
+            && layout.rows[row].source.display.end == offset
+        {
+            return row;
+        }
+        layout.row_for_offset(offset)
+    }
+
+    fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+        self.wrapped_layout.as_ref().map_or_else(
+            || self.text.index_for_mouse_position(position),
+            |layout| layout.index_at(position).1,
+        )
+    }
+
+    fn bounds_for_range(
+        &self,
+        utf16: Range<usize>,
+        fallback: Bounds<Pixels>,
+    ) -> Option<Bounds<Pixels>> {
+        let Some(layout) = &self.wrapped_layout else {
+            return self.text.bounds_for_range(utf16, fallback);
+        };
+        let range = self.range_from_utf16(&utf16);
+        let row = if range.is_empty() && range.start == self.cursor_offset() {
+            self.current_wrapped_row(layout)
+        } else {
+            layout.row_for_offset(range.start)
+        };
+        let start = layout.position(row, range.start);
+        let end = layout.position(row, range.end.min(layout.rows[row].source.display.end));
+        Some(Bounds::new(
+            start,
+            size(
+                (end.x - start.x).max(px(1.0)),
+                px(LARGE_ICON_TEXT_LINE_HEIGHT),
+            ),
+        ))
+    }
+
+    fn character_index_for_point(&self, position: Point<Pixels>) -> Option<usize> {
+        let Some(layout) = &self.wrapped_layout else {
+            return self.text.character_index_for_point(position);
+        };
+        layout
+            .bounds
+            .contains(&position)
+            .then(|| self.offset_to_utf16(layout.index_at(position).1))
+    }
+
+    fn refresh_wrapped_navigation(&mut self, font: &gpui::Font, window: &Window) {
+        let Some(previous) = self.wrapped_layout.as_ref() else {
+            return;
+        };
+        if previous.content == self.content {
+            return;
+        }
+        let bounds = previous.bounds;
+        let normalized = self.content.replace(['\r', '\n'], " ");
+        let rows = large_icon_filename_rows(&self.content, font, window.text_system())
+            .into_iter()
+            .enumerate()
+            .map(|(ix, source)| {
+                let text = &normalized[source.display.clone()];
+                let run = TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: rgb(0).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line = window.text_system().shape_line(
+                    text.to_owned().into(),
+                    px(crate::explorer::constants::LARGE_ICON_TEXT_SIZE),
+                    &[run],
+                    None,
+                );
+                let origin = point(
+                    bounds.left() + (bounds.size.width - line.width) / 2.0,
+                    bounds.top() + px(ix as f32 * LARGE_ICON_TEXT_LINE_HEIGHT),
+                );
+                WrappedRenameRow {
+                    source,
+                    line,
+                    origin,
+                }
+            })
+            .collect();
+        self.wrapped_layout = Some(WrappedRenameLayout {
+            content: self.content.clone(),
+            bounds,
+            rows,
+        });
+        self.caret_row = None;
+        self.preferred_column = None;
+    }
+
+    fn move_wrapped_vertical(&mut self, down: bool, selecting: bool) {
+        let Some(layout) = self
+            .wrapped_layout
+            .as_ref()
+            .filter(|layout| layout.content == self.content)
+        else {
+            return;
+        };
+        let current = self.current_wrapped_row(layout);
+        let cursor = self.cursor_offset();
+        let x = self
+            .preferred_column
+            .filter(|(offset, _)| *offset == cursor)
+            .map_or_else(
+                || layout.position(current, cursor).x - layout.bounds.left(),
+                |(_, x)| x,
+            );
+        let row = if down {
+            (current + 1).min(layout.rows.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        let offset = layout.index_in_row(row, layout.bounds.left() + x);
+        if selecting {
+            self.select_to(offset);
+        } else {
+            self.move_to(offset);
+        }
+        self.preferred_column = Some((offset, x));
+        self.caret_row = Some((offset, row));
+    }
+
+    fn move_wrapped_edge(&mut self, end: bool, selecting: bool) {
+        let Some(layout) = self
+            .wrapped_layout
+            .as_ref()
+            .filter(|layout| layout.content == self.content)
+        else {
+            return;
+        };
+        let row = self.current_wrapped_row(layout);
+        let range = &layout.rows[row].source.display;
+        let offset = if end { range.end } else { range.start };
+        if selecting {
+            self.select_to(offset);
+        } else {
+            self.move_to(offset);
+        }
+        self.preferred_column = None;
+        self.caret_row = Some((offset, row));
     }
 }
 
@@ -293,6 +558,118 @@ impl ExplorerView {
         if let Some(rename) = self.active_rename.as_mut() {
             let offset = rename.next_word_boundary(rename.cursor_offset());
             rename.select_to(offset);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_up(
+        &mut self,
+        _: &RenameUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_vertical(false, false);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_down(
+        &mut self,
+        _: &RenameDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_vertical(true, false);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_select_up(
+        &mut self,
+        _: &RenameSelectUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_vertical(false, true);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_select_down(
+        &mut self,
+        _: &RenameSelectDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_vertical(true, true);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_line_home(
+        &mut self,
+        _: &RenameLineHome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_edge(false, false);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_line_end(
+        &mut self,
+        _: &RenameLineEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_edge(true, false);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_select_line_home(
+        &mut self,
+        _: &RenameSelectLineHome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_edge(false, true);
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn handle_rename_select_line_end(
+        &mut self,
+        _: &RenameSelectLineEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rename) = self.active_rename.as_mut() {
+            rename.refresh_wrapped_navigation(&self.font, window);
+            rename.move_wrapped_edge(true, true);
         }
         cx.stop_propagation();
         cx.notify();
@@ -1055,6 +1432,11 @@ impl ExplorerView {
         };
 
         rename.is_selecting = true;
+        rename.preferred_column = None;
+        let caret_row = rename.wrapped_layout.as_ref().map(|layout| {
+            let (row, offset) = layout.index_at(event.position);
+            (offset, row)
+        });
         let offset = rename.index_for_mouse_position(event.position);
         if event.click_count >= 3 {
             rename.select_all();
@@ -1065,6 +1447,7 @@ impl ExplorerView {
         } else {
             rename.move_to(offset);
         }
+        rename.caret_row = caret_row;
     }
 
     pub(super) fn on_rename_mouse_move(&mut self, event: &MouseMoveEvent) {
@@ -1073,8 +1456,14 @@ impl ExplorerView {
         };
 
         if rename.is_selecting {
+            rename.preferred_column = None;
+            let caret_row = rename.wrapped_layout.as_ref().map(|layout| {
+                let (row, offset) = layout.index_at(event.position);
+                (offset, row)
+            });
             let offset = rename.index_for_mouse_position(event.position);
             rename.select_to(offset);
+            rename.caret_row = caret_row;
         }
     }
 
@@ -1086,6 +1475,7 @@ impl ExplorerView {
 
     fn update_rename_layout(&mut self, line: ShapedLine, bounds: Bounds<Pixels>) {
         if let Some(rename) = self.active_rename.as_mut() {
+            rename.wrapped_layout = None;
             rename.update_layout(line, bounds);
         }
     }
@@ -1257,14 +1647,27 @@ impl EntityInputHandler for ExplorerView {
 
 pub(super) struct RenameTextElement {
     entity: Entity<ExplorerView>,
+    wrapped: bool,
 }
 
 pub(super) fn rename_text_element(entity: Entity<ExplorerView>) -> RenameTextElement {
-    RenameTextElement { entity }
+    RenameTextElement {
+        entity,
+        wrapped: false,
+    }
+}
+
+pub(super) fn wrapped_rename_text_element(entity: Entity<ExplorerView>) -> RenameTextElement {
+    RenameTextElement {
+        entity,
+        wrapped: true,
+    }
 }
 
 pub(super) struct RenamePrepaintState {
     line: Option<ShapedLine>,
+    wrapped: Option<WrappedRenameLayout>,
+    selections: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
     scroll_offset: Pixels,
@@ -1279,7 +1682,7 @@ impl IntoElement for RenameTextElement {
 }
 
 impl Element for RenameTextElement {
-    type RequestLayoutState = ();
+    type RequestLayoutState = Vec<FilenameRow>;
     type PrepaintState = RenamePrepaintState;
 
     fn id(&self) -> Option<ElementId> {
@@ -1299,8 +1702,23 @@ impl Element for RenameTextElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
-        style.size.height = window.line_height().into();
-        (window.request_layout(style, [], cx), ())
+        let rows = if self.wrapped {
+            let rename = self
+                .entity
+                .read(cx)
+                .active_rename
+                .as_ref()
+                .expect("active rename");
+            large_icon_filename_rows(
+                &rename.content,
+                &window.text_style().font(),
+                window.text_system(),
+            )
+        } else {
+            Vec::new()
+        };
+        style.size.height = (window.line_height() * rows.len().max(1) as f32).into();
+        (window.request_layout(style, [], cx), rows)
     }
 
     fn prepaint(
@@ -1308,7 +1726,7 @@ impl Element for RenameTextElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
+        rows: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
@@ -1317,6 +1735,83 @@ impl Element for RenameTextElement {
             .active_rename
             .as_ref()
             .expect("rename text element is only rendered during rename");
+        if self.wrapped {
+            let style = window.text_style();
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let normalized = rename.content.replace(['\r', '\n'], " ");
+            let mut layout = WrappedRenameLayout {
+                content: rename.content.clone(),
+                bounds,
+                rows: Vec::new(),
+            };
+            let mut selections = Vec::new();
+            for (ix, row) in rows.iter().enumerate() {
+                let content = &normalized[row.display.clone()];
+                let local_range = |range: &Range<usize>| {
+                    let start =
+                        range.start.clamp(row.display.start, row.display.end) - row.display.start;
+                    let end =
+                        range.end.clamp(row.display.start, row.display.end) - row.display.start;
+                    start..end
+                };
+                let selected = local_range(&rename.selected_range);
+                let marked = rename.marked_range.as_ref().map(local_range);
+                let run = TextRun {
+                    len: content.len(),
+                    font: style.font(),
+                    color: style.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let runs = editable_text_runs(content.len(), run, &selected, marked.as_ref());
+                let line = window.text_system().shape_line(
+                    content.to_owned().into(),
+                    font_size,
+                    &runs,
+                    None,
+                );
+                let origin = point(
+                    bounds.left() + (bounds.size.width - line.width) / 2.0,
+                    bounds.top() + px(ix as f32 * LARGE_ICON_TEXT_LINE_HEIGHT),
+                );
+                if !selected.is_empty() {
+                    selections.push(fill(
+                        Bounds::new(
+                            origin + point(line.x_for_index(selected.start), px(0.0)),
+                            size(
+                                line.x_for_index(selected.end) - line.x_for_index(selected.start),
+                                px(LARGE_ICON_TEXT_LINE_HEIGHT),
+                            ),
+                        ),
+                        rgb(EDITABLE_TEXT_SELECTION_BACKGROUND),
+                    ));
+                }
+                layout.rows.push(WrappedRenameRow {
+                    source: row.clone(),
+                    line,
+                    origin,
+                });
+            }
+            let cursor = rename.selected_range.is_empty().then(|| {
+                fill(
+                    Bounds::new(
+                        layout
+                            .position(rename.current_wrapped_row(&layout), rename.cursor_offset()),
+                        size(px(1.0), px(LARGE_ICON_TEXT_LINE_HEIGHT)),
+                    ),
+                    gpui::blue(),
+                )
+            });
+            return RenamePrepaintState {
+                line: None,
+                wrapped: Some(layout),
+                selections,
+                cursor,
+                selection: None,
+                scroll_offset: px(0.0),
+            };
+        }
         let content = gpui::SharedString::from(rename.content.clone());
         let selected_range = rename.selected_range.clone();
         let cursor = rename.cursor_offset();
@@ -1378,6 +1873,8 @@ impl Element for RenameTextElement {
         };
 
         RenamePrepaintState {
+            wrapped: None,
+            selections: Vec::new(),
             line: Some(line),
             cursor,
             selection,
@@ -1403,6 +1900,38 @@ impl Element for RenameTextElement {
             );
         }
 
+        if let Some(layout) = prepaint.wrapped.take() {
+            for quad in prepaint.selections.drain(..) {
+                window.paint_quad(quad);
+            }
+            for row in &layout.rows {
+                row.line
+                    .paint(row.origin, px(LARGE_ICON_TEXT_LINE_HEIGHT), window, cx)
+                    .expect("paint wrapped rename row");
+            }
+            if let Some(focus) = self.entity.read(cx).active_rename_focus_handle()
+                && focus.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+            self.entity.update(cx, |view, _| {
+                if let Some(rename) = view.active_rename.as_mut() {
+                    if rename
+                        .wrapped_layout
+                        .as_ref()
+                        .is_none_or(|old| old.content != layout.content)
+                    {
+                        rename.preferred_column = None;
+                        rename.caret_row = None;
+                    }
+                    rename.last_layout = None;
+                    rename.last_bounds = Some(bounds);
+                    rename.wrapped_layout = Some(layout);
+                }
+            });
+            return;
+        }
         if let Some(selection) = prepaint.selection.take() {
             window.paint_quad(selection);
         }
@@ -1425,6 +1954,101 @@ impl Element for RenameTextElement {
         self.entity.update(cx, |view, _| {
             view.update_rename_layout(line, bounds);
         });
+    }
+}
+
+pub(super) struct LargeIconRenameOverlay {
+    child: AnyElement,
+    layout: LargeIconLayout,
+    index: usize,
+    list: ListState,
+}
+
+pub(super) fn large_icon_rename_overlay(
+    child: impl IntoElement,
+    layout: LargeIconLayout,
+    index: usize,
+    list: ListState,
+) -> LargeIconRenameOverlay {
+    LargeIconRenameOverlay {
+        child: child.into_any_element(),
+        layout,
+        index,
+        list,
+    }
+}
+
+impl IntoElement for LargeIconRenameOverlay {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for LargeIconRenameOverlay {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.position = Position::Absolute;
+        style.size.width = relative(1.0).into();
+        style.size.height = relative(1.0).into();
+        (window.request_layout(style, [], cx), ())
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let (x, y, _, _) = self
+            .layout
+            .index_bounds(self.index)
+            .expect("rename tile geometry");
+        let viewport = self.list.viewport_bounds();
+        let origin = point(
+            viewport.left()
+                + px(x + (LARGE_ICON_TILE_WIDTH - large_icon_filename_text_width() - 6.0) / 2.0),
+            viewport.top()
+                + px(y + 1.0 + LARGE_ICON_SIZE + LARGE_ICON_TEXT_TOP_GAP - 2.0)
+                + self.list.scroll_px_offset_for_scrollbar().y,
+        );
+        self.child.layout_as_root(
+            size(
+                AvailableSpace::Definite(viewport.size.width),
+                AvailableSpace::MinContent,
+            ),
+            window,
+            cx,
+        );
+        self.child.prepaint_at(origin, window, cx);
+    }
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
     }
 }
 
@@ -1541,6 +2165,256 @@ mod tests {
     };
     use gpui::{AppContext, ClipboardItem, MouseButton, TestAppContext};
     use std::fs;
+
+    #[gpui::test]
+    fn large_icon_rename_wraps_in_place_and_uses_row_geometry(cx: &mut TestAppContext) {
+        let name = format!("{}.txt", "alpha beta gamma delta ".repeat(8));
+        let (_temp, entity, cx) = test_view_entity(cx, &[&name]);
+        cx.update(|window, app| {
+            entity.update(app, |view, cx| {
+                view.view_mode = crate::settings::FileViewMode::LargeIcons;
+                view.select_single_index(0);
+                view.handle_rename_selected(&RenameSelected, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            entity.update(app, |view, _| {
+                let rename = view.active_rename.as_mut().unwrap();
+                let layout = rename
+                    .wrapped_layout
+                    .clone()
+                    .expect("wrapped editor was painted");
+                assert!(layout.rows.len() > 3);
+                assert_eq!(
+                    layout.bounds.size.width,
+                    px(large_icon_filename_text_width())
+                );
+                assert_eq!(
+                    layout.bounds.size.height,
+                    px(layout.rows.len() as f32 * LARGE_ICON_TEXT_LINE_HEIGHT)
+                );
+                assert_eq!(
+                    layout
+                        .rows
+                        .iter()
+                        .map(|row| &name[row.source.source.clone()])
+                        .collect::<String>(),
+                    name
+                );
+                assert!(
+                    layout
+                        .rows
+                        .iter()
+                        .all(|row| row.line.width <= layout.bounds.size.width)
+                );
+                assert!(view.large_icon_rename_tail > 0.0);
+                let top = view.large_icon_list_state.viewport_bounds().top()
+                    + px(1.0 + LARGE_ICON_SIZE + LARGE_ICON_TEXT_TOP_GAP)
+                    + view
+                        .large_icon_list_state
+                        .scroll_px_offset_for_scrollbar()
+                        .y;
+                assert_eq!(layout.bounds.top(), top);
+                let labels = crate::explorer::large_icons::large_icon_filename_lines(
+                    &name,
+                    &view.font,
+                    window.text_system(),
+                );
+                for (row, label) in layout.rows.iter().zip(labels.iter()).take(2) {
+                    assert_eq!(&name[row.source.display.clone()], label);
+                }
+                let first = layout.rows[0].source.display.start + 2;
+                rename.move_to(first);
+                rename.move_wrapped_vertical(true, false);
+                assert_eq!(rename.current_wrapped_row(&layout), 1);
+                let preferred = rename.preferred_column.unwrap().1;
+                rename.move_wrapped_vertical(true, true);
+                assert_eq!(rename.current_wrapped_row(&layout), 2);
+                assert_eq!(rename.preferred_column.unwrap().1, preferred);
+                assert!(!rename.selected_range.is_empty());
+                rename.move_wrapped_edge(false, false);
+                assert_eq!(rename.cursor_offset(), layout.rows[2].source.display.start);
+                rename.move_wrapped_edge(true, true);
+                assert_eq!(rename.selected_range, layout.rows[2].source.display.clone());
+                let point = layout.position(1, layout.rows[1].source.display.start + 1)
+                    + point(px(0.0), px(8.0));
+                assert_eq!(
+                    rename.index_for_mouse_position(point),
+                    layout.rows[1].source.display.start + 1
+                );
+                assert_eq!(
+                    rename.character_index_for_point(point),
+                    Some(rename.offset_to_utf16(layout.rows[1].source.display.start + 1))
+                );
+                let range = rename.range_to_utf16(
+                    &(layout.rows[1].source.display.start..layout.rows[2].source.display.end),
+                );
+                assert_eq!(
+                    rename
+                        .bounds_for_range(range, Bounds::default())
+                        .unwrap()
+                        .top(),
+                    layout.rows[1].origin.y
+                );
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn wrapped_unicode_selection_and_input_method_geometry(cx: &mut TestAppContext) {
+        let (_temp, entity, cx) = test_view_entity(cx, &["geometry.txt"]);
+        let name = "alpha  beta gamma delta \u{6587}\u{4ef6}\u{1f642} punctuation-name.txt";
+        cx.update(|window, app| {
+            entity.update(app, |view, cx| {
+                view.view_mode = crate::settings::FileViewMode::LargeIcons;
+                view.select_single_index(0);
+                view.handle_rename_selected(&RenameSelected, window, cx);
+                let rename = view.active_rename.as_mut().unwrap();
+                rename.select_all();
+                rename.replace_text_as_typing(None, name);
+                let start = name.find('\u{1f642}').unwrap();
+                rename.marked_range = Some(start..start + '\u{1f642}'.len_utf8());
+                rename.move_to(start);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            entity.update(app, |view, cx| {
+                let layout = view
+                    .active_rename
+                    .as_ref()
+                    .unwrap()
+                    .wrapped_layout
+                    .clone()
+                    .unwrap();
+                let start = name.find('\u{1f642}').unwrap();
+                let row = layout.row_for_offset(start);
+                let position = layout.position(row, start) + point(px(0.0), px(8.0));
+                let rename = view.active_rename.as_ref().unwrap();
+                assert_eq!(
+                    rename.character_index_for_point(position),
+                    Some(name[..start].encode_utf16().count())
+                );
+                let utf16 = rename.range_to_utf16(&(start..start + '\u{1f642}'.len_utf8()));
+                let rect = rename.bounds_for_range(utf16, Bounds::default()).unwrap();
+                assert_eq!(rect.top(), layout.rows[row].origin.y);
+                assert!(rect.size.width > px(1.0));
+                assert_eq!(
+                    rename.marked_range,
+                    Some(start..start + '\u{1f642}'.len_utf8())
+                );
+                // Dragging uses source offsets across soft wraps, including spaces.
+                let first = layout.rows[0].source.display.start + 1;
+                let last = layout.rows[2].source.display.end;
+                view.on_rename_mouse_down(&MouseDownEvent {
+                    position: layout.position(0, first) + point(px(0.0), px(8.0)),
+                    button: MouseButton::Left,
+                    ..Default::default()
+                });
+                view.on_rename_mouse_move(&MouseMoveEvent {
+                    position: layout.position(2, last) + point(px(0.0), px(8.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                });
+                assert_eq!(
+                    view.active_rename.as_ref().unwrap().selected_range,
+                    first..last
+                );
+                // A double click still selects a word using the underlying filename.
+                view.on_rename_mouse_down(&MouseDownEvent {
+                    position: layout.position(0, 2) + point(px(0.0), px(8.0)),
+                    button: MouseButton::Left,
+                    click_count: 2,
+                    ..Default::default()
+                });
+                assert_eq!(view.active_rename.as_ref().unwrap().selected_range, 0..5);
+                view.handle_rename_home(&RenameHome, window, cx);
+                assert_eq!(view.active_rename.as_ref().unwrap().cursor_offset(), 0);
+                view.handle_rename_select_end(&RenameSelectEnd, window, cx);
+                assert_eq!(
+                    view.active_rename.as_ref().unwrap().selected_range,
+                    0..name.len()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn wrapped_rename_reflows_edits_and_preserves_commit_and_cancel(cx: &mut TestAppContext) {
+        let name = format!("{}.txt", "alpha beta gamma delta ".repeat(7));
+        let (temp, entity, cx) = test_view_entity(cx, &[&name]);
+        cx.update(|window, app| {
+            entity.update(app, |view, cx| {
+                view.view_mode = crate::settings::FileViewMode::LargeIcons;
+                view.select_single_index(0);
+                view.handle_rename_selected(&RenameSelected, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            entity.update(app, |view, cx| {
+                let rename = view.active_rename.as_mut().unwrap();
+                rename.select_all();
+                rename.replace_text_as_typing(None, "short.txt");
+                // Navigation must use current text even before a repaint.
+                rename.refresh_wrapped_navigation(&view.font, window);
+                rename.move_wrapped_edge(false, false);
+                assert_eq!(rename.cursor_offset(), 0);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            entity.update(app, |view, cx| {
+                assert_eq!(
+                    view.active_rename
+                        .as_ref()
+                        .unwrap()
+                        .wrapped_layout
+                        .as_ref()
+                        .unwrap()
+                        .rows
+                        .len(),
+                    1
+                );
+                assert_eq!(view.large_icon_rename_tail, 0.0);
+                view.handle_text_input_undo(&TextInputUndo, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            entity.update(app, |view, cx| {
+                assert_eq!(view.active_rename.as_ref().unwrap().content, name);
+                assert!(
+                    view.active_rename
+                        .as_ref()
+                        .unwrap()
+                        .wrapped_layout
+                        .as_ref()
+                        .unwrap()
+                        .rows
+                        .len()
+                        > 3
+                );
+                view.handle_rename_cancel(&RenameCancel, window, cx);
+                assert!(temp.path().join(&name).exists());
+                view.show_file_name_extensions = false;
+                view.select_single_path(&temp.path().join(&name));
+                view.handle_rename_selected(&RenameSelected, window, cx);
+                let rename = view.active_rename.as_mut().unwrap();
+                rename.select_all();
+                rename.replace_text_as_typing(None, "renamed with words");
+                view.handle_rename_commit(&RenameCommit, window, cx);
+                assert!(temp.path().join("renamed with words.txt").exists());
+                assert!(view.active_rename.is_none());
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            entity.update(app, |view, _| assert_eq!(view.large_icon_rename_tail, 0.0))
+        });
+    }
 
     #[test]
     fn selected_rename_requires_exactly_one_selected_entry() {

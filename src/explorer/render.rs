@@ -90,14 +90,17 @@ use crate::explorer::{
     image_thumbnails::{CachedThumbnailImage, HoverImagePreviewLookup},
     large_icons::{
         LargeIconLayout, LargeIconLayoutCacheKey, large_icon_filename_lines,
-        large_icon_filename_text_width, large_icon_max_tile_height,
+        large_icon_filename_rows, large_icon_filename_text_width, large_icon_max_tile_height,
     },
     mouse_selection::{
         details_name_item_hit_right, local_point, selection_box_bounds, viewport_size,
     },
     navigation::{DirectoryOpenMode, HistoryMode},
     recursive_search::RecursiveSearchProgressSnapshot,
-    rename::{ActiveTextInput, rename_text_element},
+    rename::{
+        ActiveTextInput, large_icon_rename_overlay, rename_text_element,
+        wrapped_rename_text_element,
+    },
     scrollbar::{
         ScrollbarArrow, scrollbar_arrow_button, scrollbar_corner, scrollbar_header_spacer,
     },
@@ -2950,7 +2953,12 @@ impl ExplorerView {
             .flex_row()
             .items_start()
             .gap(px(layout.column_gap))
-            .h(px(row_layout.height))
+            .h(px(row_layout.height
+                + if layout.row_for_index(self.entries.len().saturating_sub(1)) == row_ix {
+                    self.large_icon_rename_tail
+                } else {
+                    0.0
+                }))
             .w_full();
 
         for ix in start..end {
@@ -2989,7 +2997,13 @@ impl ExplorerView {
 
         let rename_is_active = self.rename_is_active_for_path(&entry.path);
         let name = if rename_is_active {
-            large_icon_rename_input(self.active_rename_focus_handle(), cx).into_any_element()
+            div()
+                .w(px(large_icon_filename_text_width()))
+                .h(px((tile_height
+                    - LARGE_ICON_SIZE
+                    - LARGE_ICON_TEXT_TOP_GAP)
+                    .max(0.0)))
+                .into_any_element()
         } else {
             large_icon_filename(
                 ix,
@@ -3104,6 +3118,7 @@ impl ExplorerView {
             };
             self.large_icon_list_state
                 .reset_with_sizes(layout.row_sizes(viewport_width));
+            self.large_icon_rename_tail = 0.0;
             scroll_top =
                 scroll_top.clamp(0.0, (layout.content_height() - viewport_height).max(0.0));
             self.large_icon_list_state
@@ -3128,6 +3143,89 @@ impl ExplorerView {
                 .scroll_to(layout.scroll_offset(scroll_top));
         }
 
+        let rename_overlay = self.active_rename.as_ref().and_then(|rename| {
+            let ix = self.entry_index_by_path(&rename.original_path)?;
+            let rows = large_icon_filename_rows(&rename.content, &self.font, window.text_system());
+            Some((ix, rows))
+        });
+        let extra = rename_overlay.as_ref().map_or(0.0, |(ix, rows)| {
+            let (_, top, _, _) = layout.index_bounds(*ix).expect("rename tile");
+            (top + 1.0
+                + LARGE_ICON_SIZE
+                + LARGE_ICON_TEXT_TOP_GAP
+                + rows.len() as f32 * LARGE_ICON_TEXT_LINE_HEIGHT
+                + 2.0
+                - layout.content_height())
+            .max(0.0)
+        });
+        if extra != self.large_icon_rename_tail {
+            self.large_icon_rename_tail = extra;
+            self.large_icon_list_state
+                .reset_with_sizes(layout.row_sizes_with_tail(viewport_width, extra));
+            scroll_top = scroll_top.clamp(
+                0.0,
+                (layout.content_height() + extra - viewport_height).max(0.0),
+            );
+            self.large_icon_list_state
+                .scroll_to(layout.scroll_offset_with_tail(scroll_top));
+        }
+        if let Some((ix, rows)) = &rename_overlay {
+            let rename = self.active_rename.as_mut().expect("rename overlay");
+            let cursor = rename.cursor_offset();
+            let (_, top, _, _) = layout.index_bounds(*ix).expect("rename tile");
+            let editor_top = top + 1.0 + LARGE_ICON_SIZE + LARGE_ICON_TEXT_TOP_GAP - 2.0;
+            let row = rename.wrapped_cursor_row(rows);
+            if viewport_height > 0.0
+                && rename.last_wrapped_reveal.as_ref().is_none_or(
+                    |(content, offset, old_row, old_top, old_height)| {
+                        content != &rename.content
+                            || *offset != cursor
+                            || *old_row != row
+                            || *old_top != editor_top
+                            || *old_height != viewport_height
+                    },
+                )
+            {
+                let editor_height = rows.len() as f32 * LARGE_ICON_TEXT_LINE_HEIGHT + 4.0;
+                let (reveal_top, reveal_bottom) = if editor_height <= viewport_height {
+                    (editor_top, editor_top + editor_height)
+                } else {
+                    let caret_top = editor_top + 2.0 + row as f32 * LARGE_ICON_TEXT_LINE_HEIGHT;
+                    (caret_top, caret_top + LARGE_ICON_TEXT_LINE_HEIGHT)
+                };
+                if reveal_top < scroll_top {
+                    scroll_top = reveal_top;
+                } else if reveal_bottom > scroll_top + viewport_height {
+                    scroll_top = reveal_bottom - viewport_height;
+                }
+                scroll_top = scroll_top.clamp(
+                    0.0,
+                    (layout.content_height() + extra - viewport_height).max(0.0),
+                );
+                self.large_icon_list_state
+                    .scroll_to(layout.scroll_offset_with_tail(scroll_top));
+                rename.last_wrapped_reveal = Some((
+                    rename.content.clone(),
+                    cursor,
+                    row,
+                    editor_top,
+                    viewport_height,
+                ));
+            }
+        }
+        let overlay = rename_overlay.map(|(ix, rows)| {
+            large_icon_rename_overlay(
+                large_icon_rename_input(
+                    self.active_rename_focus_handle(),
+                    &self.font,
+                    rows.len(),
+                    cx,
+                ),
+                layout.clone(),
+                ix,
+                self.large_icon_list_state.clone(),
+            )
+        });
         div().flex().flex_col().size_full().overflow_hidden().child(
             div()
                 .flex()
@@ -3155,7 +3253,8 @@ impl ExplorerView {
                         )
                         .size_full(),
                     )
-                    .child(self.render_mouse_selection_box()),
+                    .child(self.render_mouse_selection_box())
+                    .when_some(overlay, |pane, overlay| pane.child(overlay)),
                 )
                 .child(self.render_scrollbar(cx)),
         )
@@ -4122,6 +4221,14 @@ impl Render for ExplorerView {
             .on_action(cx.listener(Self::handle_rename_cut))
             .on_action(cx.listener(Self::handle_rename_paste))
             .on_action(cx.listener(Self::handle_rename_noop))
+            .on_action(cx.listener(Self::handle_rename_up))
+            .on_action(cx.listener(Self::handle_rename_down))
+            .on_action(cx.listener(Self::handle_rename_select_up))
+            .on_action(cx.listener(Self::handle_rename_select_down))
+            .on_action(cx.listener(Self::handle_rename_line_home))
+            .on_action(cx.listener(Self::handle_rename_line_end))
+            .on_action(cx.listener(Self::handle_rename_select_line_home))
+            .on_action(cx.listener(Self::handle_rename_select_line_end))
             .on_action(cx.listener(Self::handle_text_input_undo))
             .on_action(cx.listener(Self::handle_text_input_redo))
             .on_action(cx.listener(Self::handle_address_edit))
@@ -7671,21 +7778,26 @@ fn large_icon_filename(
 
 fn large_icon_rename_input(
     focus_handle: Option<FocusHandle>,
+    font: &gpui::Font,
+    rows: usize,
     cx: &mut Context<ExplorerView>,
 ) -> AnyElement {
     let entity = cx.entity();
     div()
         .debug_selector(|| "large-icon-rename-input".to_owned())
-        .key_context("ExplorerRenameInput")
-        .w(px(LARGE_ICON_TILE_WIDTH - 16.0))
-        .h(px(20.0))
+        .key_context("ExplorerRenameInput wrapped = true")
+        .w(px(large_icon_filename_text_width() + 6.0))
+        .h(px(LARGE_ICON_TEXT_LINE_HEIGHT * rows as f32 + 4.0))
         .px(px(2.0))
+        .py(px(1.0))
+        .occlude()
         .border_1()
         .border_color(rgb(0x0078d7))
         .bg(rgb(0xffffff))
         .cursor(CursorStyle::IBeam)
-        .text_size(px(NAME_TEXT_SIZE))
-        .line_height(px(16.0))
+        .font(font.clone())
+        .text_size(px(LARGE_ICON_TEXT_SIZE))
+        .line_height(px(LARGE_ICON_TEXT_LINE_HEIGHT))
         .overflow_hidden()
         .when_some(focus_handle.as_ref(), |this, focus_handle| {
             this.track_focus(focus_handle)
@@ -7727,7 +7839,7 @@ fn large_icon_rename_input(
                 }
             }),
         )
-        .child(rename_text_element(entity))
+        .child(wrapped_rename_text_element(entity))
         .into_any_element()
 }
 
