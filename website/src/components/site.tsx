@@ -85,11 +85,13 @@ export function Header() {
         className={`main-navigation ${open ? 'is-open' : ''}`}
         aria-label="Main navigation"
       >
-        {sections.map(({ id, label }) => (
-          <a key={id} href={`#${id}`} onClick={() => setOpen(false)}>
-            {label}
-          </a>
-        ))}
+        {sections
+          .filter(({ id }) => id !== 'start')
+          .map(({ id, label }) => (
+            <a key={id} href={`#${id}`} onClick={() => setOpen(false)}>
+              {label}
+            </a>
+          ))}
       </nav>
       <a className="header-github" href={REPOSITORY}>
         GitHub <GitHubIcon />
