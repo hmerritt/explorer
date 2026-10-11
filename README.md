@@ -16,6 +16,8 @@
 </p>
 
 <p align="center">
+  <a href="https://explorer.mrrtt.me/">🌐 Website and downloads</a>
+  |
   <a href="#-install">💾 Install</a>
   |
   <a href="#-features">⚡ Features</a>

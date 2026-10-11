@@ -51,24 +51,39 @@ card from the captures (requires Python and Pillow). The capture dimensions are
 recorded in the page to reserve layout space. Below-the-fold gallery images are
 loaded lazily. Do not substitute generated mockups or personal file listings.
 
-Set `VITE_SITE_URL` to the public origin for sharing and social metadata, for
-example `https://explorer.example.com`. Development defaults to
-`http://localhost:3000`. This value is public and is embedded in the build.
+`VITE_SITE_URL` defaults to `http://explorer.mrrtt.me/` in development and production.
+Set it explicitly to override the default, for example `https://explorer.mrrtt.me`.
+It supplies the normalized origin for sharing, social metadata,
+the homepage canonical URL, software JSON-LD, `robots.txt` and `sitemap.xml`.
+Production builds reject configured origins without a public domain or with
+credentials, a path, query or fragment. HTTP and HTTPS are supported. Trailing
+slashes are normalized; the homepage URL retains its final slash.
+This value is public and is embedded in the build. For PowerShell:
+
+```powershell
+$env:VITE_SITE_URL = 'https://explorer.mrrtt.me'
+bun run check
+```
+
+For Bash, use `VITE_SITE_URL=https://explorer.mrrtt.me bun run check`.
+Configure the same variable in your hosting provider's build environment;
+`.env.deploy` is only loaded by the VPS deployment script.
 
 ## Commands
 
-| Command                    | Purpose                                                       |
-| -------------------------- | ------------------------------------------------------------- |
-| `bun run dev`              | Start the development server with hot reload.                 |
-| `bun run build`            | Generate routes, prerender HTML and build static assets/JSON. |
-| `bun run deploy`           | Build and mirror the static site to the configured VPS.       |
-| `bun run deploy --dry-run` | Build and preview transfers/deletions without remote writes.  |
-| `bun run typecheck`        | Check TypeScript without emitting files.                      |
-| `bun run lint`             | Run ESLint, treating warnings as failures.                    |
-| `bun run format`           | Format website source and configuration with Prettier.        |
-| `bun run format:check`     | Check formatting without modifying files.                     |
-| `bun run test`             | Test release handling, caching, failures and platform CTAs.   |
-| `bun run check`            | Test, build, typecheck, lint, then check formatting.          |
+| Command                    | Purpose                                                         |
+| -------------------------- | --------------------------------------------------------------- |
+| `bun run dev`              | Start the development server with hot reload.                   |
+| `bun run build`            | Generate routes, prerender HTML and build static assets/JSON.   |
+| `bun run deploy`           | Build and mirror the static site to the configured VPS.         |
+| `bun run deploy --dry-run` | Build and preview transfers/deletions without remote writes.    |
+| `bun run typecheck`        | Check TypeScript without emitting files.                        |
+| `bun run lint`             | Run ESLint, treating warnings as failures.                      |
+| `bun run format`           | Format website source and configuration with Prettier.          |
+| `bun run format:check`     | Check formatting without modifying files.                       |
+| `bun run test`             | Test release handling, caching, failures and platform CTAs.     |
+| `bun run test:seo`         | Verify SEO metadata and crawler files in the production output. |
+| `bun run check`            | Test, build, verify SEO output, typecheck, lint and formatting. |
 
 Commit `bun.lock` when changing dependencies. The generated
 `src/routeTree.gen.ts` is also committed, so standalone type checking works after
@@ -170,6 +185,62 @@ Cloudflare rules and cache purges are manual; the script only builds and syncs.
 
 See TanStack's [static prerendering guide](https://tanstack.com/start/latest/docs/framework/react/guide/static-prerendering)
 and [static server functions guide](https://tanstack.com/start/latest/docs/framework/react/guide/static-server-functions).
+
+## Search discovery and rollout
+
+The production build generates crawler files alongside `index.html`; the sitemap
+lists only the homepage, not section anchors, release JSON or downloads. The
+homepage includes software metadata describing the free app. No ratings or
+reviews are invented; Google's software rich results require genuine review
+information in addition to this metadata.
+
+After deploying:
+
+- Confirm `/`, `/robots.txt` and `/sitemap.xml` return HTTP 200, HTTP redirects
+  to HTTPS, and unknown paths return HTTP 404. If `/index.html` is accessible,
+  confirm its canonical points to `https://explorer.mrrtt.me/`.
+- Inspect the served robots.txt, not only the build artifact: Cloudflare can
+  prepend content policies. Confirm the allow rule and sitemap reference survive
+  and that crawler protection does not block verified search crawlers.
+- In GitHub repository Settings, set the website field to
+  `https://explorer.mrrtt.me/`, matching the prominent README link.
+- Add the domain to Google Search Console, verify ownership using the DNS TXT
+  record supplied by Google, submit `https://explorer.mrrtt.me/sitemap.xml`, and
+  use URL Inspection on the homepage to inspect the rendered page and request
+  indexing. Check indexing reports for crawl errors or exclusions.
+- Capture mobile and desktop Lighthouse reports before and after deployment.
+  Target 100 for automated SEO checks; compare performance separately. A high
+  audit score does not guarantee indexing or search rankings.
+- Review indexing after deployment, then impressions and clicks over the next
+  four weeks. Compare branded Explorer queries and relevant file-manager queries.
+
+These hosting, DNS, GitHub and Search Console steps are separate from building
+the site. See Google's [sitemap guidance](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap)
+and [software structured-data requirements](https://developers.google.com/search/docs/appearance/structured-data/software-app).
+
+### Live audit baseline — 11 October 2026
+
+The [PageSpeed report](https://pagespeed.web.dev/analysis/https-explorer-mrrtt-me/rly67dzqo4?form_factor=mobile)
+was captured before deploying these SEO improvements, using Lighthouse 13.5.0.
+
+| Metric                   | Mobile | Desktop |
+| ------------------------ | ------ | ------- |
+| SEO                      | 100    | 100     |
+| Performance              | 97     | 100     |
+| Accessibility            | 91     | 96      |
+| Best practices           | 100    | 100     |
+| First contentful paint   | 1.8 s  | 0.3 s   |
+| Largest contentful paint | 2.3 s  | 0.5 s   |
+| Total blocking time      | 0 ms   | 0 ms    |
+| Cumulative layout shift  | 0.003  | 0.001   |
+
+No real-user field data was available. These are single lab runs, not evidence
+of indexing or rankings. The homepage already passes automated SEO audits;
+canonical URLs, sitemap discovery and structured data improve aspects beyond
+that score. The existing WebP hero is 75,378 bytes versus 199,815 bytes for the
+PNG (62% smaller); any loading-time improvement needs a new deployed audit.
+The audit also identified contrast and video-caption accessibility issues,
+plus small touch targets on mobile, for a separate accessibility review.
 
 ## Deployment verification
 

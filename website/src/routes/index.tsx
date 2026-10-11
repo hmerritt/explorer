@@ -14,7 +14,7 @@ import {
   DownloadIcon,
   GitHubIcon,
 } from '../components/site'
-import { REPOSITORY, RELEASES_URL } from '../lib/releases'
+import { REPOSITORY, RELEASES_URL, SITE_URL, HOME_URL } from '../lib/releases'
 import type { Platform, ReleaseAsset, ReleaseInfo } from '../lib/releases'
 import { detectPlatform, heroDownload } from '../lib/platform'
 
@@ -27,6 +27,30 @@ const loadRelease = createServerFn({ method: 'GET' })
 
 export const Route = createFileRoute('/')({
   loader: () => loadRelease(),
+  head: () => ({
+    links: [{ rel: 'canonical', href: HOME_URL }],
+    scripts: [
+      {
+        type: 'application/ld+json',
+        children: JSON.stringify({
+          '@context': 'https://schema.org',
+          '@type': 'SoftwareApplication',
+          name: 'Explorer',
+          url: HOME_URL,
+          description:
+            'A free cross-platform file explorer packed with features. Tabs, split-views, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.',
+          applicationCategory: 'UtilitiesApplication',
+          operatingSystem: 'macOS, Linux, Windows',
+          isAccessibleForFree: true,
+          offers: { '@type': 'Offer', price: 0, url: `${HOME_URL}#get-it` },
+          sameAs: REPOSITORY,
+          downloadUrl: RELEASES_URL,
+          screenshot: `${SITE_URL}/images/overview.webp`,
+          license: `${REPOSITORY}/blob/master/LICENSE.txt`,
+        }).replace(/</g, '\\u003c'),
+      },
+    ],
+  }),
   component: Home,
 })
 
@@ -148,7 +172,7 @@ function Hero({
           aria-label="View the Explorer overview screenshot at full size"
         >
           <img
-            src="/images/overview.png"
+            src="/images/overview.webp"
             alt="Explorer’s details view with demo folders, a pinned sidebar and familiar file controls"
             width="1202"
             height="822"

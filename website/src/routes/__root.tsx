@@ -7,7 +7,7 @@ import {
 } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 import stylesheet from '../styles.css?url'
-import { SITE_URL } from '../lib/releases'
+import { SITE_URL, HOME_URL } from '../lib/releases'
 
 const title = 'Explorer — Windows File Explorer for macOS, Linux and Windows'
 const description =
@@ -28,7 +28,7 @@ export const Route = createRootRoute({
       { property: 'og:site_name', content: 'Explorer' },
       { property: 'og:title', content: title },
       { property: 'og:description', content: description },
-      { property: 'og:url', content: SITE_URL },
+      { property: 'og:url', content: HOME_URL },
       { property: 'og:image', content: `${SITE_URL}/images/social.png` },
       { property: 'og:image:width', content: '1200' },
       { property: 'og:image:height', content: '630' },

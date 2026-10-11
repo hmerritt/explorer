@@ -20,6 +20,8 @@ jobs:
   check:
     name: Website checks
     runs-on: ubuntu-latest
+    env:
+      VITE_SITE_URL: https://explorer.mrrtt.me
     defaults:
       run:
         working-directory: website
