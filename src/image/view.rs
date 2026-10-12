@@ -89,7 +89,7 @@ const IMAGE_VIEWER_WHEEL_LINE_HEIGHT: f32 = 40.0;
 const IMAGE_VIEWER_WHEEL_STEP_PIXELS: f32 = 120.0;
 const ZOOM_EPSILON: f64 = 0.000_001;
 
-pub(crate) fn open_image_window(path: PathBuf, cx: &mut App) {
+pub(crate) fn open_image_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
     let title = SharedString::from(image_title(&path));
     let window_bounds = startup_image_window_bounds(cx);
     cx.open_window(
@@ -121,7 +121,8 @@ pub(crate) fn open_image_window(path: PathBuf, cx: &mut App) {
             cx.new(|cx| ImageViewerWindow::new(path, title, focus_handle, window, cx))
         },
     )
-    .expect("failed to open image viewer window");
+    .map_err(|error| format!("Could not open image viewer window: {error}"))?;
+    Ok(())
 }
 
 fn image_window_state_path() -> Option<PathBuf> {

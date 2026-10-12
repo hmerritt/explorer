@@ -115,7 +115,7 @@ pub(crate) fn apply(
             "select_all" => view.handle_select_all(&SelectAll, window, cx),
             "image_viewer" => {
                 let entry = view.entries.first().ok_or("viewer fixture has no entry")?;
-                crate::image_viewer::open_image_window(entry.path.clone(), cx);
+                crate::image_viewer::open_image_window(entry.path.clone(), cx)?;
             }
             name if name.starts_with("sort_") => {
                 let column = match name.trim_start_matches("sort_").split('_').next().unwrap() {

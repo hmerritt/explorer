@@ -620,7 +620,9 @@ fn handle_launch_request(request: LaunchRequest, cx: &mut App) {
             eprintln!("{error}");
         }
     } else if let Some(path) = request.image_path {
-        crate::image_viewer::open_image_window(path, cx);
+        if let Err(error) = crate::image_viewer::open_image_window(path, cx) {
+            eprintln!("{error}");
+        }
     } else {
         handle_explorer_launch_request(cx);
     }
@@ -2723,7 +2725,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         cx.update(|cx| {
             open_explorer_window_at(dir.clone(), default_window_bounds(cx), None, cx);
-            crate::image_viewer::open_image_window(dir.join("photo.png"), cx);
+            crate::image_viewer::open_image_window(dir.join("photo.png"), cx)
+                .expect("open image viewer window");
         });
         cx.run_until_parked();
 

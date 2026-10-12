@@ -43,11 +43,29 @@ enum MacOpenAction {
     Finished(OpenWithOutcome),
     ChooseApplication,
     OpenEpub { default_app_may_have_changed: bool },
+    OpenImage { default_app_may_have_changed: bool },
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn mac_should_open_epub_internally(path: &Path, bundle_id: Option<&str>) -> bool {
-    bundle_id == Some(crate::settings::APP_ID) && crate::epub_reader::epub_existing_file(path)
+fn mac_internal_open_action(
+    path: &Path,
+    bundle_id: Option<&str>,
+    default_app_may_have_changed: bool,
+) -> Option<MacOpenAction> {
+    if bundle_id != Some(crate::settings::APP_ID) {
+        return None;
+    }
+    if crate::epub_reader::epub_existing_file(path) {
+        Some(MacOpenAction::OpenEpub {
+            default_app_may_have_changed,
+        })
+    } else if crate::image_viewer::image_like_existing_file(path) {
+        Some(MacOpenAction::OpenImage {
+            default_app_may_have_changed,
+        })
+    } else {
+        None
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -63,6 +81,14 @@ fn complete_mac_open_action(
         } => {
             crate::epub_reader::open_epub_window(path.to_path_buf(), cx)
                 .map_err(io::Error::other)?;
+            Ok(OpenWithOutcome::opened(default_app_may_have_changed))
+        }
+        MacOpenAction::OpenImage {
+            default_app_may_have_changed,
+        } => {
+            crate::image_viewer::open_image_window(path.to_path_buf(), cx)
+                .map_err(io::Error::other)?;
+            cx.activate(true);
             Ok(OpenWithOutcome::opened(default_app_may_have_changed))
         }
         MacOpenAction::ChooseApplication => Err(io::Error::other("no application was selected")),
@@ -1303,11 +1329,12 @@ fn mac_open_default_file(path: &Path) -> io::Result<MacOpenAction> {
         let Some(application) = mac_default_application_path(path) else {
             return Ok(MacOpenAction::ChooseApplication);
         };
-        if mac_should_open_epub_internally(path, mac_application_bundle_id(&application).as_deref())
-        {
-            return Ok(MacOpenAction::OpenEpub {
-                default_app_may_have_changed: false,
-            });
+        if let Some(action) = mac_internal_open_action(
+            path,
+            mac_application_bundle_id(&application).as_deref(),
+            false,
+        ) {
+            return Ok(action);
         }
     }
     open::that_detached(path).map(|_| MacOpenAction::Finished(OpenWithOutcome::opened(false)))
@@ -1405,10 +1432,12 @@ fn mac_open_with_application(
     application: &Path,
     default_app_may_have_changed: bool,
 ) -> io::Result<MacOpenAction> {
-    if mac_should_open_epub_internally(path, mac_application_bundle_id(application).as_deref()) {
-        return Ok(MacOpenAction::OpenEpub {
-            default_app_may_have_changed,
-        });
+    if let Some(action) = mac_internal_open_action(
+        path,
+        mac_application_bundle_id(application).as_deref(),
+        default_app_may_have_changed,
+    ) {
+        return Ok(action);
     }
     use cocoa::{
         base::{id, nil},
@@ -1756,23 +1785,193 @@ mod tests {
     use super::*;
     use gpui::AppContext;
 
+    fn write_test_image(path: &Path, format: image::ImageFormat) {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut bytes, format)
+            .unwrap();
+        std::fs::write(path, bytes.into_inner()).unwrap();
+    }
+
+    #[test]
+    fn mac_image_routing_requires_explorer_bundle_id_and_existing_image() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, format) in [
+            ("café photo.png", image::ImageFormat::Png),
+            ("PHOTO.JPG", image::ImageFormat::Jpeg),
+            ("extensionless", image::ImageFormat::Png),
+        ] {
+            let path = dir.path().join(name);
+            write_test_image(&path, format);
+            for changed in [false, true] {
+                assert_eq!(
+                    mac_internal_open_action(&path, Some(crate::settings::APP_ID), changed),
+                    Some(MacOpenAction::OpenImage {
+                        default_app_may_have_changed: changed,
+                    })
+                );
+            }
+            for bundle_id in [
+                None,
+                Some("com.apple.Preview"),
+                Some("com.other.Explorer"),
+                Some("Explorer"),
+            ] {
+                assert_eq!(mac_internal_open_action(&path, bundle_id, false), None);
+            }
+        }
+        let directory = dir.path().join("folder.png");
+        std::fs::create_dir(&directory).unwrap();
+        let text = dir.path().join("not-an-image");
+        std::fs::write(&text, b"text").unwrap();
+        for path in [directory, text, dir.path().join("missing.jpg")] {
+            assert_eq!(
+                mac_internal_open_action(&path, Some(crate::settings::APP_ID), false),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn mac_internal_routing_checks_epubs_before_image_signatures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        write_test_image(&path, image::ImageFormat::Png);
+        assert!(crate::image_viewer::image_like_existing_file(&path));
+        assert_eq!(
+            mac_internal_open_action(&path, Some(crate::settings::APP_ID), false),
+            Some(MacOpenAction::OpenEpub {
+                default_app_may_have_changed: false,
+            })
+        );
+    }
+
+    #[gpui::test]
+    fn mac_image_dispatch_keeps_browser_and_opens_mixed_batch_when_focus_configured(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::settings::{ExplorerSettings, NewWindowBehaviour, SettingsState};
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [
+            "café photo.PNG",
+            "book.epub",
+            "external.jpg",
+            "extensionless",
+        ]
+        .map(|name| dir.path().join(name));
+        write_test_image(&paths[0], image::ImageFormat::Png);
+        crate::explorer::epub_hover_preview::test_support::write_epub(&paths[1], "3.0", None, None);
+        write_test_image(&paths[2], image::ImageFormat::Jpeg);
+        write_test_image(&paths[3], image::ImageFormat::Png);
+        let mut settings = ExplorerSettings::default();
+        settings.app.new_window_behaviour = NewWindowBehaviour::Focus;
+        cx.update(|cx| cx.set_global(SettingsState::for_test(settings)));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(dir.path().to_path_buf(), focus_handle)
+        });
+        let browser_window = cx.windows()[0];
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        view.update(cx, |view, cx| {
+            let attempted = attempted.clone();
+            view.open_files_with_mac_dispatch(
+                paths.to_vec(),
+                move |path| {
+                    attempted.lock().unwrap().push(path.to_path_buf());
+                    let bundle_id =
+                        if path.file_name() == Some(std::ffi::OsStr::new("external.jpg")) {
+                            "com.apple.Preview"
+                        } else {
+                            crate::settings::APP_ID
+                        };
+                    Ok(mac_internal_open_action(path, Some(bundle_id), false)
+                        .unwrap_or(MacOpenAction::Finished(OpenWithOutcome::opened(false))))
+                },
+                |_| async { panic!("default application is already known") },
+                cx,
+            );
+            assert!(view.open_with_task.is_some());
+        });
+        cx.run_until_parked();
+        let windows = cx.windows();
+        assert_eq!(
+            windows.len(),
+            4,
+            "browser, two image viewers, and EPUB reader"
+        );
+        assert!(windows.contains(&browser_window));
+        assert_eq!(*attempted.lock().unwrap(), paths);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_with_task.is_none());
+            assert!(view.operation_notice.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn mac_picker_image_action_preserves_association_change(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.png");
+        write_test_image(&path, image::ImageFormat::Png);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            ExplorerView::new_with_focus_handle_for_test(dir.path().to_path_buf(), focus_handle)
+        });
+        cx.update(|_, cx| crate::explorer::initialize_native_icon_cache(cx));
+        view.update(cx, |view, cx| {
+            view.set_error_notice("old error");
+            view.open_files_with_mac_dispatch(
+                vec![path.clone()],
+                |_| Ok(MacOpenAction::ChooseApplication),
+                |path| async move {
+                    Ok(
+                        mac_internal_open_action(&path, Some(crate::settings::APP_ID), true)
+                            .expect("selected Explorer for an image"),
+                    )
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 2);
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_with_task.is_none());
+            assert!(view.operation_notice.is_none());
+        });
+        let outcome = cx
+            .update(|_, cx| {
+                complete_mac_open_action(
+                    &path,
+                    mac_internal_open_action(&path, Some(crate::settings::APP_ID), true).unwrap(),
+                    cx,
+                )
+            })
+            .unwrap();
+        assert_eq!(outcome, OpenWithOutcome::opened(true));
+    }
+
     #[test]
     fn mac_epub_routing_requires_explorer_bundle_id_and_existing_epub() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["café book.epub", "BOOK.EPUB"] {
             let path = dir.path().join(name);
             std::fs::write(&path, b"routed by extension").unwrap();
-            assert!(mac_should_open_epub_internally(
-                &path,
-                Some(crate::settings::APP_ID)
-            ));
+            assert_eq!(
+                mac_internal_open_action(&path, Some(crate::settings::APP_ID), false),
+                Some(MacOpenAction::OpenEpub {
+                    default_app_may_have_changed: false,
+                })
+            );
             for bundle_id in [
                 None,
                 Some("com.apple.iBooksX"),
                 Some("com.other.Explorer"),
                 Some("Explorer"),
             ] {
-                assert!(!mac_should_open_epub_internally(&path, bundle_id));
+                assert_eq!(mac_internal_open_action(&path, bundle_id, false), None);
             }
         }
         let directory = dir.path().join("folder.epub");
@@ -1780,10 +1979,10 @@ mod tests {
         let text = dir.path().join("book.txt");
         std::fs::write(&text, b"text").unwrap();
         for path in [directory, text, dir.path().join("missing.epub")] {
-            assert!(!mac_should_open_epub_internally(
-                &path,
-                Some(crate::settings::APP_ID)
-            ));
+            assert_eq!(
+                mac_internal_open_action(&path, Some(crate::settings::APP_ID), false),
+                None
+            );
         }
     }
 
@@ -1838,13 +2037,8 @@ mod tests {
                 move |path| {
                     attempted.lock().unwrap().push(path.to_path_buf());
                     Ok(
-                        if mac_should_open_epub_internally(path, Some(crate::settings::APP_ID)) {
-                            MacOpenAction::OpenEpub {
-                                default_app_may_have_changed: false,
-                            }
-                        } else {
-                            MacOpenAction::Finished(OpenWithOutcome::opened(false))
-                        },
+                        mac_internal_open_action(path, Some(crate::settings::APP_ID), false)
+                            .unwrap_or(MacOpenAction::Finished(OpenWithOutcome::opened(false))),
                     )
                 },
                 |_| async { panic!("default application is already known") },
