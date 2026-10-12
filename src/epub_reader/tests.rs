@@ -94,6 +94,153 @@ fn chapter(body: &str) -> Chapter {
     parse_chapter(&format!("<html><head><title>Ignored</title><style>Ignored</style></head><body>{body}</body></html>"), "/book/chapter.xhtml", &AtomicBool::new(false)).unwrap()
 }
 
+#[test]
+fn publisher_styles_preserve_scene_breaks_poetry_notes_and_hidden_content() {
+    let chapter = parse_chapter(r##"<html xmlns:epub="http://www.idpf.org/2007/ops"><head><style>.poem {white-space:pre-wrap; text-align:center; text-indent:2em; margin-top:1em; break-before:page} .hidden {display:none}</style></head><body><p class="hidden">Invisible</p><p hidden="hidden">Also invisible</p><div class="hidden"><p>Hidden descendant</p></div><p class="poem">First line
+  Second line</p><hr/><p>x<sup>2</sup> H<sub>2</sub>O <code>code</code><a epub:type="noteref" href="#note">1</a></p><aside epub:type="footnote" id="note"><p>A note</p><p>Second note paragraph</p></aside><pre>  code
+    indented</pre></body></html>"##, "/book/c.xhtml", &AtomicBool::new(false)).unwrap();
+    let text = all_text(&chapter);
+    assert!(
+        !text.contains("Invisible")
+            && !text.contains("invisible")
+            && !text.contains("Hidden descendant")
+    );
+    assert!(text.contains("First line\n  Second line"));
+    assert!(
+        chapter
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Rule))
+    );
+    let Block::Text { kind, .. } = &chapter.blocks[0] else {
+        panic!()
+    };
+    assert_eq!(kind.alignment, Some(Alignment::Center));
+    assert_eq!(kind.text_indent, Some(2000));
+    assert!(kind.break_before);
+    let Block::Text { spans, .. } = &chapter.blocks[2] else {
+        panic!()
+    };
+    assert!(spans.iter().any(|span| span.style.baseline == -1));
+    assert!(spans.iter().any(|span| span.style.baseline == 1));
+    assert!(spans.iter().any(|span| span.style.monospace));
+    assert!(spans.iter().any(|span| span.style.noteref));
+    let note = chapter.notes.get("note").unwrap();
+    assert_eq!(note.len(), 2);
+    assert!(matches!(chapter.blocks.last(),Some(Block::Text {kind,..}) if kind.monospace));
+}
+
+#[test]
+fn linked_stylesheets_are_read_from_archive_and_tables_preserve_empty_and_spanned_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("styled.epub");
+    write_book(
+        &path,
+        "3.0",
+        "",
+        &[(
+            "c.xhtml",
+            r#"<html><head><link rel="stylesheet" href="layout.css"/></head><body><p class="poetry">Verse</p><table><tr><th>A</th><th>B</th><th>C</th></tr><tr><td colspan="2"><p>Wide</p><p>Second paragraph</p></td><td></td></tr></table></body></html>"#,
+        )],
+        &[(
+            "layout.css",
+            "text/css",
+            b".poetry {text-align:right; margin-bottom:2em}",
+        )],
+    );
+    let chapter = Book::open(&path, &AtomicBool::new(false))
+        .unwrap()
+        .chapter("/book/c.xhtml", &AtomicBool::new(false))
+        .unwrap();
+    assert!(
+        matches!(&chapter.blocks[0],Block::Text {kind,..} if kind.alignment == Some(Alignment::Right) && kind.margin_after == Some(2000))
+    );
+    let cells: Vec<_> = chapter
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text { text, kind, .. } if kind.table_row.is_some() => Some((text, kind)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cells.len(), 5);
+    assert!(cells.iter().all(|(_, kind)| kind.table_columns == 3));
+    assert_eq!(cells[3].1.table_span, 2);
+    assert!(cells[4].0.is_empty());
+    assert_eq!(cells[4].1.table_column, 2);
+    assert_eq!(cells[3].0, "Wide\nSecond paragraph");
+}
+
+#[test]
+fn content_identity_survives_moves_and_timestamps_and_legacy_migration_is_guarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("book.epub");
+    let moved = dir.path().join("renamed.epub");
+    std::fs::write(&original, b"book content").unwrap();
+    let fingerprint = Fingerprint::for_path(&original).unwrap();
+    let legacy = book_key(&original);
+    let key = content_key(&original, &AtomicBool::new(false)).unwrap();
+    let mut store = Store::default();
+    let location = Location {
+        href: "chapter".into(),
+        point: ContentPoint {
+            block: 2,
+            offset: 7,
+        },
+        ..Location::default()
+    };
+    store.remember(legacy.clone(), fingerprint.clone(), location.clone());
+    store.migrate(
+        &key,
+        &legacy,
+        &Fingerprint {
+            size: 99,
+            ..fingerprint.clone()
+        },
+    );
+    assert!(store.resume(&key, &fingerprint).is_none());
+    store.migrate(&key, &legacy, &fingerprint);
+    std::fs::rename(&original, &moved).unwrap();
+    filetime::set_file_mtime(&moved, filetime::FileTime::from_unix_time(42, 0)).unwrap();
+    assert_eq!(content_key(&moved, &AtomicBool::new(false)).unwrap(), key);
+    assert_eq!(
+        store.resume(&key, &Fingerprint::for_path(&moved).unwrap()),
+        Some(location)
+    );
+    std::fs::write(&moved, b"changed book").unwrap();
+    assert_ne!(content_key(&moved, &AtomicBool::new(false)).unwrap(), key);
+    assert!(content_key(&moved, &AtomicBool::new(true)).is_err());
+}
+
+#[test]
+fn passage_context_recovers_after_parser_changes_and_old_preferences_keep_defaults() {
+    let original = chapter("<p>Before</p><p>The café passage to remember.</p>");
+    let location = Location::at(
+        "c".into(),
+        ContentPoint {
+            block: 1,
+            offset: 4,
+        },
+        Some(&original),
+    );
+    let changed = chapter("<hr/><p>Before</p><p>The café passage to remember.</p>");
+    assert_eq!(
+        location.recover(&changed),
+        ContentPoint {
+            block: 2,
+            offset: 4
+        }
+    );
+    let preferences: Preferences =
+        serde_json::from_str(r#"{"font_size":22,"light":true}"#).unwrap();
+    assert_eq!(preferences.line_spacing, 15);
+    assert_eq!(preferences.reading_width, 900);
+    assert!(preferences.justify && preferences.publisher_styles);
+    let old: Location =
+        serde_json::from_str(r#"{"href":"c","point":{"block":1,"offset":4}}"#).unwrap();
+    assert!(old.quote.is_empty());
+}
+
 fn all_text(chapter: &Chapter) -> String {
     chapter
         .blocks
@@ -191,7 +338,18 @@ fn semantic_styles_entities_anchors_and_relative_links_are_preserved() {
     let text = all_text(&chapter);
     assert!(text.contains("A bold word & café\u{a0}字 note."));
     assert!(text.contains("• One\n\n• Two"));
-    assert!(text.contains("A | B"));
+    assert!(text.contains("A\n\nB"));
+    let cells: Vec<_> = chapter
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text { kind, .. } if kind.table_row.is_some() => Some(kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0].table_columns, 2);
+    assert_eq!(cells[1].table_column, 1);
     assert!(!text.contains("Ignored"));
     assert_eq!(chapter.anchors["start"], ContentPoint::default());
     let Block::Text { spans, .. } = &chapter.blocks[1] else {
@@ -361,6 +519,7 @@ fn saved_state_round_trips_multiple_books_invalidates_changes_and_tolerates_corr
             block: 3,
             offset: 24,
         },
+        ..Location::default()
     };
     let mut store = Store::default();
     store.remember("first".into(), stamp.clone(), location.clone());
@@ -518,10 +677,10 @@ fn justification_expands_word_spaces_without_mutating_cached_shapes(cx: &mut Tes
             .text_system()
             .shape_line(text.into(), px(20.0), &[run.clone()], None);
         let mut justified = natural.clone();
-        justify_line(&mut justified, f32::from(natural.width) + 120.0);
-        assert_eq!(justified.width, natural.width + px(120.0));
+        justify_line(&mut justified, f32::from(natural.width) + 30.0);
+        assert_eq!(justified.width, natural.width + px(30.0));
         assert_eq!(justified.text, natural.text);
-        for (word, expansion) in [("bold", 40.0), ("字", 80.0), ("end", 120.0)] {
+        for (word, expansion) in [("bold", 10.0), ("字", 20.0), ("end", 30.0)] {
             let index = text.find(word).unwrap();
             let x = justified.x_for_index(index);
             assert!((f32::from(x - natural.x_for_index(index)) - expansion).abs() < 0.01);
@@ -532,6 +691,9 @@ fn justification_expands_word_spaces_without_mutating_cached_shapes(cx: &mut Tes
             .text_system()
             .shape_line(text.into(), px(20.0), &[run], None);
         assert_eq!(cached.width, natural.width);
+        let mut excessive = natural.clone();
+        justify_line(&mut excessive, f32::from(natural.width) + 120.0);
+        assert_eq!(excessive.width, natural.width);
         assert_eq!(
             cached.x_for_index(text.find("end").unwrap()),
             natural.x_for_index(text.find("end").unwrap())
@@ -606,8 +768,12 @@ fn body_justification_respects_paragraphs_breaks_indents_and_shaping_chunks(
                         && continuation
                         && line.text.trim().contains(' ')
                     {
-                        assert!((f32::from(line.width) - (geometry.width - x)).abs() < 0.01);
-                        justified_count += 1;
+                        assert!(f32::from(line.width) <= geometry.width - x + 0.01);
+                        if (f32::from(line.width) - (geometry.width - x)).abs() < 0.01 {
+                            justified_count += 1;
+                        } else {
+                            natural_count += 1;
+                        }
                     } else {
                         assert!(f32::from(line.width) < geometry.width - x);
                         natural_count += 1;
@@ -796,4 +962,139 @@ fn absent_or_unreadable_cover_documents_leave_main_text_readable() {
             assert_eq!(book.sections.len(), 1);
         }
     }
+}
+
+#[gpui::test]
+fn publisher_indentation_and_page_breaks_preserve_every_byte(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let prose = "Readable café prose and 字. ".repeat(80);
+    let chapter = chapter(&format!(
+        "<p style='text-indent:2em;text-align:left'>{prose}</p><p style='break-before:page'>Next page</p><p style='break-after:page'>End page</p><p>Final page</p>"
+    ));
+    cx.update(|window, _| {
+        let geometry = PageGeometry::new(500.0, 400.0);
+        let mut cursor = ContentPoint::default();
+        let mut collected = vec![String::new(); chapter.blocks.len()];
+        let mut checked_indent = false;
+        let mut next_page = false;
+        let mut final_page = false;
+        for _ in 0..100 {
+            let page = layout_page(
+                &chapter,
+                cursor,
+                geometry,
+                "Arial",
+                20.0,
+                rgb(0x202020).into(),
+                rgb(0x0759b5).into(),
+                &HashMap::new(),
+                window,
+            )
+            .unwrap();
+            let mut first = true;
+            for item in &page.items {
+                if let PageItem::Text {
+                    block, range, x, ..
+                } = item
+                {
+                    if *block == 0 {
+                        assert_eq!(*x, if range.start == 0 { 40.0 } else { 0.0 });
+                        checked_indent = true;
+                    }
+                    if *block == 1 {
+                        assert!(first);
+                        next_page = true;
+                    }
+                    if *block == 3 {
+                        assert!(first);
+                        final_page = true;
+                    }
+                    let Block::Text { text, .. } = &chapter.blocks[*block] else {
+                        panic!()
+                    };
+                    collected[*block].push_str(&text[range.clone()]);
+                }
+                first = false;
+            }
+            assert!(page.end > cursor);
+            cursor = page.end;
+            if cursor.block == chapter.blocks.len() {
+                break;
+            }
+        }
+        assert!(checked_indent && next_page && final_page);
+        for (index, block) in chapter.blocks.iter().enumerate() {
+            if let Block::Text { text, .. } = block {
+                assert_eq!(&collected[index], text);
+            }
+        }
+    });
+}
+
+#[gpui::test]
+fn table_rows_keep_cell_geometry_and_oversized_cells_flow_without_loss(cx: &mut TestAppContext) {
+    let cx = cx.add_empty_window();
+    let chapter = chapter(&format!(
+        "<table><tr><th>A</th><th>B</th></tr><tr><td></td><td>Small cell</td></tr><tr><td>{}</td><td>Final cell</td></tr></table>",
+        "Long café cell. ".repeat(250)
+    ));
+    cx.update(|window, _| {
+        let mut cursor = ContentPoint::default();
+        let geometry = PageGeometry::new(480.0, 300.0);
+        let mut collected = vec![String::new(); chapter.blocks.len()];
+        let mut grid = false;
+        for _ in 0..200 {
+            let page = layout_page(
+                &chapter,
+                cursor,
+                geometry,
+                "Arial",
+                20.0,
+                rgb(0x202020).into(),
+                rgb(0x0759b5).into(),
+                &HashMap::new(),
+                window,
+            )
+            .unwrap();
+            if cursor.block == 0 {
+                let cells: Vec<_> = page
+                    .items
+                    .iter()
+                    .filter_map(|item| {
+                        if let PageItem::Text { block, x, y, .. } = item {
+                            (*block < 2).then_some((*x, *y))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(cells.len(), 2);
+                assert_eq!(cells[0].1, cells[1].1);
+                assert!(cells[1].0 > cells[0].0);
+                grid = page.items.iter().any(
+                    |item| matches!(item,PageItem::Rule {width,..} if *width == geometry.width),
+                );
+            }
+            for item in page.items {
+                if let PageItem::Text { block, range, .. } = item {
+                    let Block::Text { text, .. } = &chapter.blocks[block] else {
+                        panic!()
+                    };
+                    collected[block].push_str(&text[range]);
+                }
+            }
+            assert!(page.end > cursor);
+            cursor = page.end;
+            if cursor.block >= chapter.blocks.len() {
+                break;
+            }
+        }
+        assert!(grid);
+        assert_eq!(cursor.block, chapter.blocks.len());
+        for (index, block) in chapter.blocks.iter().enumerate() {
+            if let Block::Text { text, .. } = block {
+                assert_eq!(&collected[index], text);
+            }
+        }
+    });
 }

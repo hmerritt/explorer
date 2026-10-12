@@ -971,7 +971,7 @@ fn platform_key_binding_profile() -> KeyBindingProfile {
     }
 }
 
-fn platform_key_bindings() -> Vec<KeyBinding> {
+pub(crate) fn platform_key_bindings() -> Vec<KeyBinding> {
     key_bindings_for_profile(platform_key_binding_profile())
 }
 
@@ -1025,7 +1025,9 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
     push_split_pane_key_bindings(&mut bindings);
     push_large_icon_key_bindings(&mut bindings);
     use crate::epub_reader::{
-        EpubBack, EpubBeginning, EpubCopy, EpubDismiss, EpubEnd, EpubNext, EpubPrevious,
+        EpubActivate, EpubBack, EpubBeginning, EpubBookmark, EpubContents, EpubCopy, EpubDismiss,
+        EpubEnd, EpubFind, EpubFocusNext, EpubFocusPrevious, EpubFullscreen, EpubNext,
+        EpubPrevious, EpubSettings,
     };
     bindings.extend([
         KeyBinding::new("right", EpubNext, Some("EpubReader")),
@@ -1038,6 +1040,47 @@ fn key_bindings_for_profile(profile: KeyBindingProfile) -> Vec<KeyBinding> {
         KeyBinding::new("end", EpubEnd, Some("EpubReader")),
         KeyBinding::new("alt-left", EpubBack, Some("EpubReader")),
         KeyBinding::new("escape", EpubDismiss, Some("EpubReader")),
+        KeyBinding::new("f11", EpubFullscreen, Some("EpubReader")),
+        KeyBinding::new("tab", EpubFocusNext, Some("EpubReader")),
+        KeyBinding::new("shift-tab", EpubFocusPrevious, Some("EpubReader")),
+        KeyBinding::new("enter", EpubActivate, Some("EpubReader")),
+        KeyBinding::new("space", EpubActivate, Some("EpubControl")),
+        KeyBinding::new(
+            if profile == KeyBindingProfile::Mac {
+                "cmd-t"
+            } else {
+                "ctrl-t"
+            },
+            EpubContents,
+            Some("EpubReader"),
+        ),
+        KeyBinding::new(
+            if profile == KeyBindingProfile::Mac {
+                "cmd-,"
+            } else {
+                "ctrl-,"
+            },
+            EpubSettings,
+            Some("EpubReader"),
+        ),
+        KeyBinding::new(
+            if profile == KeyBindingProfile::Mac {
+                "cmd-f"
+            } else {
+                "ctrl-f"
+            },
+            EpubFind,
+            Some("EpubReader"),
+        ),
+        KeyBinding::new(
+            if profile == KeyBindingProfile::Mac {
+                "cmd-d"
+            } else {
+                "ctrl-d"
+            },
+            EpubBookmark,
+            Some("EpubReader"),
+        ),
         KeyBinding::new(
             if profile == KeyBindingProfile::Mac {
                 "cmd-c"

@@ -58,7 +58,7 @@ mod tabs;
 #[cfg(test)]
 mod test_support;
 mod text_hover_preview;
-mod text_input;
+pub(crate) mod text_input;
 mod thumbnail_io;
 mod tooltip;
 mod trash;

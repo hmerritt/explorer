@@ -9,10 +9,11 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, FocusHandle,
-    Focusable, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollWheelEvent, Task, TitlebarOptions, Window, WindowBounds, WindowDecorations,
-    WindowOptions, canvas, div, fill, point, prelude::*, px, rgb, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
+    FocusHandle, Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollHandle, ScrollWheelEvent, Task, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowOptions, canvas, div, fill, point, prelude::*, px, rgb,
+    size,
 };
 
 use crate::{
@@ -29,13 +30,17 @@ use crate::{
 use crate::window_state::{StoredWindowState, save_window_state_to_path};
 
 use super::{
-    EpubBack, EpubBeginning, EpubCopy, EpubDismiss, EpubEnd, EpubNext, EpubPrevious,
+    EpubActivate, EpubBack, EpubBeginning, EpubBookmark, EpubContents, EpubCopy, EpubDismiss,
+    EpubEnd, EpubFind, EpubFocusNext, EpubFocusPrevious, EpubFullscreen, EpubNext, EpubPrevious,
+    EpubSettings,
     book::{Block, Book, Chapter, ContentPoint, ImageSource},
+    input::{InputEvent, ReaderInput},
     pagination::{
-        ImageAsset, ImageSlot, Page, PageGeometry, PageItem, WheelPager, layout_page,
-        normalize_point, selected_text,
+        ImageAsset, ImageSlot, Page, PageGeometry, PageItem, WheelPager,
+        layout_page_with_preferences, normalize_point, selected_text,
     },
-    state::{self, Fingerprint, Location, Preferences},
+    search::{BookIndex, SearchMatch},
+    state::{self, Bookmark, Fingerprint, Location, Preferences},
 };
 
 const WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
@@ -100,17 +105,17 @@ enum PageRequest {
 
 struct ChapterLayout {
     geometry: PageGeometry,
-    font_size: u8,
+    preferences: Preferences,
     starts: Vec<ContentPoint>,
     complete: bool,
     pages: VecDeque<(usize, Page)>,
 }
 
 impl ChapterLayout {
-    fn new(geometry: PageGeometry, font_size: u8) -> Self {
+    fn new(geometry: PageGeometry, preferences: Preferences) -> Self {
         Self {
             geometry,
-            font_size,
+            preferences,
             starts: vec![ContentPoint::default()],
             complete: false,
             pages: VecDeque::new(),
@@ -131,6 +136,7 @@ struct Reader {
     should_move_window: bool,
     book: Option<Arc<Book>>,
     fingerprint: Option<Fingerprint>,
+    resume_location: Option<Location>,
     key: String,
     href: String,
     chapters: HashMap<String, Arc<Chapter>>,
@@ -146,6 +152,29 @@ struct Reader {
     font_family: String,
     error: Option<String>,
     chapters_open: bool,
+    settings_open: bool,
+    contents_cursor: usize,
+    contents_scroll: ScrollHandle,
+    input: Entity<ReaderInput>,
+    bookmark_input: Entity<ReaderInput>,
+    search_open: bool,
+    search_results: Vec<SearchMatch>,
+    search_busy: bool,
+    search_highlight: Option<SearchMatch>,
+    search_return: Option<Location>,
+    index: Option<Arc<BookIndex>>,
+    index_task: Option<Task<()>>,
+    search_task: Option<Task<()>>,
+    search_cancel: Arc<AtomicBool>,
+    bookmark_open: bool,
+    note: Option<(String, String)>,
+    note_task: Option<Task<()>>,
+    note_cancel: Arc<AtomicBool>,
+    enlarged_image: Option<ImageAsset>,
+    copy_menu: Option<Point<Pixels>>,
+    fullscreen: bool,
+    controls_revealed: bool,
+    popup_height: f32,
     history: Vec<Location>,
     selection: Option<(ContentPoint, ContentPoint)>,
     selecting: bool,
@@ -179,23 +208,36 @@ impl Reader {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
         let names = cx.text_system().all_font_names();
-        let font_family = [
-            "Georgia",
-            "Noto Serif",
-            "DejaVu Serif",
-            "Liberation Serif",
-            "Times New Roman",
-        ]
-        .into_iter()
-        .find(|family| names.iter().any(|name| name == family))
-        .map(str::to_owned)
-        .unwrap_or_else(|| window.text_style().font_family.to_string());
+        let preferences = state::preferences(cx);
+        let families: &[&str] = if preferences.sans {
+            &[
+                "Segoe UI",
+                "Helvetica",
+                "Noto Sans",
+                "DejaVu Sans",
+                "Liberation Sans",
+            ]
+        } else {
+            &[
+                "Georgia",
+                "Noto Serif",
+                "DejaVu Serif",
+                "Liberation Serif",
+                "Times New Roman",
+            ]
+        };
+        let font_family = families
+            .iter()
+            .find(|family| names.iter().any(|name| name == *family))
+            .map(|family| (*family).to_owned())
+            .unwrap_or_else(|| window.text_style().font_family.to_string());
         let mut reader = Self {
             focus_handle,
             title,
             should_move_window: false,
             book: None,
             fingerprint: None,
+            resume_location: None,
             key: String::new(),
             href: String::new(),
             chapters: HashMap::new(),
@@ -207,10 +249,33 @@ impl Reader {
             request: None,
             anchor: ContentPoint::default(),
             fragment: None,
-            preferences: state::preferences(cx),
+            preferences,
             font_family,
             error: None,
             chapters_open: false,
+            settings_open: false,
+            contents_cursor: 0,
+            contents_scroll: ScrollHandle::new(),
+            input: cx.new(|cx| ReaderInput::new("Search this book", cx)),
+            bookmark_input: cx.new(|cx| ReaderInput::new("Bookmark name", cx)),
+            search_open: false,
+            search_results: Vec::new(),
+            search_busy: false,
+            search_highlight: None,
+            search_return: None,
+            index: None,
+            index_task: None,
+            search_task: None,
+            search_cancel: Arc::new(AtomicBool::new(false)),
+            bookmark_open: false,
+            note: None,
+            note_task: None,
+            note_cancel: Arc::new(AtomicBool::new(false)),
+            enlarged_image: None,
+            copy_menu: None,
+            fullscreen: window.is_fullscreen(),
+            controls_revealed: false,
+            popup_height: 320.0,
             history: Vec::new(),
             selection: None,
             selecting: false,
@@ -226,10 +291,42 @@ impl Reader {
         cx.on_release(|reader, _| {
             reader.load_cancel.store(true, Ordering::Relaxed);
             reader.chapter_cancel.store(true, Ordering::Relaxed);
+            reader.search_cancel.store(true, Ordering::Relaxed);
+            reader.note_cancel.store(true, Ordering::Relaxed);
         })
         .detach();
+        cx.subscribe_in(
+            &reader.input,
+            window,
+            |reader, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Changed => reader.search(cx),
+                InputEvent::Submit => {
+                    if !reader.search_results.is_empty() {
+                        reader.open_search_result(0, window, cx);
+                    }
+                }
+                InputEvent::Dismiss => reader.dismiss(window, cx),
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &reader.bookmark_input,
+            window,
+            |reader, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Submit => reader.save_bookmark(window, cx),
+                InputEvent::Dismiss => reader.dismiss(window, cx),
+                _ => {
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         #[cfg(not(test))]
-        cx.observe_window_bounds(window, |_, window, _| {
+        cx.observe_window_bounds(window, |reader, window, cx| {
+            if reader.fullscreen != window.is_fullscreen() {
+                reader.fullscreen = window.is_fullscreen();
+                cx.notify();
+            }
             if let (Some(path), Some(state)) = (
                 config_dir().map(|dir| dir.join("epub-window-state.json")),
                 StoredWindowState::from_window_bounds(window.window_bounds(), WINDOW_STATE_OPTIONS),
@@ -245,33 +342,38 @@ impl Reader {
                 .spawn(async move {
                     let fingerprint = Fingerprint::for_path(&path)
                         .map_err(|e| format!("Could not read book: {e}"))?;
-                    let key = state::book_key(&path);
+                    let legacy = state::book_key(&path);
+                    let key = state::content_key(&path, &cancel)?;
                     let book = Book::open(&path, &cancel)?;
-                    Ok::<_, String>((Arc::new(book), key, fingerprint))
+                    Ok::<_, String>((Arc::new(book), key, legacy, fingerprint))
                 })
                 .await;
             let _ = this.update_in(cx, |reader, window, cx| {
                 reader.load_task = None;
                 match result {
-                    Ok((book, key, fingerprint)) => {
+                    Ok((book, key, legacy, fingerprint)) => {
+                        state::migrate(cx, &key, &legacy, &fingerprint);
                         let saved = state::resume(cx, &key, &fingerprint);
                         let location = saved
                             .filter(|location| book.readable_location(&location.href))
                             .unwrap_or_else(|| Location {
                                 href: book.sections[0].href.clone(),
                                 point: ContentPoint::default(),
+                                ..Location::default()
                             });
                         reader.title = format!("{} — Explorer", book.title);
                         window.set_window_title(&reader.title);
                         reader.book = Some(book);
                         reader.key = key;
                         reader.fingerprint = Some(fingerprint);
+                        reader.build_index(cx);
                         let href = reader
                             .book
                             .as_ref()
                             .unwrap()
                             .reading_href(&location.href)
                             .to_owned();
+                        reader.resume_location = Some(location.clone());
                         reader.open_section(href, PageRequest::Anchor(location.point), None, cx);
                     }
                     Err(error) => reader.error = Some(error),
@@ -517,6 +619,16 @@ impl Reader {
     }
 
     fn turn(&mut self, steps: isize, cx: &mut Context<Self>) {
+        if self.chapters_open
+            || self.settings_open
+            || self.search_open
+            || self.bookmark_open
+            || self.note.is_some()
+            || self.enlarged_image.is_some()
+            || self.copy_menu.is_some()
+        {
+            return;
+        }
         if self.chapter_task.is_some() || self.current_page.is_none() || steps == 0 {
             return;
         }
@@ -593,6 +705,26 @@ impl Reader {
     }
 
     fn boundary(&mut self, end: bool, cx: &mut Context<Self>) {
+        if self.chapters_open {
+            self.contents_cursor = if end {
+                self.book
+                    .as_ref()
+                    .map_or(0, |book| book.toc.len().saturating_sub(1))
+            } else {
+                0
+            };
+            self.contents_scroll.scroll_to_item(self.contents_cursor);
+            cx.notify();
+            return;
+        }
+        if self.settings_open
+            || self.search_open
+            || self.bookmark_open
+            || self.note.is_some()
+            || self.enlarged_image.is_some()
+        {
+            return;
+        }
         let Some(book) = &self.book else {
             return;
         };
@@ -621,15 +753,394 @@ impl Reader {
 
     fn remember(&self, cx: &mut Context<Self>) {
         if let Some(fingerprint) = &self.fingerprint {
-            state::remember(
-                cx,
-                self.key.clone(),
-                fingerprint.clone(),
-                Location {
-                    href: self.href.clone(),
-                    point: self.anchor,
-                },
-            );
+            state::remember(cx, self.key.clone(), fingerprint.clone(), self.location());
+        }
+    }
+
+    fn location(&self) -> Location {
+        Location::at(
+            self.href.clone(),
+            self.anchor,
+            self.chapters.get(&self.href).map(Arc::as_ref),
+        )
+    }
+
+    fn build_index(&mut self, cx: &mut Context<Self>) {
+        let Some(book) = self.book.clone() else {
+            return;
+        };
+        let cancel = self.load_cancel.clone();
+        self.index_task = Some(cx.spawn(async move |this, cx| {
+            let index = cx
+                .background_executor()
+                .spawn(async move { BookIndex::build(&book, &cancel) })
+                .await;
+            let _ = this.update(cx, |reader, cx| {
+                reader.index_task = None;
+                if let Ok(index) = index {
+                    reader.index = Some(Arc::new(index));
+                }
+                if reader.search_open {
+                    reader.search(cx);
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn search(&mut self, cx: &mut Context<Self>) {
+        self.search_cancel.store(true, Ordering::Relaxed);
+        self.search_cancel = Arc::new(AtomicBool::new(false));
+        self.search_task = None;
+        self.search_results.clear();
+        let query = self.input.read(cx).text.content.clone();
+        self.search_busy = !query.trim().is_empty();
+        let Some(index) = self.index.clone() else {
+            cx.notify();
+            return;
+        };
+        if query.trim().is_empty() {
+            self.search_busy = false;
+            cx.notify();
+            return;
+        }
+        let cancel = self.search_cancel.clone();
+        let worker_cancel = cancel.clone();
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(120))
+                .await;
+            let results = cx
+                .background_executor()
+                .spawn(async move { index.search(&query, &worker_cancel) })
+                .await;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = this.update(cx, |reader, cx| {
+                if let Ok(results) = results {
+                    reader.search_results = results;
+                    reader.search_busy = false;
+                    reader.search_task = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    fn open_search_result(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(result) = self.search_results.get(index).cloned() else {
+            return;
+        };
+        self.history.push(self.location());
+        self.search_highlight = Some(result.clone());
+        self.search_open = false;
+        self.open_section(result.href, PageRequest::Anchor(result.start), None, cx);
+        self.focus_handle.focus(window);
+    }
+
+    fn current_toc(&self) -> Option<usize> {
+        self.book
+            .as_ref()?
+            .toc
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| {
+                let target = item.target.as_deref()?;
+                let (href, fragment) = target
+                    .split_once('#')
+                    .map_or((target, None), |(href, fragment)| (href, Some(fragment)));
+                if self.book.as_ref()?.reading_href(href) != self.href {
+                    return None;
+                }
+                let applies = fragment.is_none_or(|fragment| {
+                    let fragment =
+                        percent_encoding::percent_decode_str(fragment).decode_utf8_lossy();
+                    self.chapters
+                        .get(&self.href)
+                        .and_then(|chapter| chapter.anchors.get(fragment.as_ref()))
+                        .is_some_and(|point| *point <= self.anchor)
+                });
+                applies.then_some(index)
+            })
+    }
+
+    fn heading(&self) -> String {
+        self.current_toc()
+            .and_then(|index| self.book.as_ref().and_then(|book| book.toc.get(index)))
+            .map(|item| item.title.clone())
+            .or_else(|| {
+                self.book
+                    .as_ref()
+                    .and_then(|book| {
+                        book.sections
+                            .iter()
+                            .find(|section| section.href == self.href)
+                    })
+                    .map(|section| section.title.clone())
+            })
+            .unwrap_or_else(|| "Supplement".into())
+    }
+
+    fn clear_previews(&mut self) {
+        self.note_cancel.store(true, Ordering::Relaxed);
+        self.note_task = None;
+        self.note = None;
+        self.enlarged_image = None;
+        self.copy_menu = None;
+    }
+
+    fn toggle_contents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_previews();
+        self.chapters_open = !self.chapters_open;
+        self.settings_open = false;
+        self.search_open = false;
+        self.bookmark_open = false;
+        if self.chapters_open {
+            self.contents_cursor = self.current_toc().unwrap_or(0);
+            self.contents_scroll.scroll_to_item(self.contents_cursor);
+        }
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_previews();
+        if self.search_open {
+            self.search_open = false;
+            self.focus_handle.focus(window);
+        } else {
+            self.search_open = true;
+            self.settings_open = false;
+            self.chapters_open = false;
+            self.bookmark_open = false;
+            if self.search_return.is_none() {
+                self.search_return = Some(self.location());
+            }
+            self.input.update(cx, |input, cx| {
+                input.light = self.preferences.light;
+                input.text.select_all();
+                cx.notify();
+            });
+            self.input.read(cx).focus_handle(cx).focus(window);
+            self.search(cx);
+        }
+        cx.notify();
+    }
+
+    fn open_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_page.is_none() {
+            return;
+        }
+        self.remember(cx);
+        self.clear_previews();
+        self.bookmark_open = true;
+        self.search_open = false;
+        self.chapters_open = false;
+        self.settings_open = false;
+        let name = self.heading();
+        self.bookmark_input.update(cx, |input, cx| {
+            input.light = self.preferences.light;
+            input.text = crate::explorer::text_input::EditableTextState::new(name);
+            cx.notify();
+        });
+        self.bookmark_input.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    fn save_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.bookmark_input.read(cx).text.content.trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        let location = self.location();
+        let mut bookmarks = state::bookmarks(cx, &self.key);
+        bookmarks.retain(|bookmark| {
+            bookmark.location.href != location.href || bookmark.location.point != location.point
+        });
+        bookmarks.push(Bookmark { name, location });
+        state::set_bookmarks(cx, &self.key, bookmarks);
+        self.bookmark_open = false;
+        self.focus_handle.focus(window);
+        cx.notify();
+    }
+
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let had_overlay = self.chapters_open
+            || self.settings_open
+            || self.search_open
+            || self.bookmark_open
+            || self.note.is_some()
+            || self.enlarged_image.is_some()
+            || self.copy_menu.is_some()
+            || self.selection.is_some();
+        self.chapters_open = false;
+        self.settings_open = false;
+        self.search_open = false;
+        self.bookmark_open = false;
+        self.note = None;
+        self.enlarged_image = None;
+        self.copy_menu = None;
+        self.note_cancel.store(true, Ordering::Relaxed);
+        self.note_task = None;
+        self.clear_selection();
+        self.focus_handle.focus(window);
+        cx.notify();
+        if !had_overlay && self.fullscreen {
+            self.control(Control::Fullscreen, window, cx);
+        }
+    }
+
+    fn apply_preferences(&mut self, cx: &mut Context<Self>) {
+        let names = cx.text_system().all_font_names();
+        let families: &[&str] = if self.preferences.sans {
+            &[
+                "Segoe UI",
+                "Helvetica",
+                "Noto Sans",
+                "DejaVu Sans",
+                "Liberation Sans",
+            ]
+        } else {
+            &[
+                "Georgia",
+                "Noto Serif",
+                "DejaVu Serif",
+                "Liberation Serif",
+                "Times New Roman",
+            ]
+        };
+        if let Some(family) = families
+            .iter()
+            .find(|family| names.iter().any(|name| name == *family))
+        {
+            self.font_family = (*family).to_owned();
+        }
+        state::set_preferences(cx, self.preferences);
+        self.request = Some(PageRequest::Anchor(self.anchor));
+        self.clear_selection();
+        cx.notify();
+    }
+
+    fn contents_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.chapters_open {
+            return;
+        }
+        let count = self.book.as_ref().map_or(0, |book| book.toc.len());
+        if count == 0 {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "up" => self.contents_cursor = self.contents_cursor.saturating_sub(1),
+            "down" => self.contents_cursor = (self.contents_cursor + 1).min(count - 1),
+            "enter" => {
+                if let Some(target) = self
+                    .book
+                    .as_ref()
+                    .and_then(|book| book.toc.get(self.contents_cursor))
+                    .and_then(|item| item.target.clone())
+                {
+                    self.follow_link(target, cx);
+                }
+                self.focus_handle.focus(window);
+            }
+            _ => return,
+        }
+        self.contents_scroll.scroll_to_item(self.contents_cursor);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn control(&mut self, action: Control, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            Control::Previous => self.turn(-1, cx),
+            Control::Next => self.turn(1, cx),
+            Control::Chapters => self.toggle_contents(window, cx),
+            Control::Smaller => self.change_font(-2, cx),
+            Control::Larger => self.change_font(2, cx),
+            Control::Theme => self.toggle_theme(cx),
+            Control::Back => {
+                if self.history.is_empty() {
+                    self.adjacent_section(false, PageRequest::FromEnd(0), cx);
+                } else {
+                    self.back(cx);
+                }
+            }
+            Control::Retry => {
+                self.chapters.remove(&self.href);
+                self.layouts.remove(&self.href);
+                self.open_section(
+                    self.href.clone(),
+                    PageRequest::Anchor(self.anchor),
+                    self.fragment.clone(),
+                    cx,
+                );
+            }
+            Control::Skip => {
+                self.adjacent_section(true, PageRequest::Index(0), cx);
+            }
+            Control::Settings => {
+                self.clear_previews();
+                self.settings_open = !self.settings_open;
+                self.chapters_open = false;
+                self.search_open = false;
+                self.bookmark_open = false;
+                self.focus_handle.focus(window);
+                cx.notify();
+            }
+            Control::Find => self.toggle_search(window, cx),
+            Control::Bookmark => self.open_bookmark(window, cx),
+            Control::SaveBookmark => self.save_bookmark(window, cx),
+            Control::Return => {
+                if let Some(location) = self.search_return.take() {
+                    self.resume_location = Some(location.clone());
+                    self.search_open = false;
+                    self.search_highlight = None;
+                    self.open_section(location.href, PageRequest::Anchor(location.point), None, cx);
+                    self.focus_handle.focus(window);
+                }
+            }
+            Control::Fullscreen => {
+                window.toggle_fullscreen();
+                self.fullscreen = !self.fullscreen;
+                self.controls_revealed = false;
+                cx.notify();
+            }
+            Control::Dismiss => self.dismiss(window, cx),
+            Control::Copy => {
+                self.copy(cx);
+                self.copy_menu = None;
+                cx.notify();
+            }
+            Control::Sans => {
+                self.preferences.sans = !self.preferences.sans;
+                self.apply_preferences(cx);
+            }
+            Control::Spacing(change) => {
+                self.preferences.line_spacing =
+                    (self.preferences.line_spacing as i16 + change).clamp(12, 22) as u8;
+                self.apply_preferences(cx);
+            }
+            Control::Width(change) => {
+                self.preferences.reading_width =
+                    (self.preferences.reading_width as i16 + change).clamp(400, 1000) as u16;
+                self.apply_preferences(cx);
+            }
+            Control::Alignment => {
+                self.preferences.justify = !self.preferences.justify;
+                self.apply_preferences(cx);
+            }
+            Control::Publisher => {
+                self.preferences.publisher_styles = !self.preferences.publisher_styles;
+                self.apply_preferences(cx);
+            }
+            Control::ReduceMotion => {
+                self.preferences.reduce_motion = !self.preferences.reduce_motion;
+                state::set_preferences(cx, self.preferences);
+                cx.notify();
+            }
         }
     }
 
@@ -672,19 +1183,31 @@ impl Reader {
                 return None;
             }
         }
-        let geometry =
-            PageGeometry::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let geometry = PageGeometry::with_width(
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            self.preferences.reading_width as f32,
+        );
         if self.layouts.get(&self.href).is_none_or(|layout| {
-            layout.geometry != geometry || layout.font_size != self.preferences.font_size
+            layout.geometry != geometry || layout.preferences != self.preferences
         }) {
             self.layouts.insert(
                 self.href.clone(),
-                ChapterLayout::new(geometry, self.preferences.font_size),
+                ChapterLayout::new(geometry, self.preferences),
             );
             if self.request.is_none() {
                 self.request = Some(PageRequest::Anchor(self.anchor));
             }
             self.clear_selection();
+        }
+        if let Some(location) = self.resume_location.take() {
+            if self
+                .book
+                .as_ref()
+                .is_some_and(|book| book.reading_href(&location.href) == self.href)
+            {
+                self.request = Some(PageRequest::Anchor(location.recover(&chapter)));
+            }
         }
         if let Some(fragment) = self.fragment.take() {
             let fragment = percent_encoding::percent_decode_str(&fragment).decode_utf8_lossy();
@@ -735,7 +1258,7 @@ impl Reader {
                 if let Some((_, page)) = layout.pages.iter().find(|(cached, _)| *cached == index) {
                     page.clone()
                 } else {
-                    match layout_page(
+                    match layout_page_with_preferences(
                         &chapter,
                         layout.starts[index],
                         geometry,
@@ -744,6 +1267,7 @@ impl Reader {
                         color,
                         link_color,
                         images,
+                        &self.preferences,
                         window,
                     ) {
                         Ok(page) => {
@@ -842,7 +1366,7 @@ impl Reader {
         let Some(images) = self.images.get(&self.href) else {
             return;
         };
-        if let Ok(page) = layout_page(
+        if let Ok(page) = layout_page_with_preferences(
             chapter,
             layout.starts[index],
             layout.geometry,
@@ -851,6 +1375,7 @@ impl Reader {
             color,
             link_color,
             images,
+            &self.preferences,
             window,
         ) {
             if index == layout.starts.len() - 1 && !layout.complete {
@@ -939,18 +1464,80 @@ impl Reader {
             return;
         }
         let href = book.reading_href(href).to_owned();
-        self.history.push(Location {
-            href: self.href.clone(),
-            point: self.anchor,
-        });
+        self.history.push(self.location());
         self.chapters_open = false;
         self.open_section(href, PageRequest::Index(0), fragment, cx);
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
         if let Some(location) = self.history.pop() {
+            self.resume_location = Some(location.clone());
             self.open_section(location.href, PageRequest::Anchor(location.point), None, cx);
         }
+    }
+
+    fn open_note(&mut self, target: String, cx: &mut Context<Self>) {
+        let Some((href, fragment)) = target.split_once('#') else {
+            self.follow_link(target, cx);
+            return;
+        };
+        let Some(book) = self
+            .book
+            .clone()
+            .filter(|book| book.readable_location(href))
+        else {
+            return;
+        };
+        let href = href.to_owned();
+        let fragment = percent_encoding::percent_decode_str(fragment)
+            .decode_utf8_lossy()
+            .into_owned();
+        self.note_cancel.store(true, Ordering::Relaxed);
+        self.note_cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.note_cancel.clone();
+        let worker_cancel = cancel.clone();
+        self.note = Some(("Footnote".into(), "Loading note…".into()));
+        self.note_task = Some(cx.spawn(async move |this, cx| {
+            let text = cx
+                .background_executor()
+                .spawn(async move {
+                    let chapter = book.note_chapter(&href, &worker_cancel)?;
+                    let range = chapter
+                        .notes
+                        .get(&fragment)
+                        .cloned()
+                        .or_else(|| {
+                            chapter
+                                .anchors
+                                .get(&fragment)
+                                .map(|point| point.block..point.block + 1)
+                        })
+                        .ok_or("This note could not be found.".to_owned())?;
+                    let text = chapter
+                        .blocks
+                        .get(range)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|block| match block {
+                            Block::Text { text, .. } => Some(text.as_str()),
+                            Block::Image { alt, .. } => Some(alt.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    Ok::<_, String>(text)
+                })
+                .await;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = this.update(cx, |reader, cx| {
+                reader.note_task = None;
+                reader.note = Some(("Footnote".into(), text.unwrap_or_else(|error| error)));
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn copy(&self, cx: &mut Context<Self>) {
@@ -1040,15 +1627,38 @@ impl Reader {
                 entity.update(cx, |reader, cx| reader.prepare_page(bounds, window, cx))
             },
             move |bounds, page, window, cx| {
-                let geometry =
-                    PageGeometry::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+                let geometry = PageGeometry::with_width(
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                    paint_entity.read(cx).preferences.reading_width as f32,
+                );
                 let origin = bounds.origin + point(px(geometry.margin_x), px(geometry.margin_y));
                 let selection = paint_entity.read(cx).selection;
+                let search_selection = paint_entity
+                    .read(cx)
+                    .search_highlight
+                    .as_ref()
+                    .filter(|result| result.href == paint_entity.read(cx).href)
+                    .map(|result| (result.start, result.end));
                 let light = paint_entity.read(cx).preferences.light;
                 if let Some(page) = &page {
                     window.paint_layer(bounds, |window| {
                         for item in &page.items {
                             match item {
+                                PageItem::Rule {
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                } => {
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            origin + point(px(*x), px(*y)),
+                                            size(px(*width), px(*height)),
+                                        ),
+                                        rgb(if light { 0xaaaaaa } else { 0x666666 }),
+                                    ));
+                                }
                                 PageItem::Text {
                                     block,
                                     range,
@@ -1058,7 +1668,7 @@ impl Reader {
                                     height,
                                 } => {
                                     let position = origin + point(px(*x), px(*y));
-                                    if let Some((a, b)) = selection {
+                                    if let Some((a, b)) = selection.or(search_selection) {
                                         let (a, b) = (a.min(b), a.max(b));
                                         if *block >= a.block && *block <= b.block {
                                             let start = if *block == a.block {
@@ -1082,7 +1692,13 @@ impl Reader {
                                                             px(*height),
                                                         ),
                                                     ),
-                                                    rgb(if light { 0xb6d8ff } else { 0x334a70 }),
+                                                    rgb(if selection.is_none() {
+                                                        if light { 0xffe8a3 } else { 0x6b5526 }
+                                                    } else if light {
+                                                        0xb6d8ff
+                                                    } else {
+                                                        0x334a70
+                                                    }),
                                                 ));
                                             }
                                         }
@@ -1163,6 +1779,9 @@ impl Reader {
                             ordinary_lines_per_notch(),
                             Instant::now(),
                         );
+                        if turns != 0 {
+                            reader.chapters_open = false;
+                        }
                         reader.turn(turns, cx);
                         window.prevent_default();
                         cx.stop_propagation();
@@ -1180,15 +1799,78 @@ impl Reader {
                         if reader.chapters_open {
                             return;
                         }
+                        if reader.settings_open
+                            || reader.search_open
+                            || reader.bookmark_open
+                            || reader.note.is_some()
+                            || reader.enlarged_image.is_some()
+                        {
+                            return;
+                        }
                         reader.focus_handle.focus(window);
+                        if event.click_count >= 2 {
+                            if let Some(asset) = reader.current_page.as_ref().and_then(|page| {
+                                page.items.iter().find_map(|item| {
+                                    if let PageItem::Image {
+                                        asset: Some(asset),
+                                        x,
+                                        y,
+                                        width,
+                                        height,
+                                        ..
+                                    } = item
+                                    {
+                                        let position = event.position - origin;
+                                        if position.x >= px(*x)
+                                            && position.x <= px(x + width)
+                                            && position.y >= px(*y)
+                                            && position.y <= px(y + height)
+                                        {
+                                            return Some(asset.clone());
+                                        }
+                                    }
+                                    None
+                                })
+                            }) {
+                                reader.enlarged_image = Some(asset);
+                                cx.notify();
+                                cx.stop_propagation();
+                                return;
+                            }
+                        }
                         if let Some(point) = reader
                             .current_page
                             .as_ref()
                             .and_then(|page| hit_point(page, event.position - origin))
                         {
-                            reader.selection = Some((point, point));
+                            reader.selection = if event.click_count >= 3 {
+                                reader
+                                    .chapters
+                                    .get(&reader.href)
+                                    .and_then(|chapter| chapter.blocks.get(point.block))
+                                    .and_then(|block| match block {
+                                        Block::Text { text, .. } => Some((
+                                            ContentPoint {
+                                                block: point.block,
+                                                offset: 0,
+                                            },
+                                            ContentPoint {
+                                                block: point.block,
+                                                offset: text.len(),
+                                            },
+                                        )),
+                                        _ => None,
+                                    })
+                            } else if event.click_count == 2 {
+                                reader
+                                    .chapters
+                                    .get(&reader.href)
+                                    .and_then(|chapter| word_selection(chapter, point))
+                            } else {
+                                Some((point, point))
+                            };
                             reader.selecting = true;
-                            reader.mouse_down = Some(event.position);
+                            reader.mouse_down = (event.click_count == 1).then_some(event.position);
                             cx.stop_propagation();
                             cx.notify();
                         }
@@ -1214,11 +1896,12 @@ impl Reader {
                         }
                     });
                 });
+                let mouse_up_entity = paint_entity.clone();
                 window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                     if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                         return;
                     }
-                    paint_entity.update(cx, |reader, cx| {
+                    mouse_up_entity.update(cx, |reader, cx| {
                         if !reader.selecting {
                             return;
                         }
@@ -1237,11 +1920,48 @@ impl Reader {
                             });
                             reader.selection = None;
                             if let Some(target) = target {
-                                reader.follow_link(target, cx);
+                                let is_note = reader
+                                    .current_page
+                                    .as_ref()
+                                    .and_then(|page| hit_point(page, event.position - origin))
+                                    .and_then(|point| {
+                                        reader
+                                            .chapters
+                                            .get(&reader.href)
+                                            .and_then(|chapter| chapter.blocks.get(point.block))
+                                            .and_then(|block| match block {
+                                                Block::Text { spans, .. } => spans
+                                                    .iter()
+                                                    .find(|span| span.range.contains(&point.offset))
+                                                    .map(|span| span.style.noteref),
+                                                _ => None,
+                                            })
+                                    })
+                                    .unwrap_or(false);
+                                if is_note {
+                                    reader.open_note(target, cx);
+                                } else {
+                                    reader.follow_link(target, cx);
+                                }
                             }
                         }
                         cx.notify();
                     });
+                });
+                let entity = paint_entity.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble
+                        && event.button == MouseButton::Right
+                        && bounds.contains(&event.position)
+                    {
+                        entity.update(cx, |reader, cx| {
+                            if reader.selection.is_some_and(|(a, b)| a != b) {
+                                reader.copy_menu = Some(event.position - bounds.origin);
+                                cx.notify();
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
                 });
             },
         )
@@ -1260,6 +1980,7 @@ impl Reader {
     ) -> AnyElement {
         div()
             .id(id)
+            .key_context("EpubControl")
             .h(px(26.0))
             .px(px(8.0))
             .flex()
@@ -1284,21 +2005,26 @@ impl Reader {
                     }))
                 })
             })
-            .on_click(cx.listener(move |reader, _, _, cx| {
-                if !enabled {
-                    return;
+            .when(enabled, |button| {
+                button.tab_index(0).focus(|style| {
+                    style.bg(rgb(if self.preferences.light {
+                        0xdce9f5
+                    } else {
+                        0x335a80
+                    }))
+                })
+            })
+            .tooltip(reader_tooltip(control_tooltip(action)))
+            .on_click(cx.listener(move |reader, _, window, cx| {
+                if enabled {
+                    reader.control(action, window, cx);
                 }
-                match action {
-                    Control::Previous => reader.turn(-1, cx),
-                    Control::Next => reader.turn(1, cx),
-                    Control::Chapters => {
-                        reader.chapters_open = !reader.chapters_open;
-                        cx.notify();
-                    }
-                    Control::Smaller => reader.change_font(-2, cx),
-                    Control::Larger => reader.change_font(2, cx),
-                    Control::Theme => reader.toggle_theme(cx),
+            }))
+            .on_action(cx.listener(move |reader, _: &EpubActivate, window, cx| {
+                if enabled {
+                    reader.control(action, window, cx);
                 }
+                cx.stop_propagation();
             }))
             .child(label)
             .into_any_element()
@@ -1306,39 +2032,49 @@ impl Reader {
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ready = self.current_page.is_some();
-        let index = self.book.as_ref().and_then(|book| {
-            book.sections
-                .iter()
-                .position(|section| section.href == self.href)
-        });
         let previous = ready && !self.at_boundary(false);
         let next = ready && !self.at_boundary(true);
-        let progress = match (&self.book, index) {
-            (Some(book), Some(_)) if book.is_cover(&self.href) => "Cover".into(),
-            (Some(book), Some(index)) => format!(
-                "Chapter {}/{} · Page {} · {}",
-                book.sections[..=index]
-                    .iter()
-                    .filter(|section| !book.is_cover(&section.href))
-                    .count(),
-                book.sections
-                    .iter()
-                    .filter(|section| !book.is_cover(&section.href))
-                    .count(),
-                self.page_index + 1,
-                book.sections[index].title
-            ),
-            (Some(_), None) => format!("Supplement · Page {}", self.page_index + 1),
-            _ => String::new(),
+        let total = self
+            .layouts
+            .get(&self.href)
+            .filter(|layout| layout.complete)
+            .map(|layout| layout.starts.len());
+        let pages = total.map_or_else(
+            || format!("Page {}", self.page_index + 1),
+            |total| format!("Page {} of {}", self.page_index + 1, total),
+        );
+        let percentage = self
+            .index
+            .as_ref()
+            .and_then(|index| {
+                index.progress(
+                    &self.href,
+                    if self.at_boundary(true) {
+                        self.current_page
+                            .as_ref()
+                            .map_or(self.anchor, |page| page.end)
+                    } else {
+                        self.anchor
+                    },
+                )
+            })
+            .map(|value| format!(" · ~{value}%"))
+            .unwrap_or_default();
+        let progress = if self
+            .book
+            .as_ref()
+            .is_some_and(|book| book.is_cover(&self.href))
+        {
+            "Cover".into()
+        } else {
+            format!("{} · {pages}{percentage}", self.heading())
         };
         div()
-            .h(px(34.0))
             .w_full()
             .flex()
-            .items_center()
+            .flex_col()
             .px(px(4.0))
             .flex_shrink_0()
-            .overflow_hidden()
             .text_size(px(12.0))
             .text_color(self.color())
             .bg(rgb(if self.preferences.light {
@@ -1346,53 +2082,82 @@ impl Reader {
             } else {
                 0x252525
             }))
-            .child(self.button("epub-previous", "‹".into(), previous, Control::Previous, cx))
-            .child(self.button("epub-next", "›".into(), next, Control::Next, cx))
-            .child(self.button(
-                "epub-chapters",
-                "Chapters".into(),
-                self.book.is_some(),
-                Control::Chapters,
-                cx,
-            ))
-            .child(self.button(
-                "epub-smaller",
-                "A−".into(),
-                self.preferences.font_size > 12,
-                Control::Smaller,
-                cx,
-            ))
             .child(
                 div()
-                    .flex_shrink_0()
-                    .child(self.preferences.font_size.to_string()),
-            )
-            .child(self.button(
-                "epub-larger",
-                "A+".into(),
-                self.preferences.font_size < 36,
-                Control::Larger,
-                cx,
-            ))
-            .child(
-                self.button(
-                    "epub-theme",
-                    if self.preferences.light {
-                        "Dark"
-                    } else {
-                        "Light"
-                    }
-                    .into(),
-                    true,
-                    Control::Theme,
-                    cx,
-                ),
+                    .w_full()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .min_h(px(34.0))
+                    .child(self.button(
+                        "epub-previous",
+                        "‹".into(),
+                        previous,
+                        Control::Previous,
+                        cx,
+                    ))
+                    .child(self.button("epub-next", "›".into(), next, Control::Next, cx))
+                    .child(self.button(
+                        "epub-back",
+                        "Back".into(),
+                        !self.history.is_empty(),
+                        Control::Back,
+                        cx,
+                    ))
+                    .child(self.button(
+                        "epub-chapters",
+                        "Contents".into(),
+                        self.book.is_some(),
+                        Control::Chapters,
+                        cx,
+                    ))
+                    .child(self.button("epub-settings", "Aa".into(), true, Control::Settings, cx))
+                    .child(self.button(
+                        "epub-find",
+                        "Search".into(),
+                        self.book.is_some(),
+                        Control::Find,
+                        cx,
+                    ))
+                    .child(self.button(
+                        "epub-bookmark",
+                        "Bookmark".into(),
+                        ready,
+                        Control::Bookmark,
+                        cx,
+                    ))
+                    .child(
+                        self.button(
+                            "epub-fullscreen",
+                            if self.fullscreen {
+                                "Exit fullscreen"
+                            } else {
+                                "Fullscreen"
+                            }
+                            .into(),
+                            true,
+                            Control::Fullscreen,
+                            cx,
+                        ),
+                    )
+                    .when(
+                        self.search_return.is_some() && self.search_highlight.is_some(),
+                        |row| {
+                            row.child(self.button(
+                                "epub-return",
+                                "Return to reading".into(),
+                                true,
+                                Control::Return,
+                                cx,
+                            ))
+                        },
+                    ),
             )
             .child(
                 div()
+                    .w_full()
                     .px(px(8.0))
-                    .min_w(px(0.0))
-                    .flex_1()
+                    .pb(px(4.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(progress),
@@ -1408,6 +2173,25 @@ impl Reader {
                 rows.push(
                     div()
                         .id(("epub-toc", index))
+                        .key_context("EpubControl")
+                        .tab_index(0)
+                        .focus(|style| {
+                            style.bg(rgb(if self.preferences.light {
+                                0xdce9f5
+                            } else {
+                                0x335a80
+                            }))
+                        })
+                        .when(self.current_toc() == Some(index), |row| {
+                            row.bg(rgb(if self.preferences.light {
+                                0xdce9f5
+                            } else {
+                                0x293b4c
+                            }))
+                        })
+                        .when(self.contents_cursor == index, |row| {
+                            row.border_l_2().border_color(rgb(0x62a6ff))
+                        })
                         .w_full()
                         .min_h(px(30.0))
                         .pl(px(12.0 + item.depth.min(12) as f32 * 16.0))
@@ -1425,12 +2209,118 @@ impl Reader {
                                 0x383838
                             }))
                         })
-                        .on_click(cx.listener(move |reader, _, _, cx| {
+                        .on_click(cx.listener(move |reader, _, window, cx| {
                             if let Some(target) = &target {
                                 reader.follow_link(target.clone(), cx);
+                                reader.focus_handle.focus(window);
                             }
                         }))
+                        .on_action(cx.listener(move |reader, _: &EpubActivate, window, cx| {
+                            if let Some(target) = reader
+                                .book
+                                .as_ref()
+                                .and_then(|book| book.toc.get(index))
+                                .and_then(|item| item.target.clone())
+                            {
+                                reader.follow_link(target, cx);
+                                reader.focus_handle.focus(window);
+                            }
+                            cx.stop_propagation();
+                        }))
                         .child(item.title.clone())
+                        .into_any_element(),
+                );
+            }
+        }
+        let bookmarks = state::bookmarks(cx, &self.key);
+        if !bookmarks.is_empty() {
+            rows.push(
+                div()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .child("Bookmarks")
+                    .into_any_element(),
+            );
+            for (index, bookmark) in bookmarks.into_iter().enumerate() {
+                let location = bookmark.location;
+                let key_location = location.clone();
+                rows.push(
+                    div()
+                        .id(("epub-bookmark-row", index))
+                        .key_context("EpubControl")
+                        .tab_index(0)
+                        .focus(|style| {
+                            style.bg(rgb(if self.preferences.light {
+                                0xdce9f5
+                            } else {
+                                0x335a80
+                            }))
+                        })
+                        .flex()
+                        .items_center()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_click(cx.listener(move |reader, _, window, cx| {
+                            reader.history.push(reader.location());
+                            reader.resume_location = Some(location.clone());
+                            reader.chapters_open = false;
+                            reader.open_section(
+                                location.href.clone(),
+                                PageRequest::Anchor(location.point),
+                                None,
+                                cx,
+                            );
+                            reader.focus_handle.focus(window);
+                        }))
+                        .on_action(cx.listener(move |reader, _: &EpubActivate, window, cx| {
+                            reader.history.push(reader.location());
+                            reader.resume_location = Some(key_location.clone());
+                            reader.chapters_open = false;
+                            reader.open_section(
+                                key_location.href.clone(),
+                                PageRequest::Anchor(key_location.point),
+                                None,
+                                cx,
+                            );
+                            reader.focus_handle.focus(window);
+                            cx.stop_propagation();
+                        }))
+                        .child(div().flex_1().child(bookmark.name))
+                        .child(
+                            div()
+                                .id(("epub-delete-bookmark", index))
+                                .key_context("EpubControl")
+                                .tab_index(0)
+                                .focus(|style| {
+                                    style.bg(rgb(if self.preferences.light {
+                                        0xdce9f5
+                                    } else {
+                                        0x335a80
+                                    }))
+                                })
+                                .px(px(8.0))
+                                .child("×")
+                                .tooltip(reader_tooltip("Remove bookmark"))
+                                .on_action(cx.listener(move |reader, _: &EpubActivate, _, cx| {
+                                    let mut bookmarks = state::bookmarks(cx, &reader.key);
+                                    if index < bookmarks.len() {
+                                        bookmarks.remove(index);
+                                        state::set_bookmarks(cx, &reader.key, bookmarks);
+                                    }
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                                .on_click(cx.listener(move |reader, _, _, cx| {
+                                    let mut bookmarks = state::bookmarks(cx, &reader.key);
+                                    if index < bookmarks.len() {
+                                        bookmarks.remove(index);
+                                        state::set_bookmarks(cx, &reader.key, bookmarks);
+                                    }
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                })),
+                        )
                         .into_any_element(),
                 );
             }
@@ -1442,8 +2332,9 @@ impl Reader {
             .left(px(12.0))
             .bottom(px(40.0))
             .w(px(320.0))
-            .max_h(px(360.0))
+            .max_h(px(self.popup_height))
             .overflow_y_scroll()
+            .track_scroll(&self.contents_scroll)
             .occlude()
             .bg(rgb(if self.preferences.light {
                 0xf5f5f5
@@ -1455,12 +2346,301 @@ impl Reader {
             .border_1()
             .border_color(rgb(0x808080))
             .shadow_md()
-            .on_mouse_down_out(cx.listener(|reader, _, _, cx| {
+            .on_mouse_down_out(cx.listener(|reader, _, window, cx| {
                 reader.chapters_open = false;
+                reader.focus_handle.focus(window);
                 cx.notify();
             }))
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .children(rows)
+            .into_any_element()
+    }
+
+    fn panel(&self, id: &'static str) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .absolute()
+            .left(px(12.0))
+            .bottom(px(82.0))
+            .w(px(320.0))
+            .max_h(px(self.popup_height))
+            .overflow_y_scroll()
+            .occlude()
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .bg(rgb(if self.preferences.light {
+                0xf5f5f5
+            } else {
+                0x252525
+            }))
+            .text_color(self.color())
+            .text_size(px(14.0))
+            .border_1()
+            .border_color(rgb(0x808080))
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+    }
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.panel("epub-reading-settings")
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().child("Reading settings"))
+                    .child(self.button(
+                        "epub-settings-close",
+                        "×".into(),
+                        true,
+                        Control::Dismiss,
+                        cx,
+                    )),
+            )
+            .child(
+                self.button(
+                    "epub-family",
+                    if self.preferences.sans {
+                        "Font: Sans serif"
+                    } else {
+                        "Font: Serif"
+                    }
+                    .into(),
+                    true,
+                    Control::Sans,
+                    cx,
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(format!("Font size: {}", self.preferences.font_size)),
+                    )
+                    .child(self.button(
+                        "epub-smaller",
+                        "A−".into(),
+                        self.preferences.font_size > 12,
+                        Control::Smaller,
+                        cx,
+                    ))
+                    .child(self.button(
+                        "epub-larger",
+                        "A+".into(),
+                        self.preferences.font_size < 36,
+                        Control::Larger,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().child(format!(
+                        "Line spacing: {:.1}",
+                        self.preferences.line_spacing as f32 / 10.0
+                    )))
+                    .child(self.button(
+                        "epub-spacing-less",
+                        "−".into(),
+                        self.preferences.line_spacing > 12,
+                        Control::Spacing(-1),
+                        cx,
+                    ))
+                    .child(self.button(
+                        "epub-spacing-more",
+                        "+".into(),
+                        self.preferences.line_spacing < 22,
+                        Control::Spacing(1),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(format!("Reading width: {}", self.preferences.reading_width)),
+                    )
+                    .child(self.button(
+                        "epub-width-less",
+                        "−".into(),
+                        self.preferences.reading_width > 400,
+                        Control::Width(-100),
+                        cx,
+                    ))
+                    .child(self.button(
+                        "epub-width-more",
+                        "+".into(),
+                        self.preferences.reading_width < 1000,
+                        Control::Width(100),
+                        cx,
+                    )),
+            )
+            .child(
+                self.button(
+                    "epub-alignment",
+                    if self.preferences.justify {
+                        "Alignment: Justified"
+                    } else {
+                        "Alignment: Left"
+                    }
+                    .into(),
+                    true,
+                    Control::Alignment,
+                    cx,
+                ),
+            )
+            .child(
+                self.button(
+                    "epub-publisher",
+                    if self.preferences.publisher_styles {
+                        "Publisher layout: On"
+                    } else {
+                        "Publisher layout: Reader settings"
+                    }
+                    .into(),
+                    true,
+                    Control::Publisher,
+                    cx,
+                ),
+            )
+            .child(
+                self.button(
+                    "epub-theme",
+                    if self.preferences.light {
+                        "Theme: Light"
+                    } else {
+                        "Theme: Dark"
+                    }
+                    .into(),
+                    true,
+                    Control::Theme,
+                    cx,
+                ),
+            )
+            .child(
+                self.button(
+                    "epub-reduce-motion",
+                    if self.preferences.reduce_motion {
+                        "Reduce motion: On"
+                    } else {
+                        "Reduce motion: Off"
+                    }
+                    .into(),
+                    true,
+                    Control::ReduceMotion,
+                    cx,
+                ),
+            )
+            .on_mouse_down_out(cx.listener(|reader, _, _, cx| {
+                reader.settings_open = false;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn render_search(&self, cx: &mut Context<Self>) -> AnyElement {
+        let status = if self.index_task.is_some() {
+            "Preparing book search…".to_owned()
+        } else if self.search_busy {
+            "Searching…".to_owned()
+        } else if self.input.read(cx).text.content.trim().is_empty() {
+            "Enter a word or phrase".to_owned()
+        } else if self.search_results.len() == 200 {
+            "First 200 matches".to_owned()
+        } else {
+            format!("{} matches", self.search_results.len())
+        };
+        self.panel("epub-search-panel")
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().child("Search book"))
+                    .child(self.button(
+                        "epub-search-close",
+                        "×".into(),
+                        true,
+                        Control::Dismiss,
+                        cx,
+                    )),
+            )
+            .child(self.input.clone())
+            .child(status)
+            .when(
+                self.index.as_ref().is_some_and(|index| index.incomplete),
+                |panel| panel.child("Some sections could not be searched."),
+            )
+            .children(
+                self.search_results
+                    .iter()
+                    .enumerate()
+                    .map(|(index, result)| {
+                        div()
+                            .id(("epub-search-result", index))
+                            .key_context("EpubControl")
+                            .tab_index(0)
+                            .focus(|style| {
+                                style.bg(rgb(if self.preferences.light {
+                                    0xdce9f5
+                                } else {
+                                    0x335a80
+                                }))
+                            })
+                            .cursor(CursorStyle::PointingHand)
+                            .py(px(6.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(result.title.clone())
+                            .child(result.excerpt.clone())
+                            .on_click(cx.listener(move |reader, _, window, cx| {
+                                reader.open_search_result(index, window, cx)
+                            }))
+                            .on_action(cx.listener(move |reader, _: &EpubActivate, window, cx| {
+                                reader.open_search_result(index, window, cx);
+                                cx.stop_propagation();
+                            }))
+                    }),
+            )
+            .on_mouse_down_out(cx.listener(|reader, _, window, cx| {
+                reader.search_open = false;
+                reader.focus_handle.focus(window);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn render_bookmark_input(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.panel("epub-bookmark-panel")
+            .child("Name this bookmark")
+            .child(self.bookmark_input.clone())
+            .child(
+                div()
+                    .flex()
+                    .child(self.button(
+                        "epub-bookmark-save",
+                        "Save".into(),
+                        !self.bookmark_input.read(cx).text.content.trim().is_empty(),
+                        Control::SaveBookmark,
+                        cx,
+                    ))
+                    .child(self.button(
+                        "epub-bookmark-cancel",
+                        "Cancel".into(),
+                        true,
+                        Control::Dismiss,
+                        cx,
+                    )),
+            )
+            .on_mouse_down_out(cx.listener(|reader, _, window, cx| reader.dismiss(window, cx)))
             .into_any_element()
     }
 }
@@ -1473,10 +2653,77 @@ enum Control {
     Smaller,
     Larger,
     Theme,
+    Back,
+    Retry,
+    Skip,
+    Settings,
+    Find,
+    Bookmark,
+    SaveBookmark,
+    Return,
+    Fullscreen,
+    Dismiss,
+    Copy,
+    Sans,
+    Spacing(i16),
+    Width(i16),
+    Alignment,
+    Publisher,
+    ReduceMotion,
+}
+
+fn control_tooltip(action: Control) -> &'static str {
+    match action {
+        Control::Previous => "Previous page (Left / Page Up)",
+        Control::Next => "Next page (Right / Page Down)",
+        Control::Chapters => "Contents and bookmarks (Ctrl/Cmd+T)",
+        Control::Settings => "Reading settings (Ctrl/Cmd+,)",
+        Control::Find => "Search book (Ctrl/Cmd+F)",
+        Control::Bookmark => "Bookmark passage (Ctrl/Cmd+D)",
+        Control::Fullscreen => "Toggle fullscreen (F11)",
+        Control::Back => "Back (Alt+Left)",
+        Control::Theme => "Switch light/dark theme",
+        Control::Sans => "Choose serif or sans serif",
+        Control::Smaller => "Smaller text",
+        Control::Larger => "Larger text",
+        Control::Spacing(_) => "Adjust line spacing",
+        Control::Width(_) => "Adjust reading width",
+        Control::Alignment => "Choose left or justified alignment",
+        Control::Publisher => "Use supported publisher layout or override with reader settings",
+        Control::Retry => "Retry this section",
+        Control::Skip => "Skip unreadable section",
+        Control::Return => "Return to the passage before search",
+        Control::SaveBookmark => "Save bookmark",
+        Control::Copy => "Copy selected text (Ctrl/Cmd+C)",
+        Control::Dismiss => "Close (Escape)",
+        Control::ReduceMotion => "Use a static loading indicator",
+    }
+}
+
+struct ReaderTooltip(gpui::SharedString);
+impl Render for ReaderTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .p(px(6.0))
+            .max_w(px(260.0))
+            .bg(rgb(0xf5f5f5))
+            .text_color(rgb(0x202020))
+            .text_size(px(12.0))
+            .border_1()
+            .border_color(rgb(0x808080))
+            .child(self.0.clone())
+    }
+}
+fn reader_tooltip(
+    label: impl Into<gpui::SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView {
+    let label = label.into();
+    move |_, cx| cx.new(|_| ReaderTooltip(label.clone())).into()
 }
 
 impl Render for Reader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.popup_height = (f32::from(window.viewport_size().height) - 112.0).clamp(100.0, 320.0);
         let loading =
             self.load_task.is_some() || self.chapter_task.is_some() || self.request.is_some();
         let body = div()
@@ -1488,29 +2735,100 @@ impl Render for Reader {
             .w_full()
             .overflow_hidden()
             .child(self.render_surface(cx))
-            .when(loading && self.error.is_none(), |body| {
-                body.child(div().absolute().top(px(0.0)).left(px(0.0)).w_full().child(
-                    linear_indeterminate(
-                        "epub-loading",
-                        LinearProgressStyle {
-                            color: 0x62a6ff,
-                            track_color: if self.preferences.light {
-                                0xdddddd
-                            } else {
-                                0x333333
+            .when(
+                loading && self.error.is_none() && !self.preferences.reduce_motion,
+                |body| {
+                    body.child(div().absolute().top(px(0.0)).left(px(0.0)).w_full().child(
+                        linear_indeterminate(
+                            "epub-loading",
+                            LinearProgressStyle {
+                                color: 0x62a6ff,
+                                track_color: if self.preferences.light {
+                                    0xdddddd
+                                } else {
+                                    0x333333
+                                },
+                                height: 3.0,
                             },
-                            height: 3.0,
-                        },
-                    ),
-                ))
-            })
+                        ),
+                    ))
+                },
+            )
+            .when(
+                loading && self.error.is_none() && self.preferences.reduce_motion,
+                |body| {
+                    body.child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .w_full()
+                            .h(px(3.0))
+                            .bg(rgb(0x62a6ff)),
+                    )
+                },
+            )
             .when(self.error.is_some(), |body| {
                 body.child(
                     div()
                         .absolute()
                         .inset_0()
                         .p(px(32.0))
-                        .child(self.error.clone().unwrap_or_default()),
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .child(
+                            self.book
+                                .as_ref()
+                                .and_then(|book| {
+                                    book.sections
+                                        .iter()
+                                        .find(|section| section.href == self.href)
+                                })
+                                .map(|section| format!("Could not read {}", section.title))
+                                .unwrap_or_else(|| "Could not open book".into()),
+                        )
+                        .child(self.error.clone().unwrap_or_default())
+                        .when(self.book.is_some(), |panel| {
+                            panel.child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.0))
+                                    .child(self.button(
+                                        "epub-retry",
+                                        "Retry".into(),
+                                        true,
+                                        Control::Retry,
+                                        cx,
+                                    ))
+                                    .child(self.button(
+                                        "epub-error-back",
+                                        "Back".into(),
+                                        !self.history.is_empty()
+                                            || self.book.as_ref().is_some_and(|book| {
+                                                book.sections.first().is_some_and(|section| {
+                                                    section.href != self.href
+                                                })
+                                            }),
+                                        Control::Back,
+                                        cx,
+                                    ))
+                                    .child(self.button(
+                                        "epub-skip",
+                                        "Skip section".into(),
+                                        self.book.as_ref().is_some_and(|book| {
+                                            book.sections
+                                                .iter()
+                                                .position(|section| section.href == self.href)
+                                                .is_some_and(|index| {
+                                                    index + 1 < book.sections.len()
+                                                })
+                                        }),
+                                        Control::Skip,
+                                        cx,
+                                    )),
+                            )
+                        }),
                 )
             })
             .when(
@@ -1545,20 +2863,228 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &EpubEnd, _, cx| reader.boundary(true, cx)))
             .on_action(cx.listener(|reader, _: &EpubBack, _, cx| reader.back(cx)))
             .on_action(cx.listener(|reader, _: &EpubCopy, _, cx| reader.copy(cx)))
-            .on_action(cx.listener(|reader, _: &EpubDismiss, _, cx| {
-                reader.chapters_open = false;
-                reader.clear_selection();
-                cx.notify();
+            .on_action(
+                cx.listener(|reader, _: &EpubDismiss, window, cx| reader.dismiss(window, cx)),
+            )
+            .on_action(cx.listener(|reader, _: &EpubContents, window, cx| {
+                reader.toggle_contents(window, cx)
             }))
-            .child(self.render_titlebar(window, cx))
+            .on_action(cx.listener(|reader, _: &EpubSettings, window, cx| {
+                reader.control(Control::Settings, window, cx)
+            }))
+            .on_action(
+                cx.listener(|reader, _: &EpubFind, window, cx| reader.toggle_search(window, cx)),
+            )
+            .on_action(
+                cx.listener(|reader, _: &EpubBookmark, window, cx| {
+                    reader.open_bookmark(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|reader, _: &EpubFullscreen, window, cx| {
+                reader.control(Control::Fullscreen, window, cx)
+            }))
+            .on_action(cx.listener(|_, _: &EpubFocusNext, window, cx| {
+                window.focus_next();
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|_, _: &EpubFocusPrevious, window, cx| {
+                window.focus_prev();
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(Self::contents_key))
+            .on_action(cx.listener(|reader, _: &EpubActivate, window, cx| {
+                if reader.chapters_open {
+                    if let Some(target) = reader
+                        .book
+                        .as_ref()
+                        .and_then(|book| book.toc.get(reader.contents_cursor))
+                        .and_then(|item| item.target.clone())
+                    {
+                        reader.follow_link(target, cx);
+                        reader.focus_handle.focus(window);
+                    }
+                }
+                cx.stop_propagation();
+            }))
+            .on_mouse_move(cx.listener(|reader, event: &MouseMoveEvent, window, cx| {
+                if reader.fullscreen {
+                    let revealed = event.position.y >= window.viewport_size().height - px(90.0);
+                    if reader.controls_revealed != revealed {
+                        reader.controls_revealed = revealed;
+                        cx.notify();
+                    }
+                }
+            }))
+            .when(!self.fullscreen, |content| {
+                content.child(self.render_titlebar(window, cx))
+            })
             .child(body)
-            .child(self.render_toolbar(cx))
+            .when(
+                !self.fullscreen
+                    || self.controls_revealed
+                    || self.chapters_open
+                    || self.settings_open
+                    || self.search_open
+                    || self.bookmark_open,
+                |content| content.child(self.render_toolbar(cx)),
+            )
             .when(self.chapters_open, |content| {
                 content.child(self.render_chapters(cx))
+            })
+            .when(self.settings_open, |content| {
+                content.child(self.render_settings(cx))
+            })
+            .when(self.search_open, |content| {
+                content.child(self.render_search(cx))
+            })
+            .when(self.bookmark_open, |content| {
+                content.child(self.render_bookmark_input(cx))
+            })
+            .when(self.note.is_some(), |content| {
+                let (title, text) = self.note.as_ref().unwrap();
+                content.child(
+                    self.panel("epub-note-preview")
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .child(div().flex_1().child(title.clone()))
+                                .child(self.button(
+                                    "epub-note-close",
+                                    "×".into(),
+                                    true,
+                                    Control::Dismiss,
+                                    cx,
+                                )),
+                        )
+                        .child(text.clone())
+                        .on_mouse_down_out(
+                            cx.listener(|reader, _, window, cx| reader.dismiss(window, cx)),
+                        ),
+                )
+            })
+            .when(self.enlarged_image.is_some(), |content| {
+                content.child(
+                    div()
+                        .id("epub-enlarged-image")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .bg(rgb(if self.preferences.light {
+                            0xfaf9f6
+                        } else {
+                            0x1c1c1c
+                        }))
+                        .p(px(32.0))
+                        .flex()
+                        .flex_col()
+                        .child(self.button(
+                            "epub-image-close",
+                            "Close image (Escape)".into(),
+                            true,
+                            Control::Dismiss,
+                            cx,
+                        ))
+                        .child(
+                            gpui::img(self.enlarged_image.as_ref().unwrap().image.clone())
+                                .object_fit(gpui::ObjectFit::Contain)
+                                .w_full()
+                                .flex_1()
+                                .min_h(px(0.0)),
+                        ),
+                )
+            })
+            .when(self.copy_menu.is_some(), |content| {
+                content.child(
+                    div()
+                        .id("epub-copy-menu")
+                        .absolute()
+                        .occlude()
+                        .left(px(f32::from(self.copy_menu.unwrap().x).clamp(
+                            0.0,
+                            (f32::from(window.viewport_size().width) - 180.0).max(0.0),
+                        )))
+                        .top(px((f32::from(self.copy_menu.unwrap().y)
+                            + if self.fullscreen {
+                                0.0
+                            } else {
+                                TITLEBAR_HEIGHT
+                            })
+                        .clamp(
+                            0.0,
+                            (f32::from(window.viewport_size().height) - 40.0).max(0.0),
+                        )))
+                        .bg(rgb(if self.preferences.light {
+                            0xf5f5f5
+                        } else {
+                            0x252525
+                        }))
+                        .border_1()
+                        .border_color(rgb(0x808080))
+                        .w(px(180.0))
+                        .child(self.button(
+                            "epub-copy-selection",
+                            "Copy".into(),
+                            true,
+                            Control::Copy,
+                            cx,
+                        ))
+                        .on_mouse_down_out(cx.listener(|reader, _, _, cx| {
+                            reader.copy_menu = None;
+                            cx.notify();
+                        })),
+                )
             })
             .into_any_element();
         render_platform_window_frame(content, window)
     }
+}
+
+fn word_selection(chapter: &Chapter, point: ContentPoint) -> Option<(ContentPoint, ContentPoint)> {
+    let Block::Text { text, .. } = chapter.blocks.get(point.block)? else {
+        return None;
+    };
+    if text.is_empty() {
+        return None;
+    }
+    let point = normalize_point(chapter, point);
+    let mut selected = point.offset.min(text.len());
+    if selected == text.len() {
+        selected = text.char_indices().last()?.0;
+    }
+    let ch = text[selected..].chars().next()?;
+    let word = ch.is_alphanumeric() || ch == '_';
+    let same = |ch: char| {
+        if word {
+            ch.is_alphanumeric() || ch == '_' || ch == '\'' || ch == '’'
+        } else {
+            ch == text[selected..].chars().next().unwrap()
+        }
+    };
+    let mut start = selected;
+    for (offset, ch) in text[..selected].char_indices().rev() {
+        if !same(ch) {
+            break;
+        }
+        start = offset;
+    }
+    let mut end = selected;
+    for (offset, ch) in text[selected..].char_indices() {
+        if !same(ch) {
+            break;
+        }
+        end = selected + offset + ch.len_utf8();
+    }
+    Some((
+        ContentPoint {
+            block: point.block,
+            offset: start,
+        },
+        ContentPoint {
+            block: point.block,
+            offset: end,
+        },
+    ))
 }
 
 fn hit_point(page: &Page, position: Point<Pixels>) -> Option<ContentPoint> {
@@ -2175,6 +3701,7 @@ mod tests {
         let location = reader.update(cx, |reader, _| Location {
             href: reader.href.clone(),
             point: reader.anchor,
+            ..Location::default()
         });
         reader.update(cx, |reader, cx| {
             reader.follow_link("/book/notes.xhtml#note".into(), cx)
@@ -2226,7 +3753,16 @@ mod tests {
         let path = dir.path().join("book.epub");
         fixture(&path);
         let other_path = dir.path().join("other.epub");
-        fixture(&other_path);
+        super::super::tests::write_book(
+            &other_path,
+            "3.0",
+            "",
+            &[(
+                "other.xhtml",
+                "<html><body><p>A different book.</p></body></html>",
+            )],
+            &[],
+        );
         let location = {
             let (reader, visual_cx) = cx.add_window_view(|window, cx| {
                 Reader::new(path.clone(), "fixture".into(), window, cx)
@@ -2241,6 +3777,7 @@ mod tests {
             let location = reader.update(visual_cx, |reader, _| Location {
                 href: reader.href.clone(),
                 point: reader.anchor,
+                ..Location::default()
             });
             visual_cx.update(|window, _| window.remove_window());
             location
@@ -2278,8 +3815,11 @@ mod tests {
         let (reader, cx) =
             cx.add_window_view(|window, cx| Reader::new(path, "fixture".into(), window, cx));
         let bounds = cx.debug_bounds("epub-body").unwrap();
-        let geometry =
-            PageGeometry::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let geometry = PageGeometry::with_width(
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            900.0,
+        );
         let (a, b) = reader.update(cx, |reader, _| {
             let PageItem::Text { line, x, y, .. } = &reader.current_page.as_ref().unwrap().items[0]
             else {
@@ -2453,7 +3993,14 @@ mod tests {
                 else {
                     panic!()
                 };
-                assert!(*width <= geometry.width && *height <= geometry.height);
+                assert!(
+                    *width <= geometry.width && *height <= geometry.height,
+                    "image {width}x{height}, geometry {geometry:?}, cached {:?}",
+                    reader
+                        .layouts
+                        .get(&reader.href)
+                        .map(|layout| layout.geometry)
+                );
                 assert!((*width / *height - 800.0 / 1224.0).abs() < 0.001);
                 assert_red_cover(asset.as_ref().unwrap());
             });
@@ -2555,8 +4102,11 @@ mod tests {
         visual_cx.simulate_resize(size(px(1600.0), px(900.0)));
         settle(&reader, visual_cx);
         let bounds = visual_cx.debug_bounds("epub-body").unwrap();
-        let geometry =
-            PageGeometry::new(f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let geometry = PageGeometry::with_width(
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            900.0,
+        );
         let (a, b, link) = reader.update(visual_cx, |reader, _| {
             let page = reader.current_page.as_ref().unwrap();
             let PageItem::Text { line, x, y, .. } = &page.items[0] else {
@@ -2590,6 +4140,265 @@ mod tests {
         settle(&reader, visual_cx);
         reader.update(visual_cx, |reader, _| {
             assert_eq!(reader.href, "/book/notes.xhtml")
+        });
+    }
+
+    #[gpui::test]
+    fn settings_and_keyboard_contents_preserve_reading_positions(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        cx.update(|cx| cx.bind_keys(crate::app::platform_key_bindings()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Settings".into(), window, cx));
+        settle(&reader, visual);
+        visual.dispatch_action(EpubNext);
+        settle(&reader, visual);
+        let original = reader.update(visual, |reader, _| reader.anchor);
+        visual.update(|window, cx| {
+            reader.update(cx, |reader, cx| {
+                reader.control(Control::Sans, window, cx);
+                reader.control(Control::Spacing(2), window, cx);
+                reader.control(Control::Width(-200), window, cx);
+                reader.control(Control::Alignment, window, cx);
+            })
+        });
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.anchor, original);
+            assert!(reader.preferences.sans);
+            assert_eq!(reader.preferences.line_spacing, 17);
+            assert_eq!(reader.preferences.reading_width, 700);
+            assert!(!reader.preferences.justify);
+        });
+        visual.dispatch_action(EpubContents);
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("epub-chapter-popup").is_some());
+        visual.simulate_keystrokes("down enter");
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| {
+            assert!(!reader.chapters_open);
+            assert!(!reader.history.is_empty());
+        });
+        visual.dispatch_action(EpubBack);
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| assert_eq!(reader.anchor, original));
+        visual.dispatch_action(EpubSettings);
+        visual.simulate_resize(size(px(360.0), px(240.0)));
+        settle(&reader, visual);
+        let popup = visual.debug_bounds("epub-reading-settings").unwrap();
+        assert!(popup.top() >= px(0.0));
+        assert!(popup.left() >= px(0.0));
+        assert!(popup.right() <= px(360.0));
+        visual.dispatch_action(EpubDismiss);
+        reader.update(visual, |reader, _| assert!(!reader.settings_open));
+    }
+
+    #[gpui::test]
+    fn native_search_input_results_and_return_keep_the_original_passage(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        cx.update(|cx| cx.bind_keys(crate::app::platform_key_bindings()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.epub");
+        super::super::tests::write_book(
+            &path,
+            "3.0",
+            "",
+            &[
+                (
+                    "a.xhtml",
+                    "<html><body><p>Original passage.</p></body></html>",
+                ),
+                (
+                    "b.xhtml",
+                    "<html><body><p>A café in a different chapter.</p></body></html>",
+                ),
+            ],
+            &[],
+        );
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Search".into(), window, cx));
+        settle(&reader, visual);
+        visual.run_until_parked();
+        let original = reader.update(visual, |reader, _| reader.location());
+        visual.dispatch_action(EpubFind);
+        visual.simulate_input("CAFÉ");
+        visual.run_until_parked();
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(150));
+        visual.run_until_parked();
+        reader.update(visual, |reader, cx| {
+            assert_eq!(reader.input.read(cx).text.content, "CAFÉ");
+        });
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.search_results.len(), 1)
+        });
+        visual.simulate_keystrokes("enter");
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.href, "/book/b.xhtml");
+            assert!(reader.search_highlight.is_some());
+        });
+        visual.update(|window, cx| {
+            reader.update(cx, |reader, cx| reader.control(Control::Return, window, cx))
+        });
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.href, original.href);
+            assert_eq!(reader.anchor, original.point);
+            assert!(reader.search_highlight.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn named_bookmarks_and_note_previews_keep_the_reader_at_its_passage(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        cx.update(|cx| cx.bind_keys(crate::app::platform_key_bindings()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.epub");
+        super::super::tests::write_book(&path,"3.0","",&[("c.xhtml",r##"<html xmlns:epub="http://www.idpf.org/2007/ops"><body><p>Read <a epub:type="noteref" href="notes.xhtml#n">1</a> here.</p><p>More prose.</p></body></html>"##)],&[("notes.xhtml","application/xhtml+xml",br#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body><aside epub:type="footnote" id="n" style="display:none"><p>The full note.</p><p>Second paragraph.</p></aside></body></html>"#)]);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path.clone(), "Notes".into(), window, cx));
+        settle(&reader, visual);
+        let original = reader.update(visual, |reader, _| reader.location());
+        visual.dispatch_action(EpubBookmark);
+        visual.simulate_input("My passage");
+        visual.simulate_keystrokes("enter");
+        reader.update(visual, |reader, cx| {
+            let bookmarks = state::bookmarks(cx, &reader.key);
+            assert_eq!(bookmarks.len(), 1);
+            assert_eq!(bookmarks[0].name, "My passage");
+            assert!(!bookmarks[0].location.quote.is_empty());
+        });
+        visual.run_until_parked();
+        let bounds = visual.debug_bounds("epub-body").unwrap();
+        let link = reader.update(visual, |reader, _| {
+            let geometry = reader.layouts[&reader.href].geometry;
+            let PageItem::Text { line, x, y, .. } = &reader.current_page.as_ref().unwrap().items[0]
+            else {
+                panic!()
+            };
+            bounds.origin
+                + point(
+                    px(geometry.margin_x + x) + line.x_for_index(5) + px(1.0),
+                    px(geometry.margin_y + y + 8.0),
+                )
+        });
+        visual.simulate_click(link, Modifiers::default());
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.href, original.href);
+            assert_eq!(reader.anchor, original.point);
+            let text = &reader.note.as_ref().unwrap().1;
+            assert!(text.contains("The full note.") && text.contains("Second paragraph."));
+        });
+        visual.dispatch_action(EpubDismiss);
+        visual.update(|window, _| window.remove_window());
+        let (reopened, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Reopened".into(), window, cx));
+        settle(&reopened, visual);
+        reopened.update(visual, |reader, cx| {
+            assert_eq!(state::bookmarks(cx, &reader.key).len(), 1);
+            assert_eq!(reader.anchor, original.point);
+        });
+    }
+
+    #[test]
+    fn double_click_selection_handles_unicode_and_word_boundaries() {
+        let chapter = super::super::book::parse_chapter(
+            "<html><body><p>one café two</p></body></html>",
+            "c",
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let (a, b) = word_selection(
+            &chapter,
+            ContentPoint {
+                block: 0,
+                offset: 6,
+            },
+        )
+        .unwrap();
+        assert_eq!(selected_text(&chapter, a, b), "café");
+    }
+    #[gpui::test]
+    fn tab_enter_and_space_activate_controls_without_turning_twice(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        cx.update(|cx| cx.bind_keys(crate::app::platform_key_bindings()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keyboard.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Keyboard".into(), window, cx));
+        settle(&reader, visual);
+        visual.simulate_keystrokes("tab enter");
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| assert_eq!(reader.page_index, 1));
+        visual.simulate_keystrokes("space");
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| assert_eq!(reader.page_index, 2));
+        visual
+            .update(|window, cx| reader.update(cx, |reader, _| reader.focus_handle.focus(window)));
+        visual.dispatch_action(EpubFullscreen);
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| assert!(reader.fullscreen));
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| assert!(!reader.fullscreen));
+    }
+
+    #[gpui::test]
+    fn broken_sections_can_retry_skip_and_return_to_reading(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.epub");
+        super::super::tests::write_book(
+            &path,
+            "3.0",
+            "",
+            &[
+                ("a.xhtml", "<html><body><p>Before</p></body></html>"),
+                ("b.xhtml", "<html><body><p>Broken"),
+                ("c.xhtml", "<html><body><p>After</p></body></html>"),
+            ],
+            &[],
+        );
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Recovery".into(), window, cx));
+        settle(&reader, visual);
+        reader.update(visual, |reader, cx| {
+            reader.follow_link("/book/b.xhtml".into(), cx)
+        });
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| {
+            assert!(reader.error.is_some());
+            assert_eq!(reader.heading(), "Section 2");
+        });
+        visual.update(|window, cx| {
+            reader.update(cx, |reader, cx| {
+                reader.control(Control::Retry, window, cx);
+                assert!(reader.error.is_none());
+            })
+        });
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| assert!(reader.error.is_some()));
+        visual.update(|window, cx| {
+            reader.update(cx, |reader, cx| reader.control(Control::Skip, window, cx))
+        });
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.href, "/book/c.xhtml");
+            assert!(reader.error.is_none());
+        });
+        visual.update(|window, cx| {
+            reader.update(cx, |reader, cx| reader.control(Control::Back, window, cx))
+        });
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.href, "/book/a.xhtml");
+            assert!(reader.error.is_none());
         });
     }
 }

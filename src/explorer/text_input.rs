@@ -4,12 +4,12 @@ use gpui::{
     Bounds, Pixels, Point, ShapedLine, TextRun, UTF16Selection, UnderlineStyle, point, px, rgb,
 };
 
-pub(super) const EDITABLE_TEXT_SELECTION_BACKGROUND: u32 = 0x0078d7;
-pub(super) const EDITABLE_TEXT_SELECTION_FOREGROUND: u32 = 0xffffff;
+pub(crate) const EDITABLE_TEXT_SELECTION_BACKGROUND: u32 = 0x0078d7;
+pub(crate) const EDITABLE_TEXT_SELECTION_FOREGROUND: u32 = 0xffffff;
 const EDITABLE_TEXT_HISTORY_LIMIT: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum EditableTextEditKind {
+pub(crate) enum EditableTextEditKind {
     Typing,
     Backspace,
     Delete,
@@ -36,15 +36,15 @@ struct EditableTextSnapshot {
 }
 
 #[derive(Clone)]
-pub(super) struct EditableTextState {
-    pub(super) content: String,
-    pub(super) selected_range: Range<usize>,
-    pub(super) selection_reversed: bool,
-    pub(super) marked_range: Option<Range<usize>>,
-    pub(super) last_layout: Option<ShapedLine>,
-    pub(super) last_bounds: Option<Bounds<Pixels>>,
-    pub(super) scroll_offset: Pixels,
-    pub(super) is_selecting: bool,
+pub(crate) struct EditableTextState {
+    pub(crate) content: String,
+    pub(crate) selected_range: Range<usize>,
+    pub(crate) selection_reversed: bool,
+    pub(crate) marked_range: Option<Range<usize>>,
+    pub(crate) last_layout: Option<ShapedLine>,
+    pub(crate) last_bounds: Option<Bounds<Pixels>>,
+    pub(crate) scroll_offset: Pixels,
+    pub(crate) is_selecting: bool,
     undo_stack: Vec<EditableTextSnapshot>,
     redo_stack: Vec<EditableTextSnapshot>,
     active_edit_kind: Option<EditableTextEditKind>,
@@ -52,12 +52,12 @@ pub(super) struct EditableTextState {
 }
 
 impl EditableTextState {
-    pub(super) fn new(content: String) -> Self {
+    pub(crate) fn new(content: String) -> Self {
         let selected_range = 0..content.len();
         Self::with_selection(content, selected_range)
     }
 
-    pub(super) fn with_selection(content: String, selected_range: Range<usize>) -> Self {
+    pub(crate) fn with_selection(content: String, selected_range: Range<usize>) -> Self {
         Self {
             content,
             selected_range,
@@ -74,7 +74,7 @@ impl EditableTextState {
         }
     }
 
-    pub(super) fn cursor_offset(&self) -> usize {
+    pub(crate) fn cursor_offset(&self) -> usize {
         if self.selection_reversed {
             self.selected_range.start
         } else {
@@ -82,7 +82,7 @@ impl EditableTextState {
         }
     }
 
-    pub(super) fn move_to(&mut self, offset: usize) {
+    pub(crate) fn move_to(&mut self, offset: usize) {
         self.finish_edit_group();
         let offset = self.clamp_to_boundary(offset);
         self.selected_range = offset..offset;
@@ -90,7 +90,7 @@ impl EditableTextState {
         self.scroll_cursor_into_view();
     }
 
-    pub(super) fn select_to(&mut self, offset: usize) {
+    pub(crate) fn select_to(&mut self, offset: usize) {
         self.finish_edit_group();
         let offset = self.clamp_to_boundary(offset);
         if self.selection_reversed {
@@ -106,14 +106,14 @@ impl EditableTextState {
         self.scroll_cursor_into_view();
     }
 
-    pub(super) fn select_all(&mut self) {
+    pub(crate) fn select_all(&mut self) {
         self.finish_edit_group();
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
         self.scroll_cursor_into_view();
     }
 
-    pub(super) fn select_word_at(&mut self, offset: usize) {
+    pub(crate) fn select_word_at(&mut self, offset: usize) {
         self.finish_edit_group();
         let offset = self.clamp_to_boundary(offset);
         let Some(word_offset) = self.word_offset_near(offset) else {
@@ -190,7 +190,7 @@ impl EditableTextState {
         offset
     }
 
-    pub(super) fn previous_boundary(&self, offset: usize) -> usize {
+    pub(crate) fn previous_boundary(&self, offset: usize) -> usize {
         self.content
             .char_indices()
             .rev()
@@ -198,14 +198,14 @@ impl EditableTextState {
             .unwrap_or(0)
     }
 
-    pub(super) fn next_boundary(&self, offset: usize) -> usize {
+    pub(crate) fn next_boundary(&self, offset: usize) -> usize {
         self.content
             .char_indices()
             .find_map(|(ix, _)| (ix > offset).then_some(ix))
             .unwrap_or(self.content.len())
     }
 
-    pub(super) fn previous_word_boundary(&self, offset: usize) -> usize {
+    pub(crate) fn previous_word_boundary(&self, offset: usize) -> usize {
         let mut offset = self.clamp_to_boundary(offset);
 
         while let Some((previous_offset, ch)) = self.previous_char(offset) {
@@ -225,7 +225,7 @@ impl EditableTextState {
         offset
     }
 
-    pub(super) fn next_word_boundary(&self, offset: usize) -> usize {
+    pub(crate) fn next_word_boundary(&self, offset: usize) -> usize {
         let mut offset = self.clamp_to_boundary(offset);
 
         while let Some((next_offset, ch)) = self.next_char(offset) {
@@ -258,7 +258,7 @@ impl EditableTextState {
         Some((offset + ch.len_utf8(), ch))
     }
 
-    pub(super) fn clamp_to_boundary(&self, offset: usize) -> usize {
+    pub(crate) fn clamp_to_boundary(&self, offset: usize) -> usize {
         if offset >= self.content.len() {
             return self.content.len();
         }
@@ -285,7 +285,7 @@ impl EditableTextState {
         utf8_offset
     }
 
-    pub(super) fn offset_to_utf16(&self, offset: usize) -> usize {
+    pub(crate) fn offset_to_utf16(&self, offset: usize) -> usize {
         let mut utf16_offset = 0;
         let mut utf8_count = 0;
 
@@ -300,15 +300,15 @@ impl EditableTextState {
         utf16_offset
     }
 
-    pub(super) fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+    pub(crate) fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
     }
 
-    pub(super) fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
+    pub(crate) fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
         self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
     }
 
-    pub(super) fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+    pub(crate) fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
         if self.content.is_empty() {
             return 0;
         }
@@ -330,13 +330,13 @@ impl EditableTextState {
         )
     }
 
-    pub(super) fn update_layout(&mut self, line: ShapedLine, bounds: Bounds<Pixels>) {
+    pub(crate) fn update_layout(&mut self, line: ShapedLine, bounds: Bounds<Pixels>) {
         self.last_layout = Some(line);
         self.last_bounds = Some(bounds);
         self.scroll_cursor_into_view();
     }
 
-    pub(super) fn scroll_cursor_into_view(&mut self) {
+    pub(crate) fn scroll_cursor_into_view(&mut self) {
         let (Some(line), Some(bounds)) = (self.last_layout.as_ref(), self.last_bounds.as_ref())
         else {
             return;
@@ -350,12 +350,12 @@ impl EditableTextState {
         );
     }
 
-    pub(super) fn selected_text(&self) -> Option<String> {
+    pub(crate) fn selected_text(&self) -> Option<String> {
         (!self.selected_range.is_empty())
             .then(|| self.content[self.selected_range.clone()].to_owned())
     }
 
-    pub(super) fn replace_text_as_typing(&mut self, range: Option<Range<usize>>, new_text: &str) {
+    pub(crate) fn replace_text_as_typing(&mut self, range: Option<Range<usize>>, new_text: &str) {
         let effective_range = range
             .clone()
             .or(self.marked_range.clone())
@@ -370,7 +370,7 @@ impl EditableTextState {
         self.replace_text_with_kind(range, new_text, kind);
     }
 
-    pub(super) fn replace_text_with_kind(
+    pub(crate) fn replace_text_with_kind(
         &mut self,
         range: Option<Range<usize>>,
         new_text: &str,
@@ -394,7 +394,7 @@ impl EditableTextState {
         self.finish_recorded_edit(kind);
     }
 
-    pub(super) fn delete_backward(&mut self) {
+    pub(crate) fn delete_backward(&mut self) {
         let (range, kind) = if self.selected_range.is_empty() {
             let cursor = self.cursor_offset();
             let start = self.previous_boundary(cursor);
@@ -408,7 +408,7 @@ impl EditableTextState {
         self.replace_text_with_kind(Some(range), "", kind);
     }
 
-    pub(super) fn delete_forward(&mut self) {
+    pub(crate) fn delete_forward(&mut self) {
         let (range, kind) = if self.selected_range.is_empty() {
             let cursor = self.cursor_offset();
             let end = self.next_boundary(cursor);
@@ -422,7 +422,7 @@ impl EditableTextState {
         self.replace_text_with_kind(Some(range), "", kind);
     }
 
-    pub(super) fn delete_previous_word_or_selection(&mut self) {
+    pub(crate) fn delete_previous_word_or_selection(&mut self) {
         let (range, kind) = if self.selected_range.is_empty() {
             let cursor = self.cursor_offset();
             let start = self.previous_word_boundary(cursor);
@@ -436,7 +436,7 @@ impl EditableTextState {
         self.replace_text_with_kind(Some(range), "", kind);
     }
 
-    pub(super) fn replace_text_in_range_utf16(
+    pub(crate) fn replace_text_in_range_utf16(
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
@@ -448,7 +448,7 @@ impl EditableTextState {
         self.replace_text_as_typing(range, new_text);
     }
 
-    pub(super) fn replace_and_mark_text_in_range_utf16(
+    pub(crate) fn replace_and_mark_text_in_range_utf16(
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
@@ -476,25 +476,25 @@ impl EditableTextState {
         self.finish_recorded_edit(EditableTextEditKind::Composition);
     }
 
-    pub(super) fn selected_text_range_utf16(&self) -> UTF16Selection {
+    pub(crate) fn selected_text_range_utf16(&self) -> UTF16Selection {
         UTF16Selection {
             range: self.range_to_utf16(&self.selected_range),
             reversed: self.selection_reversed,
         }
     }
 
-    pub(super) fn marked_text_range_utf16(&self) -> Option<Range<usize>> {
+    pub(crate) fn marked_text_range_utf16(&self) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
             .map(|range| self.range_to_utf16(range))
     }
 
-    pub(super) fn unmark_text(&mut self) {
+    pub(crate) fn unmark_text(&mut self) {
         self.marked_range = None;
         self.finish_edit_group();
     }
 
-    pub(super) fn undo(&mut self) -> bool {
+    pub(crate) fn undo(&mut self) -> bool {
         let Some(snapshot) = self.undo_stack.pop() else {
             self.finish_edit_group();
             return false;
@@ -505,7 +505,7 @@ impl EditableTextState {
         true
     }
 
-    pub(super) fn redo(&mut self) -> bool {
+    pub(crate) fn redo(&mut self) -> bool {
         let Some(snapshot) = self.redo_stack.pop() else {
             self.finish_edit_group();
             return false;
@@ -516,7 +516,7 @@ impl EditableTextState {
         true
     }
 
-    pub(super) fn reset_history(&mut self) {
+    pub(crate) fn reset_history(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.finish_edit_group();
@@ -571,7 +571,7 @@ impl EditableTextState {
         stack.push(snapshot);
     }
 
-    pub(super) fn bounds_for_range(
+    pub(crate) fn bounds_for_range(
         &self,
         range_utf16: Range<usize>,
         bounds: Bounds<Pixels>,
@@ -590,7 +590,7 @@ impl EditableTextState {
         ))
     }
 
-    pub(super) fn character_index_for_point(&self, point: Point<Pixels>) -> Option<usize> {
+    pub(crate) fn character_index_for_point(&self, point: Point<Pixels>) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let line = self.last_layout.as_ref()?;
         let utf8_index = line.index_for_x(point.x - line_point.x)?;
@@ -598,7 +598,7 @@ impl EditableTextState {
     }
 }
 
-pub(super) fn scroll_offset_for_cursor(
+pub(crate) fn scroll_offset_for_cursor(
     current_offset: Pixels,
     cursor_x: Pixels,
     content_width: Pixels,
@@ -622,7 +622,7 @@ pub(super) fn scroll_offset_for_cursor(
     }
 }
 
-pub(super) fn editable_text_runs(
+pub(crate) fn editable_text_runs(
     content_len: usize,
     base_run: TextRun,
     selected_range: &Range<usize>,
@@ -686,7 +686,7 @@ fn range_contains_segment(range: &Range<usize>, start: usize, end: usize) -> boo
 }
 
 #[cfg(test)]
-pub(super) fn text_x_for_mouse_x(
+pub(crate) fn text_x_for_mouse_x(
     mouse_x: Pixels,
     bounds_left: Pixels,
     scroll_offset: Pixels,

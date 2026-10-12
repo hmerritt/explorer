@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -12,13 +12,77 @@ use std::{
 
 use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use super::book::ContentPoint;
+use super::book::{Block, Chapter, ContentPoint};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) struct Location {
     pub href: String,
     pub point: ContentPoint,
+    #[serde(default)]
+    pub quote: String,
+    #[serde(default)]
+    pub prefix: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct Bookmark {
+    pub name: String,
+    pub location: Location,
+}
+
+impl Location {
+    pub fn at(href: String, point: ContentPoint, chapter: Option<&Chapter>) -> Self {
+        let mut location = Self {
+            href,
+            point,
+            ..Self::default()
+        };
+        if let Some(Block::Text { text, .. }) =
+            chapter.and_then(|chapter| chapter.blocks.get(point.block))
+        {
+            let mut offset = point.offset.min(text.len());
+            while !text.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            location.quote = text[offset..].chars().take(64).collect();
+            location.prefix = text[..offset]
+                .chars()
+                .rev()
+                .take(24)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+        }
+        location
+    }
+
+    pub fn recover(&self, chapter: &Chapter) -> ContentPoint {
+        if self.quote.is_empty() {
+            return super::pagination::normalize_point(chapter, self.point);
+        }
+        let mut matches = Vec::new();
+        for (block, content) in chapter.blocks.iter().enumerate() {
+            if let Block::Text { text, .. } = content {
+                for (offset, _) in text.match_indices(&self.quote) {
+                    let prefix_match = text[..offset].ends_with(&self.prefix);
+                    matches.push((
+                        !prefix_match,
+                        block.abs_diff(self.point.block),
+                        offset.abs_diff(self.point.offset),
+                        ContentPoint { block, offset },
+                    ));
+                }
+            }
+        }
+        matches.sort_by_key(|entry| (entry.0, entry.1, entry.2));
+        matches
+            .first()
+            .map(|entry| entry.3)
+            .unwrap_or_else(|| super::pagination::normalize_point(chapter, self.point))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -26,6 +90,12 @@ pub(super) struct Location {
 pub(super) struct Preferences {
     pub font_size: u8,
     pub light: bool,
+    pub sans: bool,
+    pub line_spacing: u8,
+    pub reading_width: u16,
+    pub justify: bool,
+    pub publisher_styles: bool,
+    pub reduce_motion: bool,
 }
 
 impl Default for Preferences {
@@ -33,6 +103,12 @@ impl Default for Preferences {
         Self {
             font_size: 20,
             light: false,
+            sans: false,
+            line_spacing: 15,
+            reading_width: 900,
+            justify: true,
+            publisher_styles: true,
+            reduce_motion: false,
         }
     }
 }
@@ -40,6 +116,8 @@ impl Default for Preferences {
 impl Preferences {
     fn validated(mut self) -> Self {
         self.font_size = self.font_size.clamp(12, 36) / 2 * 2;
+        self.line_spacing = self.line_spacing.clamp(12, 22);
+        self.reading_width = self.reading_width.clamp(400, 1000);
         self
     }
 }
@@ -70,6 +148,8 @@ impl Fingerprint {
 struct SavedBook {
     fingerprint: Fingerprint,
     location: Location,
+    #[serde(default)]
+    bookmarks: Vec<Bookmark>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -91,18 +171,56 @@ impl Store {
     pub fn resume(&self, key: &str, fingerprint: &Fingerprint) -> Option<Location> {
         self.books
             .get(key)
-            .filter(|book| book.fingerprint == *fingerprint)
+            .filter(|book| key.starts_with("sha256:") || book.fingerprint == *fingerprint)
             .map(|book| book.location.clone())
     }
     pub fn remember(&mut self, key: String, fingerprint: Fingerprint, location: Location) {
+        let bookmarks = self
+            .books
+            .get(&key)
+            .map(|book| book.bookmarks.clone())
+            .unwrap_or_default();
         self.books.insert(
             key,
             SavedBook {
                 fingerprint,
                 location,
+                bookmarks,
             },
         );
     }
+
+    pub fn migrate(&mut self, key: &str, legacy: &str, fingerprint: &Fingerprint) {
+        if !self.books.contains_key(key) {
+            if let Some(book) = self
+                .books
+                .get(legacy)
+                .filter(|book| book.fingerprint == *fingerprint)
+                .cloned()
+            {
+                self.books.insert(key.to_owned(), book);
+            }
+        }
+    }
+}
+
+/// Stream the archive on the worker rather than allocating the whole book.
+pub(super) fn content_key(
+    path: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        super::book::check_cancel(cancel)?;
+        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 pub(super) fn book_key(path: &Path) -> String {
@@ -168,6 +286,29 @@ pub(super) fn preferences(cx: &App) -> Preferences {
 
 pub(super) fn resume(cx: &App, key: &str, fingerprint: &Fingerprint) -> Option<Location> {
     cx.global::<ReaderState>().store.resume(key, fingerprint)
+}
+
+pub(super) fn migrate(cx: &mut App, key: &str, legacy: &str, fingerprint: &Fingerprint) {
+    cx.global_mut::<ReaderState>()
+        .store
+        .migrate(key, legacy, fingerprint);
+    schedule_save(cx);
+}
+
+pub(super) fn bookmarks(cx: &App, key: &str) -> Vec<Bookmark> {
+    cx.global::<ReaderState>()
+        .store
+        .books
+        .get(key)
+        .map(|book| book.bookmarks.clone())
+        .unwrap_or_default()
+}
+
+pub(super) fn set_bookmarks(cx: &mut App, key: &str, bookmarks: Vec<Bookmark>) {
+    if let Some(book) = cx.global_mut::<ReaderState>().store.books.get_mut(key) {
+        book.bookmarks = bookmarks;
+        schedule_save(cx);
+    }
 }
 
 pub(super) fn remember(cx: &mut App, key: String, fingerprint: Fingerprint, location: Location) {

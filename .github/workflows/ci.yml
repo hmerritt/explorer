@@ -81,6 +81,9 @@ jobs:
             - name: Test portable provider
               run: cargo test --locked portable_devices -- --test-threads=1
 
+            - name: Test EPUB reader
+              run: cargo test --locked epub_reader -- --test-threads=1
+
     windows_installer:
         name: Windows installer validation
         runs-on: windows-latest

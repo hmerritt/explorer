@@ -10,7 +10,10 @@ use gpui::{
     UnderlineStyle, Window, font, px,
 };
 
-use super::book::{Block, Chapter, ContentPoint, Span, TextKind};
+use super::{
+    book::{Alignment, Block, Chapter, ContentPoint, Span, TextKind},
+    state::Preferences,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PageGeometry {
@@ -21,9 +24,14 @@ pub(super) struct PageGeometry {
 }
 
 impl PageGeometry {
+    #[cfg(test)]
     pub fn new(width: f32, height: f32) -> Self {
+        Self::with_width(width, height, 900.0)
+    }
+
+    pub fn with_width(width: f32, height: f32, maximum: f32) -> Self {
         let margin_x = if width < 400.0 { 16.0 } else { 48.0 };
-        let content_width = (width - margin_x * 2.0).clamp(1.0, 900.0);
+        let content_width = (width - margin_x * 2.0).clamp(1.0, maximum.max(1.0));
         let margin_y = if height < 240.0 { 16.0 } else { 32.0 };
         Self {
             width: content_width,
@@ -45,7 +53,10 @@ pub(super) fn justify_line(line: &mut ShapedLine, width: f32) {
         .filter_map(|(index, ch)| (ch == ' ' && index >= first && index < last).then_some(index))
         .collect();
     let extra = width - f32::from(line.width);
-    if spaces.is_empty() || extra <= 0.0 {
+    if spaces.is_empty()
+        || extra <= 0.0
+        || extra / spaces.len() as f32 > f32::from(line.font_size) * 0.6
+    {
         return;
     }
     let layout: &gpui::LineLayout = line;
@@ -98,6 +109,12 @@ impl ImageSlot {
 
 #[derive(Clone)]
 pub(super) enum PageItem {
+    Rule {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
     Text {
         block: usize,
         range: Range<usize>,
@@ -128,11 +145,18 @@ pub(super) fn fit_image(width: f32, height: f32, geometry: PageGeometry) -> (f32
     let factor = (geometry.width / width.max(1.0))
         .min(geometry.height / height.max(1.0))
         .min(1.0);
-    (width.max(1.0) * factor, height.max(1.0) * factor)
+    (
+        (width.max(1.0) * factor).min(geometry.width),
+        (height.max(1.0) * factor).min(geometry.height),
+    )
 }
 
 pub(super) fn text_font(family: &str, kind: &TextKind, bold: bool, italic: bool) -> Font {
-    let mut font = font(family.to_owned());
+    let mut font = font(if kind.monospace {
+        monospace_family().to_owned()
+    } else {
+        family.to_owned()
+    });
     if bold || kind.heading > 0 {
         font.weight = FontWeight::BOLD;
     }
@@ -140,6 +164,16 @@ pub(super) fn text_font(family: &str, kind: &TextKind, bold: bool, italic: bool)
         font.style = FontStyle::Italic;
     }
     font
+}
+
+fn monospace_family() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Courier New"
+    } else if cfg!(target_os = "macos") {
+        "Menlo"
+    } else {
+        "DejaVu Sans Mono"
+    }
 }
 
 fn runs_for_range(
@@ -157,7 +191,16 @@ fn runs_for_range(
             let end = span.range.end.min(range.end);
             (start < end).then(|| TextRun {
                 len: end - start,
-                font: text_font(family, kind, span.style.bold, span.style.italic),
+                font: text_font(
+                    if span.style.monospace {
+                        monospace_family()
+                    } else {
+                        family
+                    },
+                    kind,
+                    span.style.bold,
+                    span.style.italic,
+                ),
                 color: if span.style.link.is_some() {
                     link_color
                 } else {
@@ -212,6 +255,7 @@ pub(super) fn normalize_point(chapter: &Chapter, mut point: ContentPoint) -> Con
 
 /// Shapes at most one page of content (with bounded lookahead), rather than a
 /// whole chapter. The page's end is also the next page's start.
+#[cfg(test)]
 pub(super) fn layout_page(
     chapter: &Chapter,
     start: ContentPoint,
@@ -221,6 +265,32 @@ pub(super) fn layout_page(
     color: Hsla,
     link_color: Hsla,
     images: &HashMap<usize, ImageSlot>,
+    window: &mut Window,
+) -> Result<Page, String> {
+    layout_page_with_preferences(
+        chapter,
+        start,
+        geometry,
+        family,
+        font_size,
+        color,
+        link_color,
+        images,
+        &Preferences::default(),
+        window,
+    )
+}
+
+pub(super) fn layout_page_with_preferences(
+    chapter: &Chapter,
+    start: ContentPoint,
+    geometry: PageGeometry,
+    family: &str,
+    font_size: f32,
+    color: Hsla,
+    link_color: Hsla,
+    images: &HashMap<usize, ImageSlot>,
+    preferences: &Preferences,
     window: &mut Window,
 ) -> Result<Page, String> {
     let start = normalize_point(chapter, start);
@@ -234,6 +304,23 @@ pub(super) fn layout_page(
     let mut y = 0.0;
     while let Some(block) = chapter.blocks.get(cursor.block) {
         match block {
+            Block::Rule => {
+                let height = font_size * 1.5;
+                if y + height > geometry.height && !page.items.is_empty() {
+                    break;
+                }
+                page.items.push(PageItem::Rule {
+                    x: geometry.width * 0.35,
+                    y: y + height * 0.5,
+                    width: geometry.width * 0.3,
+                    height: 1.0,
+                });
+                y += height;
+                cursor = ContentPoint {
+                    block: cursor.block + 1,
+                    offset: 0,
+                };
+            }
             Block::Image { .. } => {
                 let slot = images.get(&cursor.block);
                 let asset = slot.and_then(|slot| slot.asset.clone());
@@ -265,6 +352,106 @@ pub(super) fn layout_page(
                 };
             }
             Block::Text { text, spans, kind } => {
+                if kind.table_columns > 1 && cursor.offset == 0 {
+                    let row = kind.table_row;
+                    let cells: Vec<_> = chapter.blocks[cursor.block..].iter().take_while(|block| matches!(block, Block::Text {kind, ..} if kind.table_row == row)).collect();
+                    let cell_width = geometry.width / kind.table_columns as f32;
+                    let mut items = Vec::new();
+                    let mut row_height: f32 = 0.0;
+                    let mut fits = true;
+                    for (index, cell) in cells.iter().enumerate() {
+                        if let Block::Text { kind, .. } = cell {
+                            let mut cell = (*cell).clone();
+                            if let Block::Text { kind, .. } = &mut cell {
+                                kind.table_row = None;
+                                kind.table_columns = 0;
+                            }
+                            let content = Chapter {
+                                blocks: vec![cell],
+                                ..Chapter::default()
+                            };
+                            let mut cell_page = layout_page_with_preferences(
+                                &content,
+                                ContentPoint::default(),
+                                PageGeometry {
+                                    width: (cell_width * kind.table_span.max(1) as f32 - 12.0)
+                                        .max(1.0),
+                                    ..geometry
+                                },
+                                family,
+                                font_size,
+                                color,
+                                link_color,
+                                images,
+                                preferences,
+                                window,
+                            )?;
+                            if cell_page.end.block == 0 {
+                                fits = false;
+                                break;
+                            }
+                            for item in &mut cell_page.items {
+                                if let PageItem::Text {
+                                    block,
+                                    x,
+                                    y: cell_y,
+                                    height,
+                                    ..
+                                } = item
+                                {
+                                    *block = cursor.block + index;
+                                    *x += cell_width * kind.table_column as f32 + 6.0;
+                                    row_height = row_height.max(*cell_y + *height + 12.0);
+                                    *cell_y += y + 6.0;
+                                }
+                            }
+                            items.extend(cell_page.items);
+                        }
+                    }
+                    row_height =
+                        row_height.max(font_size * preferences.line_spacing as f32 / 10.0 + 12.0);
+                    if fits && row_height <= geometry.height {
+                        if y + row_height > geometry.height && !page.items.is_empty() {
+                            break;
+                        }
+                        for cell in &cells {
+                            if let Block::Text { kind, .. } = cell {
+                                items.push(PageItem::Rule {
+                                    x: kind.table_column as f32 * cell_width,
+                                    y,
+                                    width: 1.0,
+                                    height: row_height,
+                                });
+                            }
+                        }
+                        items.push(PageItem::Rule {
+                            x: geometry.width - 1.0,
+                            y,
+                            width: 1.0,
+                            height: row_height,
+                        });
+                        items.push(PageItem::Rule {
+                            x: 0.0,
+                            y,
+                            width: geometry.width,
+                            height: 1.0,
+                        });
+                        items.push(PageItem::Rule {
+                            x: 0.0,
+                            y: y + row_height,
+                            width: geometry.width,
+                            height: 1.0,
+                        });
+                        page.items.extend(items);
+                        y += row_height;
+                        cursor = ContentPoint {
+                            block: cursor.block + cells.len(),
+                            offset: 0,
+                        };
+                        continue;
+                    }
+                    // Oversized rows flow as complete cells rather than clipping text.
+                }
                 if cursor.offset >= text.len() {
                     cursor = ContentPoint {
                         block: cursor.block + 1,
@@ -279,8 +466,27 @@ pub(super) fn layout_page(
                         3 => 1.2,
                         _ => 1.0,
                     };
-                let height = size * 1.5;
-                let x = (kind.indent as f32 * font_size).min(geometry.width * 0.3);
+                let height = size * preferences.line_spacing as f32 / 10.0;
+                if cursor.offset == 0 && preferences.publisher_styles {
+                    if kind.break_before && !page.items.is_empty() {
+                        break;
+                    }
+                    let spacing = kind.margin_before.unwrap_or(0) as f32 / 1000.0 * font_size;
+                    if y + spacing.max(0.0) + height > geometry.height && !page.items.is_empty() {
+                        break;
+                    }
+                    y += spacing.max(0.0).min((geometry.height - height).max(0.0));
+                }
+                let x = ((kind.indent as f32 * font_size)
+                    + if cursor.offset == 0 && preferences.publisher_styles {
+                        kind.text_indent.unwrap_or(0) as f32 * font_size / 1000.0
+                    } else {
+                        0.0
+                    })
+                .clamp(0.0, geometry.width * 0.3);
+                let first_line_indent = cursor.offset == 0
+                    && preferences.publisher_styles
+                    && kind.text_indent.is_some_and(|indent| indent != 0);
                 let end = segment_end(text, cursor.offset);
                 let runs =
                     runs_for_range(spans, cursor.offset..end, family, kind, color, link_color);
@@ -296,6 +502,7 @@ pub(super) fn layout_page(
                     .map_err(|e| format!("Could not lay out EPUB text: {e}"))?;
                 let mut physical_start = cursor.offset;
                 let mut full = false;
+                let mut restart = false;
                 for physical in wrapped {
                     let mut boundaries = vec![0];
                     for boundary in physical.wrap_boundaries() {
@@ -310,7 +517,20 @@ pub(super) fn layout_page(
                         }
                         let start = physical_start + range[0];
                         let end = physical_start + range[1];
-                        let justify = kind.heading == 0 && !kind.pre;
+                        let alignment = if preferences.publisher_styles {
+                            kind.alignment
+                        } else {
+                            None
+                        }
+                        .unwrap_or(if preferences.justify {
+                            Alignment::Justify
+                        } else {
+                            Alignment::Left
+                        });
+                        let justify = kind.heading == 0
+                            && !kind.pre
+                            && kind.table_row.is_none()
+                            && alignment == Alignment::Justify;
                         // Keep consumed spaces in the semantic range, but don't
                         // let a wrap's trailing space push visible ink past the edge.
                         let visible = if justify {
@@ -333,6 +553,41 @@ pub(super) fn layout_page(
                         if justify && end < text.len() && !text[end..].starts_with('\n') {
                             justify_line(&mut line, (geometry.width - x).max(1.0));
                         }
+                        if spans.iter().any(|span| {
+                            span.style.baseline != 0
+                                && span.range.start < end
+                                && span.range.end > start
+                        }) {
+                            let mut layout = gpui::LineLayout {
+                                font_size: line.font_size,
+                                width: line.width,
+                                ascent: line.ascent,
+                                descent: line.descent,
+                                len: line.len,
+                                runs: line.runs.clone(),
+                            };
+                            for run in &mut layout.runs {
+                                for glyph in &mut run.glyphs {
+                                    if let Some(span) = spans
+                                        .iter()
+                                        .find(|span| span.range.contains(&(start + glyph.index)))
+                                    {
+                                        glyph.position.y +=
+                                            px(span.style.baseline as f32 * size * 0.25);
+                                    }
+                                }
+                            }
+                            *line = Arc::new(layout);
+                        }
+                        let x = x + match alignment {
+                            Alignment::Center => {
+                                ((geometry.width - x - f32::from(line.width)) * 0.5).max(0.0)
+                            }
+                            Alignment::Right => {
+                                (geometry.width - x - f32::from(line.width)).max(0.0)
+                            }
+                            _ => 0.0,
+                        };
                         page.items.push(PageItem::Text {
                             block: cursor.block,
                             range: start..end,
@@ -343,8 +598,12 @@ pub(super) fn layout_page(
                         });
                         y += height;
                         cursor.offset = end;
+                        if first_line_indent {
+                            restart = true;
+                            break;
+                        }
                     }
-                    if full {
+                    if full || restart {
                         break;
                     }
                     physical_start += physical.text.len();
@@ -356,6 +615,9 @@ pub(super) fn layout_page(
                 if full {
                     break;
                 }
+                if restart {
+                    continue;
+                }
                 // Include trailing line breaks in the content cursor even though
                 // they have no glyph. This guarantees progress for empty lines.
                 cursor.offset = end;
@@ -364,7 +626,17 @@ pub(super) fn layout_page(
                         block: cursor.block + 1,
                         offset: 0,
                     };
-                    y += font_size * 0.5;
+                    y += if preferences.publisher_styles {
+                        kind.margin_after
+                            .map(|value| value as f32 / 1000.0 * font_size)
+                            .unwrap_or(font_size * 0.5)
+                            .max(0.0)
+                    } else {
+                        font_size * 0.5
+                    };
+                    if preferences.publisher_styles && kind.break_after {
+                        break;
+                    }
                 }
             }
         }

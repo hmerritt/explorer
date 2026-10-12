@@ -7,6 +7,7 @@ use std::{
     },
 };
 
+use super::styling::{ElementStyle, Stylesheet, em_length};
 use quick_xml::{
     Reader, Writer,
     events::{BytesStart, Event},
@@ -109,7 +110,7 @@ impl Book {
                         .is_some_and(|target| target.split('#').next() == Some(href.as_str()))
                 })
                 .map(|item| item.title.clone())
-                .unwrap_or_else(|| format!("Chapter {}", sections.len() + 1));
+                .unwrap_or_else(|| format!("Section {}", sections.len() + 1));
             sections.push(Section { href, title });
         }
         if sections.is_empty() {
@@ -180,6 +181,7 @@ impl Book {
                         }],
                         anchors: HashMap::new(),
                         is_cover: true,
+                        ..Chapter::default()
                     },
                 ));
             }
@@ -242,6 +244,21 @@ impl Book {
     }
 
     pub fn chapter(&self, href: &str, cancel: &AtomicBool) -> Result<Chapter, String> {
+        self.read_chapter(href, cancel, true)
+    }
+
+    pub fn note_chapter(&self, href: &str, cancel: &AtomicBool) -> Result<Chapter, String> {
+        // A referenced note may be hidden in the main reading flow. Only its
+        // explicitly addressed range will be shown by the preview.
+        self.read_chapter(href, cancel, false)
+    }
+
+    fn read_chapter(
+        &self,
+        href: &str,
+        cancel: &AtomicBool,
+        visible_only: bool,
+    ) -> Result<Chapter, String> {
         check_cancel(cancel)?;
         if self.is_cover(href) {
             return Ok(self.cover_chapter.clone().unwrap_or_default());
@@ -254,7 +271,42 @@ impl Book {
         let text = resource
             .read_str()
             .map_err(|e| format!("Could not read chapter: {e}"))?;
-        parse_chapter(&text, href, cancel)
+        let styles = self.stylesheet(&text, href, cancel)?;
+        parse_styled_chapter(&text, href, cancel, &styles, visible_only)
+    }
+
+    fn stylesheet(&self, xml: &str, href: &str, cancel: &AtomicBool) -> Result<Stylesheet, String> {
+        let mut styles = Stylesheet::default();
+        let mut reader = Reader::from_str(xml);
+        let mut in_style = false;
+        loop {
+            check_cancel(cancel)?;
+            match reader.read_event().map_err(|error| error.to_string())? {
+                Event::Start(tag) if tag.local_name().as_ref() == "style" => in_style = true,
+                Event::End(tag) if tag.local_name().as_ref() == "style" => in_style = false,
+                Event::Text(value) if in_style => styles.append(&value.html_content()),
+                Event::CData(value) if in_style => styles.append(&value.html_content()),
+                Event::Start(tag) | Event::Empty(tag) if tag.local_name().as_ref() == "link" => {
+                    if attr(&tag, b"rel").is_some_and(|rel| {
+                        rel.split_whitespace()
+                            .any(|rel| rel.eq_ignore_ascii_case("stylesheet"))
+                    }) {
+                        if let Some(target) =
+                            attr(&tag, b"href").and_then(|reference| resolve_href(href, &reference))
+                        {
+                            if let Some(resource) = self.epub.manifest().by_href(&target) {
+                                if let Ok(css) = resource.read_str() {
+                                    styles.append(&css);
+                                }
+                            }
+                        }
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        Ok(styles)
     }
 
     pub fn is_cover(&self, href: &str) -> bool {
@@ -367,6 +419,17 @@ pub(super) struct InlineStyle {
     pub italic: bool,
     pub underline: bool,
     pub link: Option<String>,
+    pub baseline: i8,
+    pub monospace: bool,
+    pub noteref: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Alignment {
+    Left,
+    Center,
+    Right,
+    Justify,
 }
 
 #[derive(Clone, Debug)]
@@ -387,10 +450,23 @@ pub(super) struct TextKind {
     pub indent: usize,
     pub quote: bool,
     pub pre: bool,
+    pub monospace: bool,
+    pub alignment: Option<Alignment>,
+    pub text_indent: Option<i32>,
+    pub margin_before: Option<i32>,
+    pub margin_after: Option<i32>,
+    pub break_before: bool,
+    pub break_after: bool,
+    pub table_row: Option<usize>,
+    pub table_column: usize,
+    pub table_columns: usize,
+    pub table_id: usize,
+    pub table_span: usize,
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum Block {
+    Rule,
     Text {
         text: String,
         spans: Vec<Span>,
@@ -424,6 +500,7 @@ pub(super) struct Chapter {
     pub blocks: Vec<Block>,
     pub anchors: HashMap<String, ContentPoint>,
     pub is_cover: bool,
+    pub notes: HashMap<String, std::ops::Range<usize>>,
 }
 
 #[derive(Default)]
@@ -460,7 +537,7 @@ impl TextBuilder {
         }
     }
     fn flush(&mut self, chapter: &mut Chapter, kind: &TextKind) {
-        if !self.text.is_empty() {
+        if !self.text.is_empty() || kind.table_row.is_some() {
             chapter.blocks.push(Block::Text {
                 text: std::mem::take(&mut self.text),
                 spans: std::mem::take(&mut self.spans),
@@ -508,6 +585,30 @@ pub(super) fn resolve_href(base: &str, reference: &str) -> Option<String> {
 }
 
 pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Result<Chapter, String> {
+    let mut styles = Stylesheet::default();
+    let mut reader = Reader::from_str(xml);
+    let mut in_style = false;
+    loop {
+        check_cancel(cancel)?;
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(tag) if tag.local_name().as_ref() == "style" => in_style = true,
+            Event::End(tag) if tag.local_name().as_ref() == "style" => in_style = false,
+            Event::Text(value) if in_style => styles.append(&value.html_content()),
+            Event::CData(value) if in_style => styles.append(&value.html_content()),
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    parse_styled_chapter(xml, href, cancel, &styles, true)
+}
+
+fn parse_styled_chapter(
+    xml: &str,
+    href: &str,
+    cancel: &AtomicBool,
+    styles: &Stylesheet,
+    visible_only: bool,
+) -> Result<Chapter, String> {
     let mut reader = Reader::from_str(xml);
     let mut chapter = Chapter::default();
     let mut text = TextBuilder::default();
@@ -516,6 +617,10 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
     let mut stack = Vec::new();
     let mut lists: Vec<Option<usize>> = Vec::new();
     let mut ignored = 0;
+    let mut ancestry = Vec::new();
+    let mut row = 0;
+    let mut column = 0;
+    let mut table_id = 0;
     loop {
         check_cancel(cancel)?;
         let event = reader
@@ -525,7 +630,31 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
         match event {
             Event::Start(tag) | Event::Empty(tag) => {
                 let name = tag.local_name().as_ref().to_ascii_lowercase();
+                let element = ElementStyle {
+                    tag: name.clone(),
+                    id: attr(&tag, b"id").unwrap_or_default(),
+                    classes: attr(&tag, b"class")
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect(),
+                };
+                ancestry.push(element);
+                let properties =
+                    styles.properties(&ancestry, &attr(&tag, b"style").unwrap_or_default());
+                ancestry.pop();
                 if ignored > 0
+                    || visible_only
+                        && (properties
+                            .get("display")
+                            .is_some_and(|value| value == "none")
+                            || properties
+                                .get("visibility")
+                                .is_some_and(|value| value == "hidden" || value == "collapse")
+                            || tag
+                                .attributes()
+                                .flatten()
+                                .any(|attribute| attribute.key.local_name().as_ref() == "hidden"))
                     || matches!(
                         name.as_str(),
                         "head" | "script" | "style" | "audio" | "video"
@@ -552,12 +681,32 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                         | "tr"
                         | "figure"
                         | "figcaption"
+                        | "aside"
+                        | "td"
+                        | "th"
                 );
+                if block
+                    && kind.table_row.is_some()
+                    && !matches!(name.as_str(), "td" | "th" | "tr")
+                    && !text.text.is_empty()
+                    && !text.text.ends_with('\n')
+                {
+                    text.space = false;
+                    text.push('\n', &style);
+                }
+                let block = block
+                    && (kind.table_row.is_none() || matches!(name.as_str(), "td" | "th" | "tr"));
                 if block {
                     text.flush(&mut chapter, &kind);
                 }
                 let old_style = style.clone();
                 let old_kind = kind.clone();
+                if block {
+                    kind.margin_before = None;
+                    kind.margin_after = None;
+                    kind.break_before = false;
+                    kind.break_after = false;
+                }
                 if matches!(name.as_str(), "img" | "image" | "svg") {
                     text.flush(&mut chapter, &kind);
                 }
@@ -565,9 +714,15 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                     "b" | "strong" => style.bold = true,
                     "i" | "em" | "cite" => style.italic = true,
                     "u" => style.underline = true,
+                    "sup" => style.baseline = -1,
+                    "sub" => style.baseline = 1,
+                    "code" | "kbd" | "samp" => style.monospace = true,
                     "a" => {
                         style.link = attr(&tag, b"href")
-                            .map(|reference| resolve_href(href, &reference).unwrap_or(reference))
+                            .map(|reference| resolve_href(href, &reference).unwrap_or(reference));
+                        style.noteref = attr(&tag, b"type").is_some_and(|value| {
+                            value.split_whitespace().any(|value| value == "noteref")
+                        }) || attr(&tag, b"role").as_deref() == Some("doc-noteref");
                     }
                     "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                         kind.heading = name.as_bytes()[1] - b'0'
@@ -576,7 +731,22 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                         kind.quote = true;
                         kind.indent += 1;
                     }
-                    "pre" => kind.pre = true,
+                    "pre" => {
+                        kind.pre = true;
+                        kind.monospace = true;
+                    }
+                    "hr" => {
+                        text.flush(&mut chapter, &kind);
+                        chapter.blocks.push(Block::Rule);
+                    }
+                    "tr" => {
+                        row += 1;
+                        column = 0;
+                    }
+                    "table" => {
+                        table_id += 1;
+                        kind.table_id = table_id;
+                    }
                     "ul" => lists.push(None),
                     "ol" => lists.push(Some(
                         attr(&tag, b"start")
@@ -596,9 +766,13 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                         text.append(&prefix, &style, true);
                     }
                     "td" | "th" => {
-                        if !text.text.is_empty() {
-                            text.append(" | ", &style, true);
-                        }
+                        kind.table_row = Some(row);
+                        kind.table_column = column;
+                        kind.table_span = attr(&tag, b"colspan")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(1)
+                            .clamp(1, 32);
+                        column += kind.table_span;
                         if name == "th" {
                             style.bold = true;
                         }
@@ -609,6 +783,38 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                     }
                     _ => {}
                 }
+                if let Some(value) = properties.get("text-align") {
+                    kind.alignment = match value.as_str() {
+                        "left" | "start" => Some(Alignment::Left),
+                        "center" => Some(Alignment::Center),
+                        "right" | "end" => Some(Alignment::Right),
+                        "justify" => Some(Alignment::Justify),
+                        _ => kind.alignment,
+                    };
+                }
+                if let Some(value) = properties.get("white-space") {
+                    kind.pre = matches!(value.as_str(), "pre" | "pre-wrap" | "break-spaces");
+                }
+                for (property, destination) in [
+                    ("text-indent", &mut kind.text_indent),
+                    ("margin-top", &mut kind.margin_before),
+                    ("margin-bottom", &mut kind.margin_after),
+                ] {
+                    if let Some(value) = properties.get(property).and_then(|value| em_length(value))
+                    {
+                        *destination = Some(value);
+                    }
+                }
+                kind.break_before |= ["page-break-before", "break-before"].iter().any(|name| {
+                    properties.get(*name).is_some_and(|value| {
+                        matches!(value.as_str(), "always" | "page" | "left" | "right")
+                    })
+                });
+                kind.break_after |= ["page-break-after", "break-after"].iter().any(|name| {
+                    properties.get(*name).is_some_and(|value| {
+                        matches!(value.as_str(), "always" | "page" | "left" | "right")
+                    })
+                });
                 if let Some(id) =
                     attr(&tag, b"id").or_else(|| attr(&tag, b"name").filter(|_| name == "a"))
                 {
@@ -662,7 +868,27 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                     continue;
                 }
                 if !empty {
-                    stack.push((name, old_style, old_kind, block));
+                    let note = attr(&tag, b"type").is_some_and(|value| {
+                        value
+                            .split_whitespace()
+                            .any(|value| matches!(value, "footnote" | "endnote"))
+                    }) || attr(&tag, b"role").is_some_and(|value| {
+                        matches!(value.as_str(), "doc-footnote" | "doc-endnote")
+                    });
+                    let note = note
+                        .then(|| attr(&tag, b"id"))
+                        .flatten()
+                        .map(|id| (id, chapter.blocks.len()));
+                    ancestry.push(ElementStyle {
+                        tag: name.clone(),
+                        id: attr(&tag, b"id").unwrap_or_default(),
+                        classes: attr(&tag, b"class")
+                            .unwrap_or_default()
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect(),
+                    });
+                    stack.push((name, old_style, old_kind, block, note));
                 } else {
                     style = old_style;
                     kind = old_kind;
@@ -677,12 +903,16 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
                 if matches!(name.as_str(), "ul" | "ol") {
                     lists.pop();
                 }
-                if let Some((_, old_style, old_kind, block)) = stack.pop() {
+                ancestry.pop();
+                if let Some((_, old_style, old_kind, block, note)) = stack.pop() {
                     if block {
                         text.flush(&mut chapter, &kind);
                     }
                     style = old_style;
                     kind = old_kind;
+                    if let Some((id, start)) = note {
+                        chapter.notes.insert(id, start..chapter.blocks.len());
+                    }
                 }
             }
             Event::Text(value) if ignored == 0 => {
@@ -708,5 +938,24 @@ pub(super) fn parse_chapter(xml: &str, href: &str, cancel: &AtomicBool) -> Resul
         }
     }
     text.flush(&mut chapter, &kind);
+    // All cells of a row share the same column count, including empty cells.
+    let mut widths = HashMap::<usize, usize>::new();
+    for block in &chapter.blocks {
+        if let Block::Text { kind, .. } = block {
+            if kind.table_row.is_some() {
+                widths
+                    .entry(kind.table_id)
+                    .and_modify(|width| *width = (*width).max(kind.table_column + kind.table_span))
+                    .or_insert(kind.table_column + kind.table_span);
+            }
+        }
+    }
+    for block in &mut chapter.blocks {
+        if let Block::Text { kind, .. } = block {
+            if kind.table_row.is_some() {
+                kind.table_columns = widths[&kind.table_id];
+            }
+        }
+    }
     Ok(chapter)
 }

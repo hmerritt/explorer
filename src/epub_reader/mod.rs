@@ -8,8 +8,11 @@ use std::{
 use gpui::actions;
 
 mod book;
+mod input;
 mod pagination;
+mod search;
 mod state;
+mod styling;
 mod view;
 
 pub(crate) use view::open_epub_window;
@@ -23,7 +26,15 @@ actions!(
         EpubEnd,
         EpubBack,
         EpubCopy,
-        EpubDismiss
+        EpubDismiss,
+        EpubContents,
+        EpubSettings,
+        EpubFind,
+        EpubBookmark,
+        EpubFullscreen,
+        EpubFocusNext,
+        EpubFocusPrevious,
+        EpubActivate
     ]
 );
 

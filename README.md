@@ -64,7 +64,7 @@ scoop install hmerritt/explorer
 - `yt-dlp` integration, supported URLs can be downloaded as videos when pasted
 - Native ZIP creation with Finder-style `Compress` naming and progress
 - A simple, functional, built-in image viewer (you can set `explorer` as the default image viewer)
-- A simple, fast, built-in EPUB reader
+- A native, paginated [EPUB reader](docs/epub-reader.md) with reading settings, search, bookmarks, and note previews
 - Archive extraction (supported archive formats including `7z`, `bz2`, `gz`, `rar`, `tar`, `xz`, `zip`, `zst`)
 - Search
     - Type-to-search current directory
