@@ -1,7 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { siteOrigin } from '../src/lib/site-url.ts'
+import { plausibleScriptUrl } from '../src/lib/plausible.ts'
+import { loadEnv } from 'vite'
 
 const output = new URL('../dist/client/', import.meta.url)
 const read = (path) => readFileSync(new URL(path, output), 'utf8')
@@ -12,6 +15,27 @@ const originalDescription =
   'A free cross-platform file explorer packed with features. Tabs, split-views, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.'
 
 // These tests run after the production build, separately from source unit tests.
+test('prerendered analytics script matches the optional production configuration', () => {
+  const expected = plausibleScriptUrl(
+    loadEnv('production', fileURLToPath(new URL('..', import.meta.url)))
+      .VITE_PLAUSIBLE_URL,
+    { command: 'build', mode: 'production', nodeEnv: process.env.NODE_ENV },
+  )
+  const scripts = (html.match(/<script\b[^>]*>/g) ?? []).filter((tag) =>
+    tag.includes('data-domain='),
+  )
+  assert.equal(scripts.length, expected ? 1 : 0)
+  if (expected) {
+    assert.ok(
+      scripts[0].includes(
+        `src="${expected.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}"`,
+      ),
+    )
+    assert.ok(scripts[0].includes(`data-domain="${new URL(origin).hostname}"`))
+    assert.match(scripts[0], /\bdefer(?:="")?(?:\s|>)/)
+  }
+})
+
 test('prerendered metadata consistently identifies the public homepage', () => {
   const links = html.match(/<link\b[^>]*>/g) ?? []
   const canonicals = links.filter((tag) => /rel="canonical"/.test(tag))

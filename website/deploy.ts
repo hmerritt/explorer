@@ -19,6 +19,7 @@ export type Config = {
   fingerprint: string
   destination: string
   origin: string
+  plausibleUrl?: string
 }
 type Entry = {
   kind: 'file' | 'directory' | 'link'
@@ -78,6 +79,7 @@ export function configuration(
     fingerprint,
     destination: path.posix.normalize(destination),
     origin: siteOrigin(required('VITE_SITE_URL'), true),
+    plausibleUrl: env.VITE_PLAUSIBLE_URL,
   }
 }
 
@@ -383,13 +385,21 @@ export async function mirror(
   }
 }
 
+export function buildEnvironment(config: Config) {
+  return {
+    ...process.env,
+    VITE_SITE_URL: config.origin,
+    VITE_PLAUSIBLE_URL: config.plausibleUrl,
+  }
+}
+
 export async function deploy(
   args: string[],
   directory = websiteDirectory,
   build = async (config: Config) => {
     const child = Bun.spawn([process.execPath, 'run', 'build'], {
       cwd: directory,
-      env: { ...process.env, VITE_SITE_URL: config.origin },
+      env: buildEnvironment(config),
       stdin: 'inherit',
       stdout: 'inherit',
       stderr: 'inherit',

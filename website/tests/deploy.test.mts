@@ -9,6 +9,7 @@ import path from 'node:path'
 import { Server, utils } from 'ssh2'
 import type { Attributes, Connection, SFTPWrapper } from 'ssh2'
 import {
+  buildEnvironment,
   configuration,
   connect,
   deploy,
@@ -351,6 +352,41 @@ test('loads dotenv relative to the script directory and lets environment overrid
   } finally {
     if (old === undefined) delete process.env.SSH_USER
     else process.env.SSH_USER = old
+  }
+})
+
+test('loads and forwards optional analytics with environment-over-dotenv precedence', async () => {
+  const directory = await temporary()
+  const script = 'https://analytics.example.com/js/script.js'
+  await writeFile(
+    path.join(directory, '.env.deploy'),
+    Object.entries({ ...env, VITE_PLAUSIBLE_URL: script })
+      .map(([key, value]) => `${key}="${value}"`)
+      .join('\n'),
+  )
+  const old = process.env.VITE_PLAUSIBLE_URL
+  delete process.env.VITE_PLAUSIBLE_URL
+  try {
+    const config = await loadConfiguration(directory)
+    expect(config.plausibleUrl).toBe(script)
+    expect(buildEnvironment(config).VITE_PLAUSIBLE_URL).toBe(script)
+    expect(buildEnvironment(config).VITE_SITE_URL).toBe(config.origin)
+    process.env.VITE_PLAUSIBLE_URL = 'https://override.example.com/script.js'
+    expect(
+      buildEnvironment(await loadConfiguration(directory)).VITE_PLAUSIBLE_URL,
+    ).toBe(process.env.VITE_PLAUSIBLE_URL)
+    process.env.VITE_PLAUSIBLE_URL = ''
+    expect(
+      buildEnvironment(await loadConfiguration(directory)).VITE_PLAUSIBLE_URL,
+    ).toBe('')
+    expect(configuration(env, directory).plausibleUrl).toBeUndefined()
+    expect(
+      configuration({ ...env, VITE_PLAUSIBLE_URL: 'invalid' }, directory)
+        .plausibleUrl,
+    ).toBe('invalid')
+  } finally {
+    if (old === undefined) delete process.env.VITE_PLAUSIBLE_URL
+    else process.env.VITE_PLAUSIBLE_URL = old
   }
 })
 

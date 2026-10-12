@@ -10,6 +10,7 @@ import stylesheet from '../styles.css?url'
 import { SITE_URL, HOME_URL } from '../lib/releases'
 
 const title = 'Explorer — Windows File Explorer for macOS, Linux and Windows'
+const plausibleUrl = import.meta.env.VITE_PLAUSIBLE_URL
 const description =
   'A free cross-platform file explorer packed with features. Tabs, split-views, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.'
 
@@ -63,11 +64,13 @@ function RootDocument({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <head>
-        <script
-          defer
-          data-domain="explorer.mrrtt.me"
-          src="https://plausible.mrrtt.me/js/script.outbound-links.js"
-        />
+        {plausibleUrl && (
+          <script
+            defer
+            data-domain={new URL(SITE_URL).hostname}
+            src={plausibleUrl}
+          />
+        )}
         <HeadContent />
       </head>
       <body>

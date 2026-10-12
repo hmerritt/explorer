@@ -2,14 +2,21 @@ import { tanstackStart } from '@tanstack/react-start/plugin/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv } from 'vite'
 import { siteOrigin } from './src/lib/site-url.ts'
+import { plausibleScriptUrl } from './src/lib/plausible.ts'
 
 export default defineConfig(({ command, mode }) => {
-  const origin = siteOrigin(
-    loadEnv(mode, process.cwd()).VITE_SITE_URL,
-    command === 'build',
-  )
+  const env = loadEnv(mode, process.cwd())
+  const origin = siteOrigin(env.VITE_SITE_URL, command === 'build')
+  const plausibleUrl = plausibleScriptUrl(env.VITE_PLAUSIBLE_URL, {
+    command,
+    mode,
+    nodeEnv: process.env.NODE_ENV,
+  })
   return {
-    define: { 'import.meta.env.VITE_SITE_URL': JSON.stringify(origin) },
+    define: {
+      'import.meta.env.VITE_SITE_URL': JSON.stringify(origin),
+      'import.meta.env.VITE_PLAUSIBLE_URL': JSON.stringify(plausibleUrl ?? ''),
+    },
     plugins: [
       {
         name: 'explorer-crawler-files',

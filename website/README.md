@@ -75,6 +75,15 @@ For Bash, use `VITE_SITE_URL=https://explorer.mrrtt.me bun run check`.
 Configure the same variable in your hosting provider's build environment;
 `.env.deploy` is only loaded by the VPS deployment script.
 
+`VITE_PLAUSIBLE_URL` optionally enables Plausible analytics, for example
+`https://plausible.mrrtt.me/js/script.outbound-links.js`. It must be an absolute
+HTTP(S) URL without credentials. Missing, blank or invalid values silently omit
+the script. Analytics is also omitted by the development server and when Vite
+mode or `NODE_ENV` is `development` or `test`. The script uses the hostname from
+`VITE_SITE_URL` as `data-domain`. This public setting is embedded at build time;
+changes require rebuilding. Set it in the build environment or in `.env.deploy`
+for VPS deployment; environment variables override deployment file values.
+
 ## Commands
 
 | Command                    | Purpose                                                         |
@@ -143,7 +152,7 @@ Obtain it through a trusted channel: an administrator can run
 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` on the VPS and provide
 the `SHA256:...` value. Use the fingerprint of the key presented by the server;
 the script rejects missing or mismatched fingerprints before authentication.
-Only the public `VITE_SITE_URL` belongs in the client build; SSH settings are
+Only the public `VITE_SITE_URL` and `VITE_PLAUSIBLE_URL` belong in the client build; SSH settings are
 deployment configuration.
 
 Create a dedicated, writable directory on the VPS before deploying and point
