@@ -83,6 +83,7 @@ Configure the same variable in your hosting provider's build environment;
 | `bun run format:check`     | Check formatting without modifying files.                       |
 | `bun run test`             | Test release handling, caching, failures and platform CTAs.     |
 | `bun run test:seo`         | Verify SEO metadata and crawler files in the production output. |
+| `bun run test:deploy`      | Test Bun SSH/SFTP deployment against a local fixture server.    |
 | `bun run check`            | Test, build, verify SEO output, typecheck, lint and formatting. |
 
 Commit `bun.lock` when changing dependencies. The generated
@@ -102,25 +103,42 @@ continues through the existing workflows.
 
 ## VPS deployment
 
-Run deployment from a Bash environment with Bun, Node.js 24, SSH and rsync 3.x
-installed. On Windows, use WSL and install these tools inside WSL. On macOS, use
-Homebrew's rsync rather than the older bundled version. The VPS needs
-SSH, rsync 3.x and a static web server such as Nginx. Configure SSH keys, usernames
-and nonstandard ports in `~/.ssh/config`; `SSH_TARGET` accepts a host alias or
-`user@host`. Normal SSH host verification remains enabled.
+Run deployment with Bun and Node.js 24 on Windows, macOS or Linux. SSH and SFTP
+run inside Bun through `ssh2`; no local Bash, OpenSSH, rsync or WSL is required.
+The dependency install allowlist enables only esbuild's hook, so ssh2's optional
+native addons are not built; deployment uses its JavaScript implementation.
+The VPS needs OpenSSH with SFTP and its POSIX rename extension, a POSIX shell for
+destination checks, and a static web server such as Nginx.
 
 From `website/`, configure and preview deployment:
 
-```sh
-cp .env.deploy.example .env.deploy
-# Edit SSH_TARGET, DEPLOY_PATH and VITE_SITE_URL in .env.deploy.
+```powershell
+Copy-Item .env.deploy.example .env.deploy
+# Edit the SSH settings, DEPLOY_PATH and VITE_SITE_URL in .env.deploy.
 bun run deploy --dry-run
 bun run deploy
 ```
 
-`.env.deploy` is ignored by Git and sourced as trusted Bash assignments. Quote
-values, especially paths containing spaces. Only the public `VITE_SITE_URL`
-belongs in the client build; SSH settings are deployment configuration.
+On macOS/Linux, copy the example with `cp .env.deploy.example .env.deploy`, then
+use the same Bun commands. `.env.deploy` is ignored by Git and parsed as dotenv
+data; shell commands and expansions are not executed. Environment variables
+override file values. Quote paths containing spaces, and use forward slashes in
+Windows paths, such as `C:/Users/you/.ssh/id_ed25519`.
+
+Set `SSH_HOST`, `SSH_USER`, and optionally `SSH_PORT` (default `22`). Configure
+`SSH_PRIVATE_KEY` and optional `SSH_PASSPHRASE`, or `SSH_PASSWORD`. When both key
+and password are supplied, key authentication is tried first. Relative key paths
+are resolved against `website/`; `~/` expands to your home directory. SSH aliases,
+agents and `~/.ssh/config` are not used. Passwords and passphrases can be supplied
+through environment variables instead of storing them in the file.
+
+Set `SSH_HOST_FINGERPRINT` to the server host key's OpenSSH SHA256 fingerprint.
+Obtain it through a trusted channel: an administrator can run
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256` on the VPS and provide
+the `SHA256:...` value. Use the fingerprint of the key presented by the server;
+the script rejects missing or mismatched fingerprints before authentication.
+Only the public `VITE_SITE_URL` belongs in the client build; SSH settings are
+deployment configuration.
 
 Create a dedicated, writable directory on the VPS before deploying and point
 your web server at it. `DEPLOY_PATH` must be absolute and cannot contain `.` or
@@ -129,17 +147,26 @@ is deleted: keep uploads, server configuration and other sites outside this
 directory. The script checks the directory over SSH even in dry-run mode.
 
 The script resolves configuration relative to itself, so it can also be invoked
-from the repository root with `bash website/deploy.sh [--dry-run]`. It runs
+from the repository root with `bun website/deploy.ts [--dry-run]`. It runs
 `bun run build` before syncing the **contents** of `dist/client/`, including
 `index.html`, static release JSON, `404.html`, fonts, images, videos and assets.
 `dist/server/` is a build-time artifact and is not uploaded. Dependencies must
 already be installed; deployment does not run installation or the full CI checks.
 
-Rsync preserves timestamps, makes public files readable (directories `755`, files
-`644`) and does not copy local ownership. It delays updates and deletion until
-the transfer completes, but the deployment is not an atomic release. A failed
-build stops before SSH or rsync. `--dry-run` still builds locally and shows
-proposed transfers and deletions without writing to the VPS.
+The SFTP mirror compares file sizes and whole-second modification timestamps,
+preserves timestamps, makes public files readable (directories `755`, files
+`644`) and does not copy local ownership. Changed files upload into a temporary
+directory inside the destination. All uploads complete before live files are
+deleted or replaced; `index.html` is promoted last. Deployment is not an atomic
+release: a promotion failure can leave a partially updated site. Staging cleanup
+is attempted on success and failure; if it fails, the script reports the path.
+Allow only one deployment or other writer to modify this directory at a time.
+
+Local symlinks and special files are rejected. Remote symlinks are never
+traversed, and conflicting or obsolete links are removed as links. Remote special
+files are rejected. A failed build stops before SSH. `--dry-run` still builds
+locally, checks the destination and lists uploads, deletions, new directories
+and permission changes without writing to the VPS. No live deployment runs in CI.
 
 ### Static server and caching
 
@@ -258,8 +285,9 @@ For a local static preview and the production deployment:
 - Serve only `dist/client/` when testing locally; Vite's SSR preview can hide
   missing static output. Confirm the release JSON and media requests succeed and
   that navigation makes no `/_serverFn` requests.
-- Run `bash tests/deploy.test.sh` to check destination validation, build failures,
-  quoting, dry-run arguments and transfer failures using temporary command stubs.
-  These checks do not contact a VPS and also run in CI.
+- Run `bun run test:deploy` to check destination validation, build failures,
+  authentication, host verification, dry runs and mirror failures against a local
+  SSH/SFTP fixture. These checks do not contact a VPS and run on Windows and Linux
+  in CI, as well as through `bun run check`.
 - Check build logs for successful homepage prerendering, then record the deployed
   URL and commit after those checks pass.
