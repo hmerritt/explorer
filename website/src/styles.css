@@ -434,7 +434,7 @@ h1 {
   color: var(--muted);
   font-size: 12px;
 }
-.hero-screenshot > a {
+.hero-screenshot > .media-preview {
   display: block;
   aspect-ratio: 16 / 9;
   overflow: hidden;
@@ -1127,4 +1127,60 @@ pre {
     gap: 8px;
     padding-inline: 20px;
   }
+}
+
+.media-preview {
+  cursor: zoom-in;
+}
+button.media-preview {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  text-align: inherit;
+}
+.media-viewer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.85);
+  color: white;
+  cursor: zoom-out;
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+.media-viewer::backdrop {
+  background: transparent;
+}
+.media-viewer-stage {
+  position: absolute;
+  transform-origin: top left;
+  pointer-events: none;
+}
+.media-viewer-stage img,
+.media-viewer-stage video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.media-viewer-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: white;
+  font-size: 32px;
+  cursor: zoom-out;
 }

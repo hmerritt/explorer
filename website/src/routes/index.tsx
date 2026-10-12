@@ -1,3 +1,4 @@
+import { MediaPreview } from '../components/media-viewer'
 import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { staticFunctionMiddleware } from '@tanstack/start-static-server-functions'
@@ -167,9 +168,9 @@ function Hero({
           <span>A familiar place for your files</span>
           <span>Screenshot</span>
         </figcaption>
-        <a
-          href="/images/overview.png"
-          aria-label="View the Explorer overview screenshot at full size"
+        <MediaPreview
+          src="/images/overview.png"
+          label="View the Explorer overview screenshot at full size"
         >
           <img
             src="/images/overview.webp"
@@ -178,7 +179,7 @@ function Hero({
             height="822"
             fetchPriority="high"
           />
-        </a>
+        </MediaPreview>
       </figure>
     </section>
   )
@@ -213,8 +214,13 @@ function Gallery() {
       <div className="gallery-grid">
         {gallery.map((image, index) => (
           <figure key={image.name}>
-            {'video' in image ? (
-              <div className="gallery-image">
+            {image.video !== undefined ? (
+              <MediaPreview
+                src={image.video}
+                label={`View ${image.caption.toLowerCase()} at full size`}
+                video
+                className="gallery-image"
+              >
                 <video
                   src={image.video}
                   aria-label={image.caption}
@@ -223,12 +229,12 @@ function Gallery() {
                   muted
                   playsInline
                 />
-              </div>
+              </MediaPreview>
             ) : (
-              <a
-                href={`/images/${image.name}.png`}
+              <MediaPreview
+                src={`/images/${image.name}.png`}
                 className="gallery-image"
-                aria-label={`View ${image.caption.toLowerCase()} at full size`}
+                label={`View ${image.caption.toLowerCase()} at full size`}
               >
                 <img
                   src={`/images/${image.name}.webp`}
@@ -241,7 +247,7 @@ function Gallery() {
                 <span className="full-size label">
                   Full size <Arrow />
                 </span>
-              </a>
+              </MediaPreview>
             )}
             <figcaption className="image-caption">
               <span>{image.caption}</span>

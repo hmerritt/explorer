@@ -51,6 +51,12 @@ card from the captures (requires Python and Pillow). The capture dimensions are
 recorded in the page to reserve layout space. Below-the-fold gallery images are
 loaded lazily. Do not substitute generated mockups or personal file listings.
 
+Click any screenshot or the looping preview video to enlarge it over a dark
+backdrop. Clicking anywhere, scrolling, or pressing Escape returns to the page.
+The viewer preserves scroll position and keyboard focus, respects reduced motion,
+and keeps original screenshot links available for modified clicks or without
+JavaScript. Enlarged videos continue muted from the preview's playback position.
+
 `VITE_SITE_URL` defaults to `http://explorer.mrrtt.me/` in development and production.
 Set it explicitly to override the default, for example `https://explorer.mrrtt.me`.
 It supplies the normalized origin for sharing, social metadata,
