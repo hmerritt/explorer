@@ -53,3 +53,5 @@ jobs:
           bun-version: "1.4.2"
       - run: bun install --frozen-lockfile
       - run: bun run test:deploy
+      - name: Stress deployment tests
+        run: bun test tests/deploy.test.mts --rerun-each 20

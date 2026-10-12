@@ -1,4 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
+// assert.rejects avoids Bun's nested event-loop polling while SSH sockets close.
+// https://github.com/oven-sh/bun/pull/42667
+import assert from 'node:assert/strict'
 import { generateKeyPairSync } from 'node:crypto'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -331,8 +334,9 @@ test('validates destination, authentication, origin, port and pinned fingerprint
 
 test('loads dotenv relative to the script directory and lets environment override it', async () => {
   const directory = await temporary()
-  await expect(loadConfiguration(directory)).rejects.toThrow(
-    'Copy .env.deploy.example',
+  await assert.rejects(
+    loadConfiguration(directory),
+    /Copy \.env\.deploy\.example/,
   )
   await writeFile(
     path.join(directory, '.env.deploy'),
@@ -358,20 +362,20 @@ test('invalid arguments, failed builds and empty output stop before connecting',
       .map(([key, value]) => `${key}="${value}"`)
       .join('\n'),
   )
-  await expect(deploy(['--invalid'], directory)).rejects.toThrow('Usage:')
-  await expect(deploy(['--dry-run', 'extra'], directory)).rejects.toThrow(
-    'Usage:',
-  )
+  await assert.rejects(deploy(['--invalid'], directory), /Usage:/)
+  await assert.rejects(deploy(['--dry-run', 'extra'], directory), /Usage:/)
   await mkdir(path.join(directory, 'dist/client'), { recursive: true })
   await writeFile(path.join(directory, 'dist/client/index.html'), 'old output')
-  await expect(
+  await assert.rejects(
     deploy([], directory, async () => {
       throw new Error('build failed')
     }),
-  ).rejects.toThrow('build failed')
+    /build failed/,
+  )
   await writeFile(path.join(directory, 'dist/client/index.html'), '')
-  await expect(deploy([], directory, async () => {})).rejects.toThrow(
-    'nonempty',
+  await assert.rejects(
+    deploy([], directory, async () => {}),
+    /nonempty/,
   )
 })
 
@@ -384,9 +388,7 @@ test('rejects local symlinks before transfer', async () => {
     path.join(directory, 'link'),
     process.platform === 'win32' ? 'junction' : 'dir',
   )
-  await expect(localManifest(directory)).rejects.toThrow(
-    'Unsupported local file type',
-  )
+  await assert.rejects(localManifest(directory), /Unsupported local file type/)
 })
 
 test('SSH verifies the fingerprint and supports password and private-key authentication', async () => {
@@ -430,11 +432,11 @@ test('SSH verifies the fingerprint and supports password and private-key authent
   fallback.destroy()
   expect(f.auth.slice(beforeFallback)).toEqual(['publickey', 'password'])
   const authenticationCount = f.auth.length
-  await expect(
+  await assert.rejects(
     connect({ ...f.config, fingerprint: `SHA256:${'A'.repeat(43)}` }),
-  ).rejects.toThrow()
+  )
   expect(f.auth.length).toBe(authenticationCount)
-  await expect(connect({ ...f.config, password: 'wrong' })).rejects.toThrow()
+  await assert.rejects(connect({ ...f.config, password: 'wrong' }))
 })
 
 test('dry runs list changes with no remote writes, and reject unsafe destinations', async () => {
@@ -462,11 +464,12 @@ test('dry runs list changes with no remote writes, and reject unsafe destination
     ),
   ).toBe(true)
   f.rejectPreflight()
-  await expect(preflight(client, root)).rejects.toThrow('Remote directory')
+  await assert.rejects(preflight(client, root), /Remote directory/)
   f.rootLink()
-  await expect(
+  await assert.rejects(
     mirror(remote, root, directory, await localManifest(directory), true),
-  ).rejects.toThrow('Unsafe resolved')
+    /Unsafe resolved/,
+  )
 })
 
 test('mirrors nested files, both type conflicts and symlinks; skips unchanged files', async () => {
@@ -538,7 +541,7 @@ test('a failed upload retains live files and cleans partial staging files', asyn
   f.nodes.set(`${root}/extra`, node('file', 'keep on failure'))
   f.failUploads()
   const { remote } = await f.remote()
-  await expect(
+  await assert.rejects(
     mirror(
       remote,
       root,
@@ -547,7 +550,7 @@ test('a failed upload retains live files and cleans partial staging files', asyn
       false,
       () => {},
     ),
-  ).rejects.toThrow()
+  )
   expect(f.nodes.get(`${root}/index.html`)!.content.toString()).toBe(
     'live site',
   )
@@ -565,7 +568,7 @@ test('unsupported rename extensions fail before deleting any live files', async 
   f.nodes.set(`${root}/extra`, node('file', 'extra'))
   f.rejectRename()
   const { remote } = await f.remote()
-  await expect(
+  await assert.rejects(
     mirror(
       remote,
       root,
@@ -574,7 +577,7 @@ test('unsupported rename extensions fail before deleting any live files', async 
       false,
       () => {},
     ),
-  ).rejects.toThrow()
+  )
   expect(f.nodes.get(`${root}/index.html`)!.content.toString()).toBe(
     'live site',
   )

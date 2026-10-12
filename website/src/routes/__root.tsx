@@ -63,6 +63,11 @@ function RootDocument({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <head>
+        <script
+          defer
+          data-domain="explorer.mrrtt.me"
+          src="https://plausible.mrrtt.me/js/script.outbound-links.js"
+        />
         <HeadContent />
       </head>
       <body>
