@@ -33,6 +33,12 @@ mod windows_squirrel;
 #[cfg(target_os = "windows")]
 mod windows_tray;
 
+// GPUI is vendored outside the workspace. Include its native move regression
+// here so the standard application test run also exercises the backend helper.
+#[cfg(all(test, target_os = "windows"))]
+#[path = "../vendor/gpui/src/platform/windows/window_move.rs"]
+mod gpui_window_move_regression;
+
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{
     AppSettings, ContextMenuSettings, CustomContextMenuItem, ExplorerSettings, FileColumnKind,

@@ -38,6 +38,10 @@ use windows::{
 use crate::*;
 use super::{WM_GPUI_START_EXTERNAL_PATHS_DRAG, text_services::TsfCaretContext};
 
+#[path = "window_move.rs"]
+mod window_move;
+use window_move::queue_window_move;
+
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -889,13 +893,8 @@ impl PlatformWindow for WindowsWindow {
 
         unsafe {
             ReleaseCapture().log_err();
-            SendMessageW(
-                self.0.hwnd,
-                WM_SYSCOMMAND,
-                Some(WPARAM((SC_MOVE | HTCAPTION) as usize)),
-                Some(LPARAM(0)),
-            );
         }
+        queue_window_move(self.0.hwnd).log_err();
     }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
