@@ -174,7 +174,7 @@ struct Reader {
     copy_menu: Option<Point<Pixels>>,
     fullscreen: bool,
     controls_revealed: bool,
-    popup_height: f32,
+    panel_trigger_bounds: Vec<Bounds<Pixels>>,
     history: Vec<Location>,
     selection: Option<(ContentPoint, ContentPoint)>,
     selecting: bool,
@@ -275,7 +275,7 @@ impl Reader {
             copy_menu: None,
             fullscreen: window.is_fullscreen(),
             controls_revealed: false,
-            popup_height: 320.0,
+            panel_trigger_bounds: Vec::new(),
             history: Vec::new(),
             selection: None,
             selecting: false,
@@ -900,7 +900,7 @@ impl Reader {
         self.bookmark_open = false;
         if self.chapters_open {
             self.contents_cursor = self.current_toc().unwrap_or(0);
-            self.contents_scroll.scroll_to_item(self.contents_cursor);
+            self.scroll_to_contents_cursor(cx);
         }
         self.focus_handle.focus(window);
         cx.notify();
@@ -931,6 +931,12 @@ impl Reader {
     }
 
     fn open_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_open {
+            self.bookmark_open = false;
+            self.focus_handle.focus(window);
+            cx.notify();
+            return;
+        }
         if self.current_page.is_none() {
             return;
         }
@@ -1048,9 +1054,26 @@ impl Reader {
             }
             _ => return,
         }
-        self.contents_scroll.scroll_to_item(self.contents_cursor);
+        self.scroll_to_contents_cursor(cx);
         cx.stop_propagation();
         cx.notify();
+    }
+
+    fn scroll_to_contents_cursor(&self, cx: &App) {
+        let bookmarks = state::bookmarks(cx, &self.key);
+        let preceding_rows = if bookmarks.is_empty() {
+            0
+        } else {
+            bookmarks.len() + 2
+        };
+        self.contents_scroll
+            .scroll_to_item(preceding_rows + self.contents_cursor);
+    }
+
+    fn is_panel_trigger(&self, event: &MouseDownEvent) -> bool {
+        self.panel_trigger_bounds
+            .iter()
+            .any(|bounds| bounds.contains(&event.position))
     }
 
     fn control(&mut self, action: Control, window: &mut Window, cx: &mut Context<Self>) {
@@ -1346,38 +1369,68 @@ impl Reader {
             }
             self.load_images(&page.pending_images, cx);
             self.trim_images();
-            self.warm_next_page(&chapter, window);
+            self.warm_pages(&chapter, window, cx);
             Some(page)
         } else {
             None
         }
     }
 
-    fn warm_next_page(&mut self, chapter: &Chapter, window: &mut Window) {
+    fn warm_pages(&mut self, chapter: &Chapter, window: &mut Window, cx: &mut Context<Self>) {
+        let started = Instant::now();
         let color = self.color();
         let link_color = self.link_color();
         let Some(layout) = self.layouts.get_mut(&self.href) else {
             return;
         };
-        let index = self.page_index + 1;
-        if index >= layout.starts.len() || layout.pages.iter().any(|(cached, _)| *cached == index) {
-            return;
-        }
         let Some(images) = self.images.get(&self.href) else {
             return;
         };
-        if let Ok(page) = layout_page_with_preferences(
-            chapter,
-            layout.starts[index],
-            layout.geometry,
-            &self.font_family,
-            self.preferences.font_size as f32,
-            color,
-            link_color,
-            images,
-            &self.preferences,
-            window,
-        ) {
+        let was_complete = layout.complete;
+        let mut pending_images = Vec::new();
+        // Warm the next reading page first, then advance the chapter's page
+        // boundaries without retaining every shaped page. Text shaping uses
+        // Window, so this work yields between frames on the UI thread.
+        let next = self.page_index + 1;
+        let mut warm_next =
+            next < layout.starts.len() && !layout.pages.iter().any(|(cached, _)| *cached == next);
+        while warm_next || !layout.complete {
+            let index = if warm_next {
+                next
+            } else {
+                layout.starts.len() - 1
+            };
+            warm_next = false;
+            let page = match layout_page_with_preferences(
+                chapter,
+                layout.starts[index],
+                layout.geometry,
+                &self.font_family,
+                self.preferences.font_size as f32,
+                color,
+                link_color,
+                images,
+                &self.preferences,
+                window,
+            ) {
+                Ok(page) => page,
+                Err(error) => {
+                    self.error = Some(error);
+                    cx.notify();
+                    return;
+                }
+            };
+            pending_images.extend(
+                page.pending_images
+                    .iter()
+                    .copied()
+                    .filter(|index| !images.contains_key(index)),
+            );
+            if !pending_images.is_empty() {
+                // Image dimensions can change page breaks. Resolve these before
+                // publishing boundaries for the remainder of the chapter.
+                break;
+            }
             if index == layout.starts.len() - 1 && !layout.complete {
                 if page.end.block >= chapter.blocks.len() || page.end == page.start {
                     layout.complete = true;
@@ -1385,8 +1438,22 @@ impl Reader {
                     layout.starts.push(page.end);
                 }
             }
-            layout.cache(index, page);
+            if index == next {
+                layout.cache(index, page);
+            }
+            if started.elapsed().as_millis() >= 4 {
+                break;
+            }
         }
+        let complete = layout.complete;
+        if complete != was_complete {
+            cx.notify();
+        }
+        if !complete && pending_images.is_empty() {
+            window.request_animation_frame();
+            cx.notify();
+        }
+        self.load_images(&pending_images, cx);
     }
 
     fn trim_images(&mut self) {
@@ -1980,6 +2047,7 @@ impl Reader {
     ) -> AnyElement {
         div()
             .id(id)
+            .debug_selector(move || id.to_owned())
             .key_context("EpubControl")
             .h(px(26.0))
             .px(px(8.0))
@@ -2030,19 +2098,23 @@ impl Reader {
             .into_any_element()
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let ready = self.current_page.is_some();
-        let previous = ready && !self.at_boundary(false);
-        let next = ready && !self.at_boundary(true);
+    fn page_label(&self) -> String {
         let total = self
             .layouts
             .get(&self.href)
             .filter(|layout| layout.complete)
             .map(|layout| layout.starts.len());
-        let pages = total.map_or_else(
-            || format!("Page {}", self.page_index + 1),
+        total.map_or_else(
+            || format!("Page {} of …", self.page_index + 1),
             |total| format!("Page {} of {}", self.page_index + 1, total),
-        );
+        )
+    }
+
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity();
+        let ready = self.current_page.is_some();
+        let previous = ready && !self.at_boundary(false);
+        let next = ready && !self.at_boundary(true);
         let percentage = self
             .index
             .as_ref()
@@ -2058,18 +2130,22 @@ impl Reader {
                     },
                 )
             })
-            .map(|value| format!(" · ~{value}%"))
-            .unwrap_or_default();
-        let progress = if self
+            .map(|value| format!("{value}%"));
+        let cover = self
             .book
             .as_ref()
-            .is_some_and(|book| book.is_cover(&self.href))
-        {
-            "Cover".into()
-        } else {
-            format!("{} · {pages}{percentage}", self.heading())
+            .is_some_and(|book| book.is_cover(&self.href));
+        let separator = |id: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .px(px(8.0))
+                .flex_shrink_0()
+                .child("·")
         };
         div()
+            .id("epub-toolbar")
+            .debug_selector(|| "epub-toolbar".to_owned())
             .w_full()
             .flex()
             .flex_col()
@@ -2084,6 +2160,12 @@ impl Reader {
             }))
             .child(
                 div()
+                    .on_children_prepainted(move |bounds, _, cx| {
+                        entity.update(cx, |reader, _| {
+                            // Previous/Next precede the four panel triggers.
+                            reader.panel_trigger_bounds = bounds[2..6].to_vec();
+                        });
+                    })
                     .w_full()
                     .flex()
                     .flex_wrap()
@@ -2097,13 +2179,6 @@ impl Reader {
                         cx,
                     ))
                     .child(self.button("epub-next", "›".into(), next, Control::Next, cx))
-                    .child(self.button(
-                        "epub-back",
-                        "Back".into(),
-                        !self.history.is_empty(),
-                        Control::Back,
-                        cx,
-                    ))
                     .child(self.button(
                         "epub-chapters",
                         "Contents".into(),
@@ -2156,23 +2231,157 @@ impl Reader {
             .child(
                 div()
                     .w_full()
+                    .flex()
+                    .items_center()
                     .px(px(8.0))
                     .pb(px(4.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(progress),
+                    .child(
+                        div()
+                            .id("epub-progress-title")
+                            .debug_selector(|| "epub-progress-title".to_owned())
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .child(if cover {
+                                "Cover".into()
+                            } else {
+                                self.heading()
+                            }),
+                    )
+                    .when(!cover, |row| {
+                        row.child(separator("epub-page-separator"))
+                            .child(
+                                div()
+                                    .id("epub-progress-pages")
+                                    .debug_selector(|| "epub-progress-pages".to_owned())
+                                    .flex_shrink_0()
+                                    .child(self.page_label()),
+                            )
+                            .when_some(percentage, |row, percentage| {
+                                row.child(separator("epub-percentage-separator"))
+                                    .child(div().flex_shrink_0().child(percentage))
+                            })
+                    }),
             )
             .into_any_element()
     }
 
     fn render_chapters(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut rows = Vec::new();
+        let bookmarks = state::bookmarks(cx, &self.key);
+        if !bookmarks.is_empty() {
+            rows.push(
+                div()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .child("Bookmarks")
+                    .into_any_element(),
+            );
+            for (index, bookmark) in bookmarks.into_iter().enumerate() {
+                let location = bookmark.location;
+                let key_location = location.clone();
+                rows.push(
+                    div()
+                        .id(("epub-bookmark-row", index))
+                        .debug_selector(move || format!("epub-bookmark-row-{index}"))
+                        .key_context("EpubControl")
+                        .tab_index(0)
+                        .focus(|style| {
+                            style.bg(rgb(if self.preferences.light {
+                                0xdce9f5
+                            } else {
+                                0x335a80
+                            }))
+                        })
+                        .flex()
+                        .items_center()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_click(cx.listener(move |reader, _, window, cx| {
+                            reader.history.push(reader.location());
+                            reader.resume_location = Some(location.clone());
+                            reader.chapters_open = false;
+                            reader.open_section(
+                                location.href.clone(),
+                                PageRequest::Anchor(location.point),
+                                None,
+                                cx,
+                            );
+                            reader.focus_handle.focus(window);
+                        }))
+                        .on_action(cx.listener(move |reader, _: &EpubActivate, window, cx| {
+                            reader.history.push(reader.location());
+                            reader.resume_location = Some(key_location.clone());
+                            reader.chapters_open = false;
+                            reader.open_section(
+                                key_location.href.clone(),
+                                PageRequest::Anchor(key_location.point),
+                                None,
+                                cx,
+                            );
+                            reader.focus_handle.focus(window);
+                            cx.stop_propagation();
+                        }))
+                        .child(div().flex_1().child(bookmark.name))
+                        .child(
+                            div()
+                                .id(("epub-delete-bookmark", index))
+                                .debug_selector(move || format!("epub-delete-bookmark-{index}"))
+                                .key_context("EpubControl")
+                                .tab_index(0)
+                                .focus(|style| {
+                                    style.bg(rgb(if self.preferences.light {
+                                        0xdce9f5
+                                    } else {
+                                        0x335a80
+                                    }))
+                                })
+                                .px(px(8.0))
+                                .child("×")
+                                .tooltip(reader_tooltip("Remove bookmark"))
+                                .on_action(cx.listener(move |reader, _: &EpubActivate, _, cx| {
+                                    let mut bookmarks = state::bookmarks(cx, &reader.key);
+                                    if index < bookmarks.len() {
+                                        bookmarks.remove(index);
+                                        state::set_bookmarks(cx, &reader.key, bookmarks);
+                                    }
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                                .on_click(cx.listener(move |reader, _, _, cx| {
+                                    let mut bookmarks = state::bookmarks(cx, &reader.key);
+                                    if index < bookmarks.len() {
+                                        bookmarks.remove(index);
+                                        state::set_bookmarks(cx, &reader.key, bookmarks);
+                                    }
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
+            rows.push(
+                div()
+                    .id("epub-contents-separator")
+                    .debug_selector(|| "epub-contents-separator".to_owned())
+                    .h(px(1.0))
+                    .flex_shrink_0()
+                    .mx(px(12.0))
+                    .my(px(8.0))
+                    .bg(rgb(0x808080))
+                    .into_any_element(),
+            );
+        }
         if let Some(book) = &self.book {
             for (index, item) in book.toc.iter().enumerate() {
                 let target = item.target.clone();
                 rows.push(
                     div()
                         .id(("epub-toc", index))
+                        .debug_selector(move || format!("epub-toc-{index}"))
                         .key_context("EpubControl")
                         .tab_index(0)
                         .focus(|style| {
@@ -2232,107 +2441,12 @@ impl Reader {
                 );
             }
         }
-        let bookmarks = state::bookmarks(cx, &self.key);
-        if !bookmarks.is_empty() {
-            rows.push(
-                div()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .child("Bookmarks")
-                    .into_any_element(),
-            );
-            for (index, bookmark) in bookmarks.into_iter().enumerate() {
-                let location = bookmark.location;
-                let key_location = location.clone();
-                rows.push(
-                    div()
-                        .id(("epub-bookmark-row", index))
-                        .key_context("EpubControl")
-                        .tab_index(0)
-                        .focus(|style| {
-                            style.bg(rgb(if self.preferences.light {
-                                0xdce9f5
-                            } else {
-                                0x335a80
-                            }))
-                        })
-                        .flex()
-                        .items_center()
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .cursor(CursorStyle::PointingHand)
-                        .on_click(cx.listener(move |reader, _, window, cx| {
-                            reader.history.push(reader.location());
-                            reader.resume_location = Some(location.clone());
-                            reader.chapters_open = false;
-                            reader.open_section(
-                                location.href.clone(),
-                                PageRequest::Anchor(location.point),
-                                None,
-                                cx,
-                            );
-                            reader.focus_handle.focus(window);
-                        }))
-                        .on_action(cx.listener(move |reader, _: &EpubActivate, window, cx| {
-                            reader.history.push(reader.location());
-                            reader.resume_location = Some(key_location.clone());
-                            reader.chapters_open = false;
-                            reader.open_section(
-                                key_location.href.clone(),
-                                PageRequest::Anchor(key_location.point),
-                                None,
-                                cx,
-                            );
-                            reader.focus_handle.focus(window);
-                            cx.stop_propagation();
-                        }))
-                        .child(div().flex_1().child(bookmark.name))
-                        .child(
-                            div()
-                                .id(("epub-delete-bookmark", index))
-                                .key_context("EpubControl")
-                                .tab_index(0)
-                                .focus(|style| {
-                                    style.bg(rgb(if self.preferences.light {
-                                        0xdce9f5
-                                    } else {
-                                        0x335a80
-                                    }))
-                                })
-                                .px(px(8.0))
-                                .child("×")
-                                .tooltip(reader_tooltip("Remove bookmark"))
-                                .on_action(cx.listener(move |reader, _: &EpubActivate, _, cx| {
-                                    let mut bookmarks = state::bookmarks(cx, &reader.key);
-                                    if index < bookmarks.len() {
-                                        bookmarks.remove(index);
-                                        state::set_bookmarks(cx, &reader.key, bookmarks);
-                                    }
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }))
-                                .on_click(cx.listener(move |reader, _, _, cx| {
-                                    let mut bookmarks = state::bookmarks(cx, &reader.key);
-                                    if index < bookmarks.len() {
-                                        bookmarks.remove(index);
-                                        state::set_bookmarks(cx, &reader.key, bookmarks);
-                                    }
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
         div()
             .id("epub-chapter-popup")
             .debug_selector(|| "epub-chapter-popup".to_owned())
-            .absolute()
-            .left(px(12.0))
-            .bottom(px(40.0))
-            .w(px(320.0))
-            .max_h(px(self.popup_height))
+            .w_full()
+            .min_h(px(0.0))
+            .max_h_full()
             .overflow_y_scroll()
             .track_scroll(&self.contents_scroll)
             .occlude()
@@ -2346,7 +2460,10 @@ impl Reader {
             .border_1()
             .border_color(rgb(0x808080))
             .shadow_md()
-            .on_mouse_down_out(cx.listener(|reader, _, window, cx| {
+            .on_mouse_down_out(cx.listener(|reader, event, window, cx| {
+                if reader.is_panel_trigger(event) {
+                    return;
+                }
                 reader.chapters_open = false;
                 reader.focus_handle.focus(window);
                 cx.notify();
@@ -2356,15 +2473,27 @@ impl Reader {
             .into_any_element()
     }
 
+    fn panel_overlay(&self, panel: AnyElement) -> AnyElement {
+        div()
+            .absolute()
+            .top(px(8.0))
+            .bottom(px(8.0))
+            .left(px(12.0))
+            .w(px(320.0))
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(panel)
+            .into_any_element()
+    }
+
     fn panel(&self, id: &'static str) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
             .debug_selector(move || id.to_owned())
-            .absolute()
-            .left(px(12.0))
-            .bottom(px(82.0))
-            .w(px(320.0))
-            .max_h(px(self.popup_height))
+            .w_full()
+            .min_h(px(0.0))
+            .max_h(px(320.0))
             .overflow_y_scroll()
             .occlude()
             .p(px(12.0))
@@ -2539,7 +2668,10 @@ impl Reader {
                     cx,
                 ),
             )
-            .on_mouse_down_out(cx.listener(|reader, _, _, cx| {
+            .on_mouse_down_out(cx.listener(|reader, event, _, cx| {
+                if reader.is_panel_trigger(event) {
+                    return;
+                }
                 reader.settings_open = false;
                 cx.notify();
             }))
@@ -2552,7 +2684,7 @@ impl Reader {
         } else if self.search_busy {
             "Searching…".to_owned()
         } else if self.input.read(cx).text.content.trim().is_empty() {
-            "Enter a word or phrase".to_owned()
+            String::new()
         } else if self.search_results.len() == 200 {
             "First 200 matches".to_owned()
         } else {
@@ -2573,7 +2705,7 @@ impl Reader {
                     )),
             )
             .child(self.input.clone())
-            .child(status)
+            .when(!status.is_empty(), |panel| panel.child(status))
             .when(
                 self.index.as_ref().is_some_and(|index| index.incomplete),
                 |panel| panel.child("Some sections could not be searched."),
@@ -2610,7 +2742,10 @@ impl Reader {
                             }))
                     }),
             )
-            .on_mouse_down_out(cx.listener(|reader, _, window, cx| {
+            .on_mouse_down_out(cx.listener(|reader, event, window, cx| {
+                if reader.is_panel_trigger(event) {
+                    return;
+                }
                 reader.search_open = false;
                 reader.focus_handle.focus(window);
                 cx.notify();
@@ -2640,7 +2775,11 @@ impl Reader {
                         cx,
                     )),
             )
-            .on_mouse_down_out(cx.listener(|reader, _, window, cx| reader.dismiss(window, cx)))
+            .on_mouse_down_out(cx.listener(|reader, event, window, cx| {
+                if !reader.is_panel_trigger(event) {
+                    reader.dismiss(window, cx);
+                }
+            }))
             .into_any_element()
     }
 }
@@ -2723,7 +2862,6 @@ fn reader_tooltip(
 
 impl Render for Reader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.popup_height = (f32::from(window.viewport_size().height) - 112.0).clamp(100.0, 320.0);
         let loading =
             self.load_task.is_some() || self.chapter_task.is_some() || self.request.is_some();
         let body = div()
@@ -2842,7 +2980,45 @@ impl Render for Reader {
                             .child("Loading book…"),
                     )
                 },
-            );
+            )
+            .when(self.chapters_open, |content| {
+                content.child(self.panel_overlay(self.render_chapters(cx)))
+            })
+            .when(self.settings_open, |content| {
+                content.child(self.panel_overlay(self.render_settings(cx)))
+            })
+            .when(self.search_open, |content| {
+                content.child(self.panel_overlay(self.render_search(cx)))
+            })
+            .when(self.bookmark_open, |content| {
+                content.child(self.panel_overlay(self.render_bookmark_input(cx)))
+            })
+            .when(self.note.is_some(), |content| {
+                let (title, text) = self.note.as_ref().unwrap();
+                content.child(
+                    self.panel_overlay(
+                        self.panel("epub-note-preview")
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .child(div().flex_1().child(title.clone()))
+                                    .child(self.button(
+                                        "epub-note-close",
+                                        "×".into(),
+                                        true,
+                                        Control::Dismiss,
+                                        cx,
+                                    )),
+                            )
+                            .child(text.clone())
+                            .on_mouse_down_out(
+                                cx.listener(|reader, _, window, cx| reader.dismiss(window, cx)),
+                            )
+                            .into_any_element(),
+                    ),
+                )
+            });
         let content = div()
             .key_context("EpubReader")
             .track_focus(&self.focus_handle)
@@ -2928,41 +3104,6 @@ impl Render for Reader {
                     || self.bookmark_open,
                 |content| content.child(self.render_toolbar(cx)),
             )
-            .when(self.chapters_open, |content| {
-                content.child(self.render_chapters(cx))
-            })
-            .when(self.settings_open, |content| {
-                content.child(self.render_settings(cx))
-            })
-            .when(self.search_open, |content| {
-                content.child(self.render_search(cx))
-            })
-            .when(self.bookmark_open, |content| {
-                content.child(self.render_bookmark_input(cx))
-            })
-            .when(self.note.is_some(), |content| {
-                let (title, text) = self.note.as_ref().unwrap();
-                content.child(
-                    self.panel("epub-note-preview")
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .child(div().flex_1().child(title.clone()))
-                                .child(self.button(
-                                    "epub-note-close",
-                                    "×".into(),
-                                    true,
-                                    Control::Dismiss,
-                                    cx,
-                                )),
-                        )
-                        .child(text.clone())
-                        .on_mouse_down_out(
-                            cx.listener(|reader, _, window, cx| reader.dismiss(window, cx)),
-                        ),
-                )
-            })
             .when(self.enlarged_image.is_some(), |content| {
                 content.child(
                     div()
@@ -3542,6 +3683,365 @@ mod tests {
                 b"<html><body><p id='note'>A note</p></body></html>",
             )],
         );
+    }
+
+    fn finish_page_count(reader: &Entity<Reader>, cx: &mut gpui::VisualTestContext) -> usize {
+        for _ in 0..512 {
+            settle(reader, cx);
+            let total = reader.update(cx, |reader, _| {
+                assert!(reader.error.is_none(), "{:?}", reader.error);
+                reader
+                    .layouts
+                    .get(&reader.href)
+                    .filter(|layout| layout.complete)
+                    .map(|layout| layout.starts.len())
+            });
+            if let Some(total) = total {
+                return total;
+            }
+            cx.update(|window, app| {
+                window.refresh();
+                let _ = window.draw(app);
+            });
+        }
+        panic!("Chapter page count did not finish");
+    }
+
+    #[gpui::test]
+    fn toolbar_panels_toggle_on_full_clicks_and_keyboard_actions(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Panels".into(), window, cx));
+        settle(&reader, visual);
+        assert!(visual.debug_bounds("epub-back").is_none());
+        let panels = [
+            ("epub-chapters", "epub-chapter-popup"),
+            ("epub-settings", "epub-reading-settings"),
+            ("epub-find", "epub-search-panel"),
+            ("epub-bookmark", "epub-bookmark-panel"),
+        ];
+        for (index, (button, panel)) in panels.into_iter().enumerate() {
+            let position = visual.debug_bounds(button).unwrap().center();
+            visual.simulate_click(position, Modifiers::default());
+            reader.update(visual, |reader, _| {
+                assert!(
+                    [
+                        reader.chapters_open,
+                        reader.settings_open,
+                        reader.search_open,
+                        reader.bookmark_open
+                    ][index]
+                );
+            });
+            assert!(visual.debug_bounds(panel).is_some(), "{button} should open");
+            visual.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+            assert!(
+                visual.debug_bounds(panel).is_some(),
+                "{button} must stay open on mouse down"
+            );
+            visual.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+            reader.update(visual, |reader, _| {
+                assert!(
+                    !reader.chapters_open
+                        && !reader.settings_open
+                        && !reader.search_open
+                        && !reader.bookmark_open,
+                    "{button} state should close"
+                )
+            });
+        }
+        for (index, (button, _)) in panels.into_iter().enumerate() {
+            let position = visual.debug_bounds(button).unwrap().center();
+            visual.simulate_click(position, Modifiers::default());
+            reader.update(visual, |reader, _| {
+                let open = [
+                    reader.chapters_open,
+                    reader.settings_open,
+                    reader.search_open,
+                    reader.bookmark_open,
+                ];
+                assert!(open[index]);
+                assert_eq!(open.into_iter().filter(|open| *open).count(), 1);
+            });
+        }
+        let body = visual.debug_bounds("epub-body").unwrap();
+        visual.simulate_click(
+            body.top_right() + point(px(-16.0), px(16.0)),
+            Modifiers::default(),
+        );
+        reader.update(visual, |reader, _| assert!(!reader.bookmark_open));
+        // The same actions used by keyboard shortcuts must toggle both ways,
+        // including actions dispatched while an input owns focus.
+        for _ in 0..2 {
+            visual.dispatch_action(EpubContents);
+        }
+        for _ in 0..2 {
+            visual.dispatch_action(EpubSettings);
+        }
+        for _ in 0..2 {
+            visual.dispatch_action(EpubFind);
+        }
+        for _ in 0..2 {
+            visual.dispatch_action(EpubBookmark);
+        }
+        reader.update(visual, |reader, _| {
+            assert!(
+                !reader.chapters_open
+                    && !reader.settings_open
+                    && !reader.search_open
+                    && !reader.bookmark_open
+            );
+        });
+        let title = visual.debug_bounds("epub-progress-title").unwrap();
+        let separator = visual.debug_bounds("epub-page-separator").unwrap();
+        let pages = visual.debug_bounds("epub-progress-pages").unwrap();
+        assert!(separator.size.width > px(16.0));
+        assert_eq!(title.right(), separator.left());
+        assert_eq!(separator.right(), pages.left());
+    }
+
+    #[gpui::test]
+    fn contents_bookmarks_precede_chapters_and_keep_navigation_and_deletion(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Bookmarks".into(), window, cx));
+        settle(&reader, visual);
+        reader.update(visual, |reader, cx| {
+            let mut location = reader.location();
+            location.href = "/book/second.xhtml".into();
+            location.point = ContentPoint::default();
+            state::set_bookmarks(
+                cx,
+                &reader.key,
+                vec![Bookmark {
+                    name: "Saved passage".into(),
+                    location,
+                }],
+            );
+        });
+        visual.dispatch_action(EpubContents);
+        let bookmark = visual.debug_bounds("epub-bookmark-row-0").unwrap();
+        let separator = visual.debug_bounds("epub-contents-separator").unwrap();
+        let chapter = visual.debug_bounds("epub-toc-0").unwrap();
+        assert!(bookmark.bottom() < separator.top());
+        assert!(separator.bottom() < chapter.top());
+        let popup = visual.debug_bounds("epub-chapter-popup").unwrap();
+        let body = visual.debug_bounds("epub-body").unwrap();
+        assert!(
+            popup.size.height < body.size.height - px(16.0),
+            "short contents should retain natural height"
+        );
+        visual.simulate_click(
+            bookmark.origin + point(px(20.0), px(10.0)),
+            Modifiers::default(),
+        );
+        settle(&reader, visual);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.href, "/book/second.xhtml")
+        });
+        visual.dispatch_action(EpubContents);
+        let delete = visual
+            .debug_bounds("epub-delete-bookmark-0")
+            .unwrap()
+            .center();
+        visual.simulate_click(delete, Modifiers::default());
+        reader.update(visual, |reader, cx| {
+            assert!(
+                state::bookmarks(cx, &reader.key).is_empty(),
+                "delete should remove bookmark"
+            )
+        });
+        reader.update(visual, |reader, cx| {
+            assert!(reader.chapters_open);
+            assert!(state::bookmarks(cx, &reader.key).is_empty());
+            // GPUI keeps old debug selectors after removing nodes; inspect the
+            // actual scroll children to check that the heading and divider left.
+            assert_eq!(
+                reader.contents_scroll.children_count(),
+                reader.book.as_ref().unwrap().toc.len()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn long_contents_fill_the_reading_area_above_wrapped_and_fullscreen_toolbars(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let links = (0..80)
+            .map(|index| format!("<li><a href='c.xhtml#p{index}'>Chapter {index}</a></li>"))
+            .collect::<String>();
+        let nav = format!(
+            "<html xmlns:epub='http://www.idpf.org/2007/ops'><body><nav epub:type='toc'><ol>{links}</ol></nav></body></html>"
+        );
+        super::super::tests::write_book(
+            &path,
+            "3.0",
+            "",
+            &[("c.xhtml", "<html><body><p>Readable</p></body></html>")],
+            &[("nav.xhtml", "application/xhtml+xml", nav.as_bytes())],
+        );
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Contents".into(), window, cx));
+        settle(&reader, visual);
+        reader.update(visual, |reader, cx| {
+            state::set_bookmarks(
+                cx,
+                &reader.key,
+                vec![Bookmark {
+                    name: "Saved".into(),
+                    location: reader.location(),
+                }],
+            );
+        });
+        visual.dispatch_action(EpubContents);
+        for (width, height, fullscreen) in [
+            (900.0, 820.0, false),
+            (360.0, 240.0, false),
+            (360.0, 600.0, false),
+            (900.0, 820.0, true),
+        ] {
+            reader.update(visual, |reader, cx| {
+                reader.fullscreen = fullscreen;
+                cx.notify();
+            });
+            visual.simulate_resize(size(px(width), px(height)));
+            settle(&reader, visual);
+            let popup = visual.debug_bounds("epub-chapter-popup").unwrap();
+            let body = visual.debug_bounds("epub-body").unwrap();
+            let toolbar = visual.debug_bounds("epub-toolbar").unwrap();
+            assert!(popup.top() >= body.top() + px(7.0), "{popup:?} {body:?}");
+            assert!(popup.bottom() <= toolbar.top() - px(7.0));
+            assert!(
+                (f32::from(popup.size.height) - f32::from(body.size.height) + 16.0).abs() < 1.0
+            );
+            if height == 820.0 {
+                assert!(popup.size.height > px(320.0));
+            }
+        }
+        // The bookmark heading, bookmark, and separator precede TOC index 79.
+        reader.update(visual, |reader, cx| {
+            reader.contents_cursor = 79;
+            reader.scroll_to_contents_cursor(cx);
+            cx.notify();
+        });
+        visual.run_until_parked();
+        visual.update(|window, app| {
+            window.refresh();
+            let _ = window.draw(app);
+        });
+        let chapter = visual.debug_bounds("epub-toc-79").unwrap();
+        let popup = visual.debug_bounds("epub-chapter-popup").unwrap();
+        // ScrollHandle includes the panel border in its viewport calculation.
+        assert!(
+            chapter.top() >= popup.top() && chapter.bottom() <= popup.bottom() + px(1.0),
+            "{chapter:?} {popup:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn chapter_totals_finish_without_turning_and_recalculate_after_reflow(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Page counts".into(), window, cx));
+        settle(&reader, visual);
+        let selection = (
+            ContentPoint::default(),
+            ContentPoint {
+                block: 0,
+                offset: 8,
+            },
+        );
+        reader.update(visual, |reader, _| reader.selection = Some(selection));
+        let total = finish_page_count(&reader, visual);
+        assert!(total > 2);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.page_index, 0);
+            assert_eq!(reader.anchor, ContentPoint::default());
+            assert_eq!(reader.selection, Some(selection));
+            assert_eq!(reader.page_label(), format!("Page 1 of {total}"));
+            assert!(reader.layouts[&reader.href].pages.len() <= PAGE_CACHE_SIZE);
+        });
+        visual.simulate_resize(size(px(500.0), px(400.0)));
+        let resized_total = finish_page_count(&reader, visual);
+        assert!(resized_total > total);
+        visual.update(|window, cx| {
+            reader.update(cx, |reader, cx| reader.control(Control::Larger, window, cx))
+        });
+        let larger_total = finish_page_count(&reader, visual);
+        assert!(larger_total > resized_total);
+        // Restart counting and navigate while the layout is incomplete.
+        reader.update(visual, |reader, cx| {
+            let layout = reader.layouts.get_mut(&reader.href).unwrap();
+            layout.starts.truncate(1);
+            layout.complete = false;
+            layout.pages.clear();
+            assert_eq!(reader.page_label(), "Page 1 of …");
+            reader.turn(1, cx);
+        });
+        assert_eq!(finish_page_count(&reader, visual), larger_total);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.page_index, 1);
+            assert_eq!(reader.page_label(), format!("Page 2 of {larger_total}"));
+            assert!(reader.layouts[&reader.href].pages.len() <= PAGE_CACHE_SIZE);
+        });
+    }
+
+    #[gpui::test]
+    fn counting_resolves_images_beyond_the_reading_page(cx: &mut TestAppContext) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let text = format!(
+            "<html><body><p>{}</p><img src='tall.png'/><p>After image</p></body></html>",
+            "A readable sentence. ".repeat(800)
+        );
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            80,
+            800,
+            image::Rgb([40, 80, 120]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+        super::super::tests::write_book(
+            &path,
+            "3.0",
+            "",
+            &[("c.xhtml", &text)],
+            &[("tall.png", "image/png", png.get_ref())],
+        );
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Images".into(), window, cx));
+        let total = finish_page_count(&reader, visual);
+        assert!(total > 2);
+        reader.update(visual, |reader, _| {
+            assert_eq!(reader.page_index, 0);
+            assert_eq!(reader.anchor, ContentPoint::default());
+            let chapter = &reader.chapters[&reader.href];
+            let image = chapter
+                .blocks
+                .iter()
+                .position(|block| matches!(block, Block::Image { .. }))
+                .unwrap();
+            let slot = &reader.images[&reader.href][&image];
+            assert_eq!(slot.width, 80.0);
+            assert_eq!(slot.height, 800.0);
+            assert!(!slot.failed);
+        });
     }
 
     #[gpui::test]
