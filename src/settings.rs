@@ -428,12 +428,14 @@ impl Serialize for SerializableSidebarOrderSettings<'_> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CustomContextMenuItem {
     Action {
+        in_paths: Vec<String>,
         label: String,
         action: ContextMenuAction,
         icon: Option<PathBuf>,
         only: Vec<String>,
     },
     Item {
+        in_paths: Vec<String>,
         label: String,
         exe: PathBuf,
         icon: Option<PathBuf>,
@@ -441,6 +443,7 @@ pub enum CustomContextMenuItem {
         only: Vec<String>,
     },
     Submenu {
+        in_paths: Vec<String>,
         label: String,
         icon: Option<PathBuf>,
         items: Vec<CustomContextMenuItem>,
@@ -455,6 +458,7 @@ pub enum ContextMenuAction {
 
 fn compress_context_menu_item() -> CustomContextMenuItem {
     CustomContextMenuItem::Action {
+        in_paths: Vec::new(),
         label: "Compress".to_owned(),
         action: ContextMenuAction::Compress,
         icon: None,
@@ -481,6 +485,7 @@ fn default_context_menu_items_for(
             return vec![
                 if executable_available("7zG") {
                     CustomContextMenuItem::Item {
+                        in_paths: Vec::new(),
                         label: "Add to archive...".to_owned(),
                         exe: PathBuf::from("7zG"),
                         icon: None,
@@ -497,6 +502,7 @@ fn default_context_menu_items_for(
                     compress_context_menu_item()
                 },
                 CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("wt"),
                     icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
@@ -514,6 +520,7 @@ fn default_context_menu_items_for(
                 ("Terminal", "Terminal", None)
             };
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: label.to_owned(),
                 exe: PathBuf::from("/usr/bin/open"),
                 icon: icon.map(PathBuf::from),
@@ -524,6 +531,7 @@ fn default_context_menu_items_for(
         ConfigPlatform::Linux => {
             if executable_available("ghostty") {
                 CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Ghostty".to_owned(),
                     exe: PathBuf::from("ghostty"),
                     icon: Some(PathBuf::from(GHOSTTY_ICON_URL)),
@@ -532,6 +540,7 @@ fn default_context_menu_items_for(
                 }
             } else if executable_available("xdg-terminal-exec") {
                 CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("xdg-terminal-exec"),
                     icon: None,
@@ -540,6 +549,7 @@ fn default_context_menu_items_for(
                 }
             } else if executable_available("x-terminal-emulator") {
                 CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("x-terminal-emulator"),
                     icon: None,
@@ -602,8 +612,9 @@ impl Serialize for CustomContextMenuItem {
                 action,
                 icon,
                 only,
+                ..
             } => {
-                let mut length = 2;
+                let mut length = 2 + usize::from(!self.in_paths().is_empty());
                 if icon.is_some() {
                     length += 1;
                 }
@@ -619,6 +630,7 @@ impl Serialize for CustomContextMenuItem {
                 if !only.is_empty() {
                     map.serialize_entry("only", only)?;
                 }
+                serialize_context_menu_in(&mut map, self.in_paths())?;
                 map.end()
             }
             Self::Item {
@@ -627,8 +639,9 @@ impl Serialize for CustomContextMenuItem {
                 icon,
                 args,
                 only,
+                ..
             } => {
-                let mut length = 2;
+                let mut length = 2 + usize::from(!self.in_paths().is_empty());
                 if icon.is_some() {
                     length += 1;
                 }
@@ -650,18 +663,35 @@ impl Serialize for CustomContextMenuItem {
                 if !only.is_empty() {
                     map.serialize_entry("only", only)?;
                 }
+                serialize_context_menu_in(&mut map, self.in_paths())?;
                 map.end()
             }
-            Self::Submenu { label, icon, items } => {
-                let mut map = serializer.serialize_map(Some(if icon.is_some() { 3 } else { 2 }))?;
+            Self::Submenu {
+                label, icon, items, ..
+            } => {
+                let length =
+                    2 + usize::from(icon.is_some()) + usize::from(!self.in_paths().is_empty());
+                let mut map = serializer.serialize_map(Some(length))?;
                 map.serialize_entry("label", label)?;
                 if let Some(icon) = icon {
                     map.serialize_entry("icon", icon)?;
                 }
                 map.serialize_entry("items", items)?;
+                serialize_context_menu_in(&mut map, self.in_paths())?;
                 map.end()
             }
         }
+    }
+}
+
+fn serialize_context_menu_in<M: SerializeMap>(
+    map: &mut M,
+    paths: &[String],
+) -> Result<(), M::Error> {
+    match paths {
+        [] => Ok(()),
+        [path] => map.serialize_entry("in", path),
+        _ => map.serialize_entry("in", paths),
     }
 }
 
@@ -674,6 +704,20 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
         let object = value
             .as_object_mut()
             .ok_or_else(|| de::Error::custom("contextmenu items must be objects"))?;
+        let in_paths = object
+            .remove("in")
+            .map(|value| match value {
+                Value::String(path) => Ok(vec![path]),
+                Value::Array(_) => {
+                    serde_json::from_value::<Vec<String>>(value).map_err(de::Error::custom)
+                }
+                _ => Err(de::Error::custom(
+                    "contextmenu in must be a string or an array of strings",
+                )),
+            })
+            .transpose()?
+            .unwrap_or_default();
+        validate_context_menu_in_paths(&in_paths).map_err(de::Error::custom)?;
         let label = object
             .remove("label")
             .ok_or_else(|| de::Error::missing_field("label"))
@@ -693,7 +737,12 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
         }
         if let Some(items) = items {
             let items = serde_json::from_value(items).map_err(de::Error::custom)?;
-            return Ok(Self::Submenu { label, icon, items });
+            return Ok(Self::Submenu {
+                label,
+                icon,
+                items,
+                in_paths,
+            });
         }
 
         if let Some(action) = action {
@@ -713,6 +762,7 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
                 .map_err(de::Error::custom)?
                 .unwrap_or_default();
             return Ok(Self::Action {
+                in_paths,
                 label,
                 action,
                 icon,
@@ -739,6 +789,7 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
             .unwrap_or_default();
 
         Ok(Self::Item {
+            in_paths,
             label,
             exe,
             icon,
@@ -1366,6 +1417,14 @@ impl LegacySidebarLocation {
 }
 
 impl CustomContextMenuItem {
+    pub(crate) fn in_paths(&self) -> &[String] {
+        match self {
+            Self::Action { in_paths, .. }
+            | Self::Item { in_paths, .. }
+            | Self::Submenu { in_paths, .. } => in_paths,
+        }
+    }
+
     pub(crate) fn label(&self) -> &str {
         match self {
             Self::Action { label, .. } | Self::Item { label, .. } | Self::Submenu { label, .. } => {
@@ -2056,6 +2115,7 @@ fn migrate_settings_for_platform(settings: &mut ExplorerSettings, platform: Conf
             icon,
             args,
             only,
+            ..
         } = item
         else {
             continue;
@@ -2115,6 +2175,7 @@ fn validate_settings(settings: &ExplorerSettings) -> io::Result<()> {
 
 fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Result<()> {
     for item in items {
+        validate_context_menu_in_paths(item.in_paths())?;
         if item.label().trim().is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2139,6 +2200,16 @@ fn validate_custom_context_menu_items(items: &[CustomContextMenuItem]) -> io::Re
                 validate_custom_context_menu_items(items)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_context_menu_in_paths(paths: &[String]) -> io::Result<()> {
+    if paths.iter().any(|path| path.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "contextmenu in paths must not be empty",
+        ));
     }
     Ok(())
 }
@@ -3535,6 +3606,7 @@ mod tests {
             ),
             vec![
                 CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Add to archive...".to_owned(),
                     exe: PathBuf::from("7zG"),
                     icon: None,
@@ -3548,6 +3620,7 @@ mod tests {
                     only: vec!["*file".to_owned(), "*folder".to_owned()],
                 },
                 CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("wt"),
                     icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
@@ -3575,6 +3648,7 @@ mod tests {
             vec![
                 compress_context_menu_item(),
                 CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "cmux".to_owned(),
                     exe: PathBuf::from("/usr/bin/open"),
                     icon: Some(PathBuf::from(CMUX_ICON_URL)),
@@ -3715,6 +3789,7 @@ mod tests {
         let mut windows_settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
                 items: vec![CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Ghostty".to_owned(),
                     exe: PathBuf::from("ghostty"),
                     icon: Some(PathBuf::from(GHOSTTY_ICON_URL)),
@@ -3742,6 +3817,7 @@ mod tests {
                 action: ContextMenuAction::Compress,
                 icon: Some(icon),
                 only,
+                ..
             } if label == "Zip it"
                 && icon == Path::new("https://example.com/archive.png")
                 && only == &["*file", "*folder"]
@@ -5046,6 +5122,7 @@ mod tests {
             contextmenu: ContextMenuSettings {
                 items: vec![
                     CustomContextMenuItem::Item {
+                        in_paths: Vec::new(),
                         label: "Missing absolute".to_owned(),
                         exe: missing_absolute.clone(),
                         icon: None,
@@ -5053,6 +5130,7 @@ mod tests {
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
+                        in_paths: Vec::new(),
                         label: "Missing PATH command".to_owned(),
                         exe: PathBuf::from("definitely-not-an-explorer-test-command"),
                         icon: None,
@@ -5117,6 +5195,7 @@ mod tests {
         let settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
                 items: vec![CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Known tool".to_owned(),
                     exe: PathBuf::from("~/bin/known-tool"),
                     icon: None,
@@ -5159,6 +5238,125 @@ mod tests {
             let settings: ExplorerSettings = serde_json::from_str(json).unwrap();
             assert!(validate_settings(&settings).is_err());
         }
+    }
+
+    #[test]
+    fn contextmenu_in_accepts_and_round_trips_both_forms_for_all_item_kinds() {
+        for kind in [
+            serde_json::json!({"exe": "tool"}),
+            serde_json::json!({"action": "compress"}),
+            serde_json::json!({"items": []}),
+        ] {
+            for (input, expected, output) in [
+                (None, vec![], None),
+                (Some(serde_json::json!([])), vec![], None),
+                (
+                    Some(serde_json::json!("/media/films")),
+                    vec!["/media/films"],
+                    Some(serde_json::json!("/media/films")),
+                ),
+                (
+                    Some(serde_json::json!(["media/films"])),
+                    vec!["media/films"],
+                    Some(serde_json::json!("media/films")),
+                ),
+                (
+                    Some(serde_json::json!(["media/films", "media/music"])),
+                    vec!["media/films", "media/music"],
+                    Some(serde_json::json!(["media/films", "media/music"])),
+                ),
+            ] {
+                let mut document = kind.clone();
+                document["label"] = serde_json::json!("Tool");
+                if let Some(input) = input {
+                    document["in"] = input;
+                }
+                let item: CustomContextMenuItem = serde_json::from_value(document).unwrap();
+                assert_eq!(item.in_paths(), expected);
+                let serialized = serde_json::to_value(&item).unwrap();
+                assert_eq!(serialized.get("in"), output.as_ref());
+                assert_eq!(
+                    serde_json::from_value::<CustomContextMenuItem>(serialized).unwrap(),
+                    item
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contextmenu_in_rejects_invalid_types_and_blank_paths() {
+        for kind in [
+            serde_json::json!({"exe": "tool"}),
+            serde_json::json!({"action": "compress"}),
+            serde_json::json!({"items": []}),
+        ] {
+            for invalid in [
+                serde_json::json!(null),
+                serde_json::json!(true),
+                serde_json::json!(42),
+                serde_json::json!({"path": "/media"}),
+                serde_json::json!(["media", 42]),
+                serde_json::json!([null]),
+                serde_json::json!([["media"]]),
+                serde_json::json!(""),
+                serde_json::json!(" \t\n"),
+                serde_json::json!(["media", " "]),
+            ] {
+                let mut document = kind.clone();
+                document["label"] = serde_json::json!("Tool");
+                document["in"] = invalid;
+                assert!(
+                    serde_json::from_value::<CustomContextMenuItem>(document.clone()).is_err(),
+                    "accepted invalid filter: {document}"
+                );
+            }
+        }
+        let mut item = compress_context_menu_item();
+        if let CustomContextMenuItem::Action { in_paths, .. } = &mut item {
+            in_paths.push(" ".to_owned());
+        }
+        assert!(validate_custom_context_menu_items(&[item]).is_err());
+    }
+
+    #[test]
+    fn contextmenu_in_survives_loading_normalization_and_saving_nested_legacy_items() {
+        let directory = unique_temp_dir("contextmenu-in");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(SETTINGS_FILE_NAME);
+        fs::write(
+            &path,
+            r#"{
+            "contextmenu": {"directory": [{
+                "label": "Media tools", "in": ["media/films", "media/music"],
+                "items": [{
+                    "label": "Tools", "in": ["media/films"],
+                    "items": [
+                        {"label": "Inspect", "exe": "tool", "in": "/media/films"},
+                        {"label": "ZIP", "action": "compress", "in": ["/media", "/backup"]}
+                    ]
+                }]
+            }]}
+        }"#,
+        )
+        .unwrap();
+        let loaded = load_settings_document_from_path(&path).unwrap();
+        let normalized: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            normalized["contextmenu"][0]["in"],
+            serde_json::json!(["media/films", "media/music"])
+        );
+        let group = &normalized["contextmenu"][0]["items"][0];
+        assert_eq!(group["in"], "media/films");
+        assert_eq!(group["items"][0]["in"], "/media/films");
+        assert_eq!(
+            group["items"][1]["in"],
+            serde_json::json!(["/media", "/backup"])
+        );
+        let mut saved = loaded.document;
+        save_document_to_path(&path, &mut saved).unwrap();
+        let reloaded = load_settings_document_from_path(&path).unwrap();
+        assert_eq!(reloaded.value.contextmenu, loaded.value.contextmenu);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -5224,6 +5422,7 @@ mod tests {
         let settings = ExplorerSettings {
             contextmenu: ContextMenuSettings {
                 items: vec![CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Inspect".to_owned(),
                     exe: PathBuf::from("~/bin/inspect"),
                     icon: Some(icon.clone()),

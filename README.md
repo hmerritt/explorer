@@ -196,6 +196,56 @@ no-dialog ZIP action is configured as:
 }
 ```
 
+Custom commands, built-in actions, and groups can use `in` to restrict where they appear.
+An absolute path matches that directory and every child directory:
+
+```json
+{
+    "exe": "C:/Program Files/PowerShell/7/pwsh.exe",
+    "label": "Run with PowerShell",
+    "only": [".ps1"],
+    "in": "C:/Users/hrmer/Documents/my"
+}
+```
+
+A relative path matches a sequence of whole directory names anywhere in the path.
+For example, `media/films` matches `E:/my/media/films/trailers` and
+`C:/Sandbox/media/films`, but excludes `multimedia/films` and `media/filmstrip`.
+Use an array to allow any of several locations. Groups can restrict all their children,
+and each child can add its own restriction:
+
+```json
+{
+    "label": "Media tools",
+    "in": ["media/films", "media/music"],
+    "items": [
+        {
+            "exe": "zed",
+            "label": "Open with Zed",
+            "only": ["*directory", "*folder", "*file"]
+        },
+        {
+            "label": "Compress films",
+            "action": "compress",
+            "only": ["*file", "*folder"],
+            "in": "media/films"
+        }
+    ]
+}
+```
+
+Matching is case-sensitive on every platform. Drive-prefixed, slash-rooted, and Windows
+UNC paths are treated as roots. Windows paths accept either slash style; POSIX filenames
+retain literal backslashes. Repeated and trailing separators and `.`/`..` components are
+normalized lexically, without resolving symlinks or expanding `~`, environment variables,
+or wildcards.
+
+For selected files, `in` checks their containing directories; for selected folders, it checks
+their own paths. Every selected target must match at least one listed location, even in
+search results. Background menus check the current directory. The `in` filter combines
+with `only` and all ancestor-group filters; groups with no visible children are hidden.
+Omitting `in` or setting it to `[]` leaves locations unrestricted. Blank strings are invalid.
+
 ## Development
 
 Explorer is a Rust 2024 project using GPUI.

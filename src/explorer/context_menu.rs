@@ -2065,6 +2065,9 @@ fn configured_context_menu_item(
     id_suffix: &str,
     working_directory: &Path,
 ) -> Option<ContextMenuItem> {
+    if !context_menu_item_matches_in(item.in_paths(), targets, target) {
+        return None;
+    }
     match item {
         CustomContextMenuItem::Action {
             label,
@@ -2181,6 +2184,113 @@ fn paths_share_parent(paths: &[PathBuf]) -> bool {
 enum CustomContextMenuTarget<'a> {
     Directory,
     Entries(&'a [FileEntry]),
+}
+
+fn context_menu_item_matches_in(
+    in_paths: &[String],
+    targets: &[PathBuf],
+    target: CustomContextMenuTarget<'_>,
+) -> bool {
+    if in_paths.is_empty() {
+        return true;
+    }
+
+    let matches = |path: &Path, is_file: bool| {
+        let path = path.as_os_str().as_encoded_bytes();
+        let windows = cfg!(target_os = "windows") || context_menu_path_has_windows_prefix(path);
+        let mut directory = ContextMenuFilterPath::new(path, windows);
+        if is_file {
+            directory.components.pop();
+        }
+        in_paths.iter().any(|filter| {
+            directory.matches(&ContextMenuFilterPath::new(filter.as_bytes(), windows))
+        })
+    };
+    match target {
+        CustomContextMenuTarget::Directory => {
+            !targets.is_empty() && targets.iter().all(|path| matches(path, false))
+        }
+        CustomContextMenuTarget::Entries(entries) => {
+            !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|entry| matches(&entry.path, entry_is_file_open_target(entry)))
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ContextMenuFilterRoot<'a> {
+    Relative,
+    Slash,
+    Drive(&'a [u8]),
+    Unc { server: &'a [u8], share: &'a [u8] },
+}
+
+// Byte components preserve non-Unicode filenames without filesystem access or lossy conversion.
+struct ContextMenuFilterPath<'a> {
+    root: ContextMenuFilterRoot<'a>,
+    components: Vec<&'a [u8]>,
+}
+
+fn context_menu_path_has_drive(path: &[u8]) -> bool {
+    path.len() >= 2 && path[0].is_ascii_alphabetic() && path[1] == b':'
+}
+
+fn context_menu_path_has_windows_prefix(path: &[u8]) -> bool {
+    context_menu_path_has_drive(path) || path.starts_with(b"\\")
+}
+
+impl<'a> ContextMenuFilterPath<'a> {
+    fn new(path: &'a [u8], windows: bool) -> Self {
+        let windows = windows || context_menu_path_has_windows_prefix(path);
+        let is_separator = |byte: u8| byte == b'/' || (windows && byte == b'\\');
+        let has_drive = context_menu_path_has_drive(path);
+        let rest = if has_drive { &path[2..] } else { path };
+        let mut parts = rest
+            .split(|byte| is_separator(*byte))
+            .filter(|part| !part.is_empty());
+        let root = if has_drive {
+            ContextMenuFilterRoot::Drive(&path[..2])
+        } else if windows && path.len() >= 2 && is_separator(path[0]) && is_separator(path[1]) {
+            ContextMenuFilterRoot::Unc {
+                server: parts.next().unwrap_or_default(),
+                share: parts.next().unwrap_or_default(),
+            }
+        } else if path.first().is_some_and(|byte| is_separator(*byte)) {
+            ContextMenuFilterRoot::Slash
+        } else {
+            ContextMenuFilterRoot::Relative
+        };
+
+        let mut components = Vec::new();
+        for part in parts {
+            match part {
+                b"." => {}
+                b".." => {
+                    if components.last().is_some_and(|last| *last != b"..") {
+                        components.pop();
+                    } else if root == ContextMenuFilterRoot::Relative {
+                        components.push(part);
+                    }
+                }
+                _ => components.push(part),
+            }
+        }
+        Self { root, components }
+    }
+
+    fn matches(&self, filter: &Self) -> bool {
+        if filter.root == ContextMenuFilterRoot::Relative {
+            filter.components.is_empty()
+                || self
+                    .components
+                    .windows(filter.components.len())
+                    .any(|parts| parts == filter.components)
+        } else {
+            self.root == filter.root && self.components.starts_with(&filter.components)
+        }
+    }
 }
 
 fn context_menu_item_matches_only(only: &[String], target: CustomContextMenuTarget<'_>) -> bool {
@@ -2448,6 +2558,16 @@ mod tests {
         })
     }
 
+    fn menu_tree_has_label(items: &[ContextMenuItem], expected: &str) -> bool {
+        menu_has_label(items, expected)
+            || items.iter().any(|item| match item {
+                ContextMenuItem::Submenu { children, .. } => {
+                    menu_tree_has_label(children, expected)
+                }
+                _ => false,
+            })
+    }
+
     fn menu_extract_count(items: &[ContextMenuItem]) -> usize {
         items
             .iter()
@@ -2534,7 +2654,22 @@ mod tests {
         only: &[&str],
         selected_entries: Vec<FileEntry>,
     ) -> Vec<ContextMenuItem> {
-        let executable = configured_executable_path();
+        let configured = vec![CustomContextMenuItem::Item {
+            in_paths: Vec::new(),
+            label: label.to_owned(),
+            exe: configured_executable_path(),
+            icon: None,
+            args: Vec::new(),
+            only: only.iter().map(|value| (*value).to_owned()).collect(),
+        }];
+        custom_menu_for_configured_entries(&configured, &selected_entries, false)
+    }
+
+    fn custom_menu_for_configured_entries(
+        configured: &[CustomContextMenuItem],
+        selected_entries: &[FileEntry],
+        recursive_search_results_active: bool,
+    ) -> Vec<ContextMenuItem> {
         let targets = selected_entries
             .iter()
             .map(|entry| entry.path.clone())
@@ -2550,14 +2685,6 @@ mod tests {
         let single_directory_open_target = (selected_entries.len() == 1)
             .then(|| directory_new_tab_target(&selected_entries[0]))
             .flatten();
-        let configured = vec![CustomContextMenuItem::Item {
-            label: label.to_owned(),
-            exe: executable,
-            icon: None,
-            args: Vec::new(),
-            only: only.iter().map(|value| (*value).to_owned()).collect(),
-        }];
-
         entry_context_menu_items_with_custom(
             single_directory_open_target,
             selected_entries.len(),
@@ -2565,10 +2692,10 @@ mod tests {
             selected_directory_count,
             false,
             false,
-            false,
-            &configured,
+            recursive_search_results_active,
+            configured,
             &targets,
-            &selected_entries,
+            selected_entries,
         )
     }
 
@@ -4091,6 +4218,7 @@ mod tests {
         let working_directory = PathBuf::from("invoked");
         let configured = vec![
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4098,9 +4226,11 @@ mod tests {
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
+                in_paths: Vec::new(),
                 label: "Tools".to_owned(),
                 icon: None,
                 items: vec![CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Deep inspect".to_owned(),
                     exe: executable.clone(),
                     icon: None,
@@ -4178,6 +4308,7 @@ mod tests {
         let targets = vec![PathBuf::from("a.txt")];
         let configured = vec![
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Image icon".to_owned(),
                 exe: command.clone(),
                 icon: Some(image_icon.clone()),
@@ -4185,6 +4316,7 @@ mod tests {
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Executable icon".to_owned(),
                 exe: command.clone(),
                 icon: Some(icon_executable.clone()),
@@ -4231,6 +4363,7 @@ mod tests {
         let image_icon = unique_temp_dir("custom-submenu-image-icon").join("tools.ico");
         let targets = vec![PathBuf::from("a.txt")];
         let child = CustomContextMenuItem::Item {
+            in_paths: Vec::new(),
             label: "Inspect".to_owned(),
             exe: executable,
             icon: None,
@@ -4239,11 +4372,13 @@ mod tests {
         };
         let configured = vec![
             CustomContextMenuItem::Submenu {
+                in_paths: Vec::new(),
                 label: "Image tools".to_owned(),
                 icon: Some(image_icon.clone()),
                 items: vec![child.clone()],
             },
             CustomContextMenuItem::Submenu {
+                in_paths: Vec::new(),
                 label: "Executable tools".to_owned(),
                 icon: Some(icon_executable.clone()),
                 items: vec![child],
@@ -4285,6 +4420,7 @@ mod tests {
         let action_url = "https://example.com/action.svg";
         let submenu_url = "https://example.com/submenu.ico";
         let child = CustomContextMenuItem::Item {
+            in_paths: Vec::new(),
             label: "Inspect".to_owned(),
             exe: executable.clone(),
             icon: None,
@@ -4293,6 +4429,7 @@ mod tests {
         };
         let configured = vec![
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "URL action".to_owned(),
                 exe: executable,
                 icon: Some(PathBuf::from(action_url)),
@@ -4300,6 +4437,7 @@ mod tests {
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
+                in_paths: Vec::new(),
                 label: "URL submenu".to_owned(),
                 icon: Some(PathBuf::from(submenu_url)),
                 items: vec![child],
@@ -4342,6 +4480,7 @@ mod tests {
         let targets = vec![PathBuf::from("a.txt")];
         let configured = vec![
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Missing".to_owned(),
                 exe: missing.clone(),
                 icon: None,
@@ -4349,6 +4488,7 @@ mod tests {
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4356,10 +4496,12 @@ mod tests {
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
+                in_paths: Vec::new(),
                 label: "Tools".to_owned(),
                 icon: None,
                 items: vec![
                     CustomContextMenuItem::Item {
+                        in_paths: Vec::new(),
                         label: "Missing child".to_owned(),
                         exe: missing.clone(),
                         icon: None,
@@ -4367,6 +4509,7 @@ mod tests {
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
+                        in_paths: Vec::new(),
                         label: "Deep inspect".to_owned(),
                         exe: executable.clone(),
                         icon: None,
@@ -4376,9 +4519,11 @@ mod tests {
                 ],
             },
             CustomContextMenuItem::Submenu {
+                in_paths: Vec::new(),
                 label: "Empty".to_owned(),
                 icon: None,
                 items: vec![CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
                     label: "Only missing".to_owned(),
                     exe: missing,
                     icon: None,
@@ -4425,12 +4570,247 @@ mod tests {
     }
 
     #[test]
+    fn contextmenu_in_matches_roots_and_whole_directory_sequences_case_sensitively() {
+        for (filter, directory, expected) in [
+            (
+                "C:/Users/hrmer/Documents/my",
+                "C:/Users/hrmer/Documents/my",
+                true,
+            ),
+            (
+                "C:/Users/hrmer/Documents/my",
+                "C:/Users/hrmer/Documents/my/personal/personal-timeline",
+                true,
+            ),
+            (
+                "C:/Users/hrmer/Documents/my",
+                "C:/Users/hrmer/Documents/my-other",
+                false,
+            ),
+            ("C:/Users/hrmer/Documents/my", "D:/media", false),
+            (
+                "C:/Users/hrmer/Documents/my",
+                "C:/Users/hrmer/Documents/My",
+                false,
+            ),
+            ("C:/media", "c:/media", false),
+            ("C:/media", "D:/media/C:/media", false),
+            ("C:/", "C:/media", true),
+            ("C:", "D:/C:", false),
+            ("/media", "/media", true),
+            ("/media", "/media/films/trailers", true),
+            ("/media", "/sandbox/media", false),
+            ("/media", "/media-other", false),
+            ("/", "/media", true),
+            ("media/films", "E:/my/media/films/trailers", true),
+            ("media/films", "C:/Sandbox/media/films", true),
+            ("media/films", "C:/Sandbox/multimedia/films", false),
+            ("media/films", "/media/filmstrip", false),
+            ("media/films", "/media/extra/films", false),
+            ("media/films", "/Media/films", false),
+            ("media/films", "/media/films/media/films", true),
+            ("media/films/", "/media//films/./trailers/../", true),
+            ("/media/films/../music", "/media/music/live", true),
+            ("/media/films", "/media/films/../music", false),
+            ("/../media", "/media", true),
+            (r"C:\media\films\", "C:/media/films/trailers", true),
+            ("C:/media/films", r"C:\media\films\trailers", true),
+            (r"media\films", "C:/media/films", true),
+            (r"\media", r"\media\films", true),
+            (r"\\server\share\media", r"\\server\share\media\films", true),
+            ("//server/share/media", r"\\server\share\media\films", true),
+            (r"\\server\share\media", r"\\server\other\media", false),
+            (r"\\server\share", r"\\server-other\share", false),
+            (r"\\server\share\media", r"\\server\share\..\media", true),
+        ] {
+            assert_eq!(
+                context_menu_item_matches_in(
+                    &[filter.to_owned()],
+                    &[PathBuf::from(directory)],
+                    CustomContextMenuTarget::Directory,
+                ),
+                expected,
+                "filter {filter:?}, directory {directory:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn contextmenu_in_preserves_posix_backslashes_and_non_unicode_components() {
+        // Exercise POSIX parsing explicitly, even when this test runs on Windows.
+        let path = ContextMenuFilterPath::new(b"/media/films\\trailers/\xff", false);
+        assert!(path.matches(&ContextMenuFilterPath::new(b"/media", false)));
+        assert!(path.matches(&ContextMenuFilterPath::new(b"media/films\\trailers", false)));
+        assert!(!path.matches(&ContextMenuFilterPath::new(b"media/films", false)));
+        assert!(!path.matches(&ContextMenuFilterPath::new(b"media/films/trailers", false)));
+        let path = ContextMenuFilterPath::new(b"//media///films/", false);
+        assert!(path.matches(&ContextMenuFilterPath::new(b"/media/films", false)));
+    }
+
+    #[test]
+    fn contextmenu_in_uses_file_parents_and_folder_paths_for_every_selected_target() {
+        let in_paths = vec!["media/films".to_owned(), "media/music".to_owned()];
+        let file = FileEntry::test("C:/media/films/script.ps1", false, Some(1), None);
+        let folder = FileEntry::test("E:/media/music", true, None, None);
+        let matches = |entries: &[FileEntry]| {
+            context_menu_item_matches_in(&in_paths, &[], CustomContextMenuTarget::Entries(entries))
+        };
+        assert!(matches(&[file.clone(), folder.clone()]));
+        assert!(!matches(&[
+            file.clone(),
+            FileEntry::test("D:/other/script.ps1", false, Some(1), None)
+        ]));
+        assert!(!matches(&[FileEntry::test(
+            "C:/media/films",
+            false,
+            Some(1),
+            None
+        )]));
+        assert!(matches(&[FileEntry::test(
+            "C:/media/films",
+            true,
+            None,
+            None
+        )]));
+        assert!(!matches(&[]));
+        assert!(!context_menu_item_matches_in(
+            &in_paths,
+            &[],
+            CustomContextMenuTarget::Directory
+        ));
+        assert!(context_menu_item_matches_in(
+            &[],
+            &[],
+            CustomContextMenuTarget::Entries(&[])
+        ));
+
+        let link = FileEntry::test_directory_link(
+            "C:/media/films/link",
+            crate::explorer::entry::DirectoryLinkKind::ShellShortcut {
+                target: PathBuf::from("D:/other"),
+                target_kind: crate::explorer::entry::ShellShortcutTargetKind::Directory,
+            },
+        );
+        assert!(matches(&[link]));
+    }
+
+    #[test]
+    fn configured_in_combines_with_only_and_handles_search_selections() {
+        let item: CustomContextMenuItem = serde_json::from_value(serde_json::json!({
+            "label": "Run script", "exe": configured_executable_path(),
+            "only": [".ps1"], "in": ["media/films", "media/music"]
+        }))
+        .unwrap();
+        for (paths, expected) in [
+            (vec!["C:/media/films/a.ps1"], true),
+            (vec!["C:/media/films/a.ps1", "E:/media/music/b.ps1"], true),
+            (vec!["C:/media/films/a.ps1", "E:/other/b.ps1"], false),
+            (vec!["C:/media/films/a.ps1", "E:/media/music/b.txt"], false),
+        ] {
+            let entries = paths
+                .iter()
+                .map(|path| FileEntry::test(path, false, Some(1), None))
+                .collect::<Vec<_>>();
+            for recursive in [false, true] {
+                let menu = custom_menu_for_configured_entries(
+                    std::slice::from_ref(&item),
+                    &entries,
+                    recursive,
+                );
+                assert_eq!(
+                    menu_has_label(&menu, "Run script"),
+                    expected,
+                    "{paths:?}, recursive={recursive}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn configured_in_intersects_nested_groups_and_omits_empty_groups() {
+        let item: CustomContextMenuItem = serde_json::from_value(serde_json::json!({
+            "label": "Media", "in": "C:/media",
+            "items": [{
+                "label": "Tools", "in": ["media/films", "media/music"],
+                "items": [
+                    {"label": "Film tool", "exe": configured_executable_path(), "in": "media/films"},
+                    {"label": "Music tool", "exe": configured_executable_path(), "in": "media/music"}
+                ]
+            }]
+        })).unwrap();
+        for (path, expected_child) in [
+            ("C:/media/films/a.ps1", Some("Film tool")),
+            ("C:/media/music/a.ps1", Some("Music tool")),
+            ("D:/media/films/a.ps1", None),
+            ("C:/media/pictures/a.ps1", None),
+        ] {
+            let entries = [FileEntry::test(path, false, Some(1), None)];
+            let menu =
+                custom_menu_for_configured_entries(std::slice::from_ref(&item), &entries, false);
+            assert_eq!(
+                menu_tree_has_label(&menu, "Media"),
+                expected_child.is_some()
+            );
+            assert_eq!(
+                menu_tree_has_label(&menu, "Tools"),
+                expected_child.is_some()
+            );
+            assert_eq!(
+                menu_tree_has_label(&menu, "Film tool"),
+                expected_child == Some("Film tool")
+            );
+            assert_eq!(
+                menu_tree_has_label(&menu, "Music tool"),
+                expected_child == Some("Music tool")
+            );
+        }
+        let group: CustomContextMenuItem = serde_json::from_value(serde_json::json!({
+            "label": "Empty after filtering", "items": [{
+                "label": "Film tool", "exe": configured_executable_path(), "in": "media/films"
+            }]
+        }))
+        .unwrap();
+        let entries = [FileEntry::test("C:/other/a.ps1", false, Some(1), None)];
+        let menu = custom_menu_for_configured_entries(&[group], &entries, false);
+        assert!(!menu_tree_has_label(&menu, "Empty after filtering"));
+        assert_eq!(
+            menu.len(),
+            custom_menu_for_configured_entries(&[], &entries, false).len()
+        );
+    }
+
+    #[test]
+    fn configured_in_filters_builtin_actions_and_background_menus() {
+        let configured: Vec<CustomContextMenuItem> = serde_json::from_value(serde_json::json!([
+            {"label": "Media ZIP", "action": "compress", "only": ["*file", "*folder"], "in": "media/films"},
+            {"label": "Film tools", "in": "media/films", "items": [
+                {"label": "Directory tool", "exe": configured_executable_path(), "only": ["*directory"]},
+                {"label": "Entry tool", "exe": configured_executable_path()}
+            ]}
+        ])).unwrap();
+        for (path, expected) in [("C:/media/films/a.ps1", true), ("C:/other/a.ps1", false)] {
+            let entries = [FileEntry::test(path, false, Some(1), None)];
+            let menu = custom_menu_for_configured_entries(&configured, &entries, false);
+            assert_eq!(menu_tree_has_label(&menu, "Media ZIP"), expected);
+        }
+        for (path, expected) in [("C:/media/films", true), ("C:/other", false)] {
+            let menu =
+                folder_context_menu_items_with_custom(Path::new(path), false, "%Y", &configured);
+            assert_eq!(menu_tree_has_label(&menu, "Film tools"), expected);
+            assert_eq!(menu_tree_has_label(&menu, "Directory tool"), expected);
+            assert!(!menu_tree_has_label(&menu, "Entry tool"));
+            assert!(!menu_tree_has_label(&menu, "Media ZIP"));
+        }
+    }
+
+    #[test]
     fn configured_entry_items_filter_by_only_extensions() {
         let executable = configured_executable_path();
         let targets = vec![PathBuf::from("README.TXT")];
         let selected_entries = vec![FileEntry::test("README.TXT", false, Some(1), None)];
         let configured = vec![
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Text tool".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4438,6 +4818,7 @@ mod tests {
                 only: vec!["txt".to_owned(), ".MD".to_owned()],
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Image tool".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4445,6 +4826,7 @@ mod tests {
                 only: vec!["png".to_owned()],
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Any tool".to_owned(),
                 exe: executable,
                 icon: None,
@@ -4690,6 +5072,7 @@ mod tests {
     #[test]
     fn compress_action_requires_same_parent_and_is_hidden_in_recursive_search() {
         let configured = vec![CustomContextMenuItem::Action {
+            in_paths: Vec::new(),
             label: "Compress".to_owned(),
             action: ContextMenuAction::Compress,
             icon: None,
@@ -4766,6 +5149,7 @@ mod tests {
     fn configured_entry_only_filters_require_every_selected_file_to_match() {
         let executable = configured_executable_path();
         let configured = vec![CustomContextMenuItem::Item {
+            in_paths: Vec::new(),
             label: "Code tool".to_owned(),
             exe: executable,
             icon: None,
@@ -4835,9 +5219,11 @@ mod tests {
         let targets = vec![PathBuf::from("README.txt")];
         let selected_entries = vec![FileEntry::test("README.txt", false, Some(1), None)];
         let configured = vec![CustomContextMenuItem::Submenu {
+            in_paths: Vec::new(),
             label: "Tools".to_owned(),
             icon: None,
             items: vec![CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Image tool".to_owned(),
                 exe: executable,
                 icon: None,
@@ -4868,11 +5254,13 @@ mod tests {
         let executable = configured_executable_path();
         let configured = vec![
             CustomContextMenuItem::Submenu {
+                in_paths: Vec::new(),
                 label: "Empty".to_owned(),
                 icon: None,
                 items: Vec::new(),
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Implicit entry-only".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4880,6 +5268,7 @@ mod tests {
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Inspect directory".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4887,6 +5276,7 @@ mod tests {
                 only: vec!["*directory".to_owned()],
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Png or directory".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4894,6 +5284,7 @@ mod tests {
                 only: vec![".png".to_owned(), "*directory".to_owned()],
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Text-only directory".to_owned(),
                 exe: executable.clone(),
                 icon: None,
@@ -4901,6 +5292,7 @@ mod tests {
                 only: vec!["txt".to_owned()],
             },
             CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
                 label: "Folder-only directory".to_owned(),
                 exe: executable,
                 icon: None,
@@ -4965,6 +5357,7 @@ mod tests {
         .unwrap();
         let targets = vec![PathBuf::from("a.txt")];
         let configured = vec![CustomContextMenuItem::Item {
+            in_paths: Vec::new(),
             label: "Open in Zed".to_owned(),
             exe: executable.clone(),
             icon: None,
