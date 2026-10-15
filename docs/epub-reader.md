@@ -3,6 +3,10 @@
 Explorer's reader uses local EPUB files and native GPUI pagination. The three
 quality milestones extend the existing renderer and persistence format.
 
+Each EPUB file has at most one reader window. Opening it again brings the
+existing window forward without resetting its reading position. Different files,
+including identical copies at different paths, can be open in separate windows.
+
 ## Milestone 1: content and reliability
 
 - Scene separators, explicit verse line breaks, preformatted text, monospace

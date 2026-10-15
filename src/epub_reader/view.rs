@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -51,6 +51,23 @@ const WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
 const PAGE_CACHE_SIZE: usize = 8;
 
 pub(crate) fn open_epub_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
+    let source_path = normalized_source_path(&path);
+    for handle in cx.windows() {
+        let Some(handle) = handle.downcast::<Reader>() else {
+            continue;
+        };
+        let matches = handle
+            .read(cx)
+            .is_ok_and(|reader| reader.source_path == source_path);
+        if matches
+            && handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            cx.activate(true);
+            return Ok(());
+        }
+    }
     state::initialize(cx);
     let displays = cx
         .displays()
@@ -96,6 +113,26 @@ pub(crate) fn open_epub_window(path: PathBuf, cx: &mut App) -> Result<(), String
     Ok(())
 }
 
+fn normalized_source_path(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    // Resolve existing paths before removing `..`, which may follow a symlink.
+    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
+        return canonical;
+    }
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if normalized.file_name().is_some() => {
+                normalized.pop();
+            }
+            Component::ParentDir if normalized.has_root() => {}
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
 #[derive(Clone, Copy, Debug)]
 enum PageRequest {
     Index(isize),
@@ -133,6 +170,7 @@ impl ChapterLayout {
 struct Reader {
     focus_handle: FocusHandle,
     title: String,
+    source_path: PathBuf,
     should_move_window: bool,
     book: Option<Arc<Book>>,
     fingerprint: Option<Fingerprint>,
@@ -234,6 +272,7 @@ impl Reader {
         let mut reader = Self {
             focus_handle,
             title,
+            source_path: normalized_source_path(&path),
             should_move_window: false,
             book: None,
             fingerprint: None,
@@ -3444,6 +3483,163 @@ fn normalized_wheel_delta(delta: gpui::ScrollDelta) -> gpui::ScrollDelta {
 mod tests {
     use super::*;
     use gpui::{Modifiers, ScrollDelta, TestAppContext};
+
+    #[gpui::test]
+    fn repeated_epub_opens_reuse_loading_and_loaded_reader(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        fixture(&path);
+        cx.update(|cx| open_epub_window(path.clone(), cx).unwrap());
+        let handle = cx.windows()[0].downcast::<Reader>().unwrap();
+        let reader = handle.root(cx).unwrap();
+        // Do not run the executor between opens: the book is still loading.
+        assert!(reader.read_with(cx, |reader, _| reader.book.is_none()));
+        cx.update(|cx| open_epub_window(path.clone(), cx).unwrap());
+        assert!(cx.windows() == vec![handle.into()]);
+        assert_eq!(handle.root(cx).unwrap(), reader);
+
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        settle(&reader, &mut visual);
+        reader.update(cx, |reader, cx| reader.turn(1, cx));
+        settle(&reader, &mut visual);
+        let location = reader.read_with(cx, |reader, _| {
+            assert!(reader.book.is_some());
+            assert_ne!(reader.anchor, ContentPoint::default());
+            (reader.href.clone(), reader.anchor, reader.page_index)
+        });
+        cx.update(|cx| open_epub_window(path, cx).unwrap());
+        assert!(cx.windows() == vec![handle.into()]);
+        assert_eq!(handle.root(cx).unwrap(), reader);
+        reader.read_with(cx, |reader, _| {
+            assert_eq!(
+                (reader.href.clone(), reader.anchor, reader.page_index),
+                location
+            );
+            assert!(reader.load_task.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn distinct_epub_files_keep_separate_windows_and_focus_the_requested_file(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("book.epub");
+        let copy = dir.path().join("copy.epub");
+        let other = dir.path().join("other.epub");
+        fixture(&first);
+        std::fs::copy(&first, &copy).unwrap();
+        super::super::tests::write_book(
+            &other,
+            "3.0",
+            "",
+            &[(
+                "other.xhtml",
+                "<html><body><p>Another book.</p></body></html>",
+            )],
+            &[],
+        );
+        // Include a non-reader window to exercise root-type filtering.
+        cx.add_empty_window();
+        let unrelated = cx.windows()[0];
+        let mut handles = Vec::new();
+        for path in [&first, &copy, &other] {
+            cx.update(|cx| open_epub_window(path.clone(), cx).unwrap());
+            let handle = cx
+                .windows()
+                .into_iter()
+                .find(|handle| *handle != unrelated && !handles.contains(handle))
+                .unwrap();
+            handles.push(handle);
+        }
+        assert_eq!(cx.windows().len(), 4);
+        for (path, handle) in [&first, &copy, &other].into_iter().zip(handles) {
+            unrelated
+                .update(cx, |_, window, _| window.activate_window())
+                .unwrap();
+            cx.update(|cx| open_epub_window(path.clone(), cx).unwrap());
+            assert_eq!(cx.windows().len(), 4);
+            assert!(cx.update(|cx| cx.active_window()) == Some(handle));
+        }
+    }
+
+    #[gpui::test]
+    fn epub_path_aliases_reuse_the_same_window(cx: &mut TestAppContext) {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let path = dir.path().join("book.epub");
+        fixture(&path);
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        cx.update(|cx| open_epub_window(path.clone(), cx).unwrap());
+        let handle = cx.windows()[0];
+        for alias in [
+            path.strip_prefix(&cwd).unwrap().to_path_buf(),
+            dir.path().join("subdir/.././book.epub"),
+            std::fs::canonicalize(&path).unwrap(),
+        ] {
+            cx.update(|cx| open_epub_window(alias, cx).unwrap());
+            assert!(cx.windows() == vec![handle]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn epub_symlink_alias_reuses_the_same_window(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.epub");
+        let alias = dir.path().join("alias.epub");
+        fixture(&path);
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        cx.update(|cx| open_epub_window(alias, cx).unwrap());
+        let handle = cx.windows()[0];
+        cx.update(|cx| open_epub_window(path, cx).unwrap());
+        assert!(cx.windows() == vec![handle]);
+    }
+
+    #[gpui::test]
+    fn errored_epub_reuses_its_window_and_can_reopen_after_close(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.epub");
+        cx.update(|cx| open_epub_window(path.clone(), cx).unwrap());
+        let handle = cx.windows()[0].downcast::<Reader>().unwrap();
+        cx.run_until_parked();
+        let error = handle
+            .read_with(cx, |reader, _| reader.error.clone())
+            .unwrap();
+        assert!(error.is_some());
+        cx.update(|cx| {
+            open_epub_window(dir.path().join("absent/../missing.epub"), cx).unwrap()
+        });
+        assert!(cx.windows() == vec![handle.into()]);
+        assert_eq!(
+            handle.read_with(cx, |reader, _| reader.error.clone()).unwrap(),
+            error
+        );
+        handle
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        assert!(cx.windows().is_empty());
+        cx.update(|cx| open_epub_window(path, cx).unwrap());
+        assert_eq!(cx.windows().len(), 1);
+        assert!(cx.windows()[0] != handle.into());
+    }
+
+    #[gpui::test]
+    fn epub_windows_respect_case_sensitive_filesystems(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let lower = dir.path().join("book.epub");
+        let upper = dir.path().join("BOOK.EPUB");
+        fixture(&lower);
+        let case_sensitive = !upper.exists();
+        if case_sensitive {
+            std::fs::copy(&lower, &upper).unwrap();
+        }
+        cx.update(|cx| {
+            open_epub_window(lower, cx).unwrap();
+            open_epub_window(upper, cx).unwrap();
+        });
+        assert_eq!(cx.windows().len(), if case_sensitive { 2 } else { 1 });
+    }
 
     fn svg_cover(reference: &str) -> String {
         format!(
