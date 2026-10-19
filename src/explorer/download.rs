@@ -477,7 +477,16 @@ impl ExplorerView {
         download: ClipboardDownload,
         cx: &mut Context<Self>,
     ) {
-        if portable_devices::is_portable_path(&self.path) || !self.path.is_dir() {
+        self.start_clipboard_download_in(download, self.path.clone(), cx);
+    }
+
+    pub(super) fn start_clipboard_download_in(
+        &mut self,
+        download: ClipboardDownload,
+        destination: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if portable_devices::is_portable_path(&destination) || !destination.is_dir() {
             self.set_error_notice("Could not download to this location.".to_owned());
             return;
         }
@@ -487,7 +496,7 @@ impl ExplorerView {
                 match super::remote_fs::RemoteLocation::parse(download.url.as_str()) {
                     Ok(location) => self.start_native_transfer(
                         vec![location.provider_path()],
-                        self.path.clone(),
+                        destination.clone(),
                         false,
                         cx,
                     ),
@@ -498,7 +507,7 @@ impl ExplorerView {
                 }
                 return;
             }
-            self.enqueue_remote_download(download, cx);
+            self.enqueue_remote_download(download, destination, cx);
             return;
         }
 
@@ -506,7 +515,6 @@ impl ExplorerView {
 
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.wrapping_add(1);
-        let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
             speed_tracker: Default::default(),
             output_paths: Vec::new(),
@@ -560,10 +568,15 @@ impl ExplorerView {
         cx.notify();
     }
 
-    fn enqueue_remote_download(&mut self, download: ClipboardDownload, cx: &mut Context<Self>) {
+    fn enqueue_remote_download(
+        &mut self,
+        download: ClipboardDownload,
+        destination: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         self.begin_download_batch_if_needed();
         self.pending_remote_downloads
-            .push_back((download, self.path.clone()));
+            .push_back((download, destination.clone()));
         if self.active_remote_download.is_none() {
             self.start_next_remote_download(cx);
         }
@@ -860,7 +873,16 @@ impl ExplorerView {
         downloads: Vec<ClipboardVideoDownload>,
         cx: &mut Context<Self>,
     ) {
-        if portable_devices::is_portable_path(&self.path) || !self.path.is_dir() {
+        self.start_video_downloads_in(downloads, self.path.clone(), cx);
+    }
+
+    pub(super) fn start_video_downloads_in(
+        &mut self,
+        downloads: Vec<ClipboardVideoDownload>,
+        destination: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if portable_devices::is_portable_path(&destination) || !destination.is_dir() {
             self.set_error_notice("Could not download to this location.");
             return;
         }
@@ -875,7 +897,13 @@ impl ExplorerView {
             .unwrap_or_default();
 
         for download in downloads {
-            self.start_video_download(download, executable.clone(), options.clone(), cx);
+            self.start_video_download(
+                download,
+                executable.clone(),
+                options.clone(),
+                destination.clone(),
+                cx,
+            );
         }
     }
 
@@ -884,6 +912,7 @@ impl ExplorerView {
         download: ClipboardVideoDownload,
         executable: PathBuf,
         options: Vec<String>,
+        destination: PathBuf,
         cx: &mut Context<Self>,
     ) {
         self.begin_download_batch_if_needed();
@@ -891,7 +920,6 @@ impl ExplorerView {
         let ClipboardVideoDownload { url, site_domain } = download;
         let id = self.next_download_id;
         self.next_download_id = self.next_download_id.wrapping_add(1);
-        let destination = self.path.clone();
         self.download_notice_rows.push(DownloadNoticeRow {
             speed_tracker: Default::default(),
             output_paths: Vec::new(),

@@ -1143,6 +1143,8 @@ struct WindowsFileDataObject {
     test_shell_id_list: Option<Vec<u8>>,
     #[cfg(test)]
     test_fail_shell_get_data: bool,
+    #[cfg(test)]
+    test_url_formats: Vec<(u16, Vec<u8>)>,
 }
 
 #[allow(non_snake_case)]
@@ -1165,14 +1167,15 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
         } else {
             #[cfg(test)]
             {
-                if format == *TEST_SHELL_ID_LIST_FORMAT {
+                if let Some((_, bytes)) = self.test_url_formats.iter().find(|(id, _)| *id == format)
+                {
+                    allocate_global_payload(bytes)?
+                } else if format == *TEST_SHELL_ID_LIST_FORMAT {
                     if self.test_fail_shell_get_data {
                         return Err(DV_E_FORMATETC.into());
                     }
                     allocate_global_payload(
-                        self.test_shell_id_list
-                            .as_deref()
-                            .ok_or(DV_E_FORMATETC)?,
+                        self.test_shell_id_list.as_deref().ok_or(DV_E_FORMATETC)?,
                     )?
                 } else {
                     return Err(DV_E_FORMATETC.into());
@@ -1212,8 +1215,16 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
             && is_clipboard_hglobal_format(pformatetc, *TEST_SHELL_ID_LIST_FORMAT);
         #[cfg(not(test))]
         let shell_id_list_supported = false;
+        #[cfg(test)]
+        let url_supported = self
+            .test_url_formats
+            .iter()
+            .any(|(format, _)| is_clipboard_hglobal_format(pformatetc, *format));
+        #[cfg(not(test))]
+        let url_supported = false;
 
         if hdrop_supported
+            || url_supported
             || (self.internal_token.is_some()
                 && is_clipboard_hglobal_format(pformatetc, *INTERNAL_DRAG_FORMAT))
             || shell_id_list_supported
@@ -1389,6 +1400,8 @@ fn start_windows_external_paths_drag(
             test_shell_id_list: None,
             #[cfg(test)]
             test_fail_shell_get_data: false,
+            #[cfg(test)]
+            test_url_formats: Vec::new(),
         }
         .into();
         let drop_source: IDropSource = WindowsFileDragSource.into();
@@ -1717,10 +1730,119 @@ fn external_paths_from_data_object(data_object: &IDataObject) -> Option<External
     match hdrop_paths_from_data_object(data_object) {
         HdropPaths::Paths(paths) => Some(ExternalPaths::new(paths)),
         HdropPaths::Unavailable => {
-            shell_item_paths_from_data_object(data_object).map(ExternalPaths::new)
+            if let Some(paths) =
+                shell_item_paths_from_data_object(data_object).filter(|paths| !paths.is_empty())
+            {
+                return Some(ExternalPaths::new(paths));
+            }
+            external_urls_from_data_object(data_object)
         }
         HdropPaths::Invalid => None,
     }
+}
+
+fn browser_shortcut_title(data_object: &IDataObject) -> Option<String> {
+    let format =
+        dropeffect_format_etc(
+            unsafe { RegisterClipboardFormatW(w!("FileGroupDescriptorW")) } as u16,
+        );
+    let mut medium = unsafe { data_object.GetData(&format) }.ok()?;
+    let title = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+        unsafe {
+            let global = medium.u.hGlobal;
+            let data = GlobalLock(global);
+            let title =
+                if !data.is_null() && GlobalSize(global) >= size_of::<FILEGROUPDESCRIPTORW>() {
+                    let descriptor = std::ptr::read_unaligned(data.cast::<FILEGROUPDESCRIPTORW>());
+                    if descriptor.cItems == 1 {
+                        let files = descriptor.fgd;
+                        let units = files[0].cFileName;
+                        String::from_utf16(
+                            &units[..units.iter().position(|&c| c == 0).unwrap_or(units.len())],
+                        )
+                        .ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            if !data.is_null() {
+                let _ = GlobalUnlock(global);
+            }
+            title
+        }
+    } else {
+        None
+    };
+    unsafe { ReleaseStgMedium(&mut medium) };
+    title.and_then(|name| {
+        let (title, extension) = name.rsplit_once('.')?;
+        (extension.eq_ignore_ascii_case("url") && !title.trim().is_empty())
+            .then(|| title.to_owned())
+    })
+}
+
+fn external_urls_from_data_object(data_object: &IDataObject) -> Option<ExternalPaths> {
+    for (format_id, browser) in [
+        (
+            unsafe { RegisterClipboardFormatW(w!("text/x-moz-url")) },
+            true,
+        ),
+        (
+            unsafe { RegisterClipboardFormatW(w!("UniformResourceLocatorW")) },
+            false,
+        ),
+        (CF_UNICODETEXT.0 as u32, false),
+    ] {
+        let format = dropeffect_format_etc(format_id as u16);
+        if unsafe { data_object.QueryGetData(&format) } != S_OK {
+            continue;
+        }
+        let Ok(mut medium) = (unsafe { data_object.GetData(&format) }) else {
+            continue;
+        };
+        let text = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+            unsafe {
+                let global = medium.u.hGlobal;
+                let size = GlobalSize(global);
+                let data = GlobalLock(global);
+                let text = if !data.is_null() && size <= 1024 * 1024 {
+                    let units = std::slice::from_raw_parts(data.cast::<u16>(), size / 2);
+                    String::from_utf16(
+                        &units[..units.iter().position(|&c| c == 0).unwrap_or(units.len())],
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+                if !data.is_null() {
+                    let _ = GlobalUnlock(global);
+                }
+                text
+            }
+        } else {
+            None
+        };
+        unsafe { ReleaseStgMedium(&mut medium) };
+        if let Some(text) = text {
+            let payload = if browser {
+                ExternalPaths::from_browser_url_list(&text)
+            } else {
+                ExternalPaths::from_uri_list(&text)
+            };
+            if let Some(payload) = payload {
+                let mut urls = payload.urls().to_vec();
+                if let [url] = &mut urls[..] {
+                    if url.title.is_none() {
+                        url.title = browser_shortcut_title(data_object);
+                    }
+                }
+                return Some(payload.with_urls(urls));
+            }
+        }
+    }
+    None
 }
 
 struct ActiveWindowsExternalDrop {
@@ -1919,9 +2041,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
 mod external_paths_drag_tests {
     use super::{
         ActiveWindowsExternalDrop, COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree,
-        CoUninitialize, DROPFILES, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE,
-        DROPEFFECT_NONE, IDataObject, ILGetSize, PCWSTR, PendingExternalPathsDrag,
-        SHParseDisplayName, WindowsFileDataObject, build_hdrop_payload, catch_windows_callback,
+        CoUninitialize, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+        DROPFILES, IDataObject, ILGetSize, PCWSTR, PendingExternalPathsDrag, SHParseDisplayName,
+        WindowsFileDataObject, build_hdrop_payload, catch_windows_callback,
         complete_active_windows_external_drop, completed_external_drop_effect,
         external_paths_from_data_object, push_active_windows_external_drop,
         windows_external_drag_completion, windows_external_drag_result,
@@ -2032,6 +2154,8 @@ mod external_paths_drag_tests {
             test_offer_hdrop,
             test_shell_id_list: shell_id_list,
             test_fail_shell_get_data: false,
+            #[cfg(test)]
+            test_url_formats: Vec::new(),
         }
         .into()
     }
@@ -2046,6 +2170,7 @@ mod external_paths_drag_tests {
             test_offer_hdrop: false,
             test_shell_id_list: Some(Vec::new()),
             test_fail_shell_get_data: true,
+            test_url_formats: Vec::new(),
         }
         .into()
     }
@@ -2122,6 +2247,91 @@ mod external_paths_drag_tests {
             [r"C:\Users\test\one.txt", r"C:\Users\test\two.txt"]
         );
         assert_eq!(&payload[payload.len() - 4..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn browser_virtual_shortcut_descriptor_supplies_title() {
+        let _com = TestComApartment::new();
+        let mut descriptor = super::FILEGROUPDESCRIPTORW::default();
+        descriptor.cItems = 1;
+        let name: Vec<_> = "Chrome page.url".encode_utf16().collect();
+        let mut filename = [0u16; 260];
+        filename[..name.len()].copy_from_slice(&name);
+        let mut file = super::FILEDESCRIPTORW::default();
+        file.cFileName = filename;
+        descriptor.fgd = [file];
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(&descriptor).cast::<u8>(),
+                size_of::<super::FILEGROUPDESCRIPTORW>(),
+            )
+        }
+        .to_vec();
+        let data_object: IDataObject = WindowsFileDataObject {
+            paths: Vec::new(),
+            internal_token: None,
+            preferred_effect: DROPEFFECT_COPY,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            test_offer_hdrop: false,
+            test_shell_id_list: None,
+            test_fail_shell_get_data: false,
+            test_url_formats: vec![(
+                unsafe { super::RegisterClipboardFormatW(super::w!("FileGroupDescriptorW")) }
+                    as u16,
+                bytes,
+            )],
+        }
+        .into();
+        assert_eq!(
+            super::browser_shortcut_title(&data_object).as_deref(),
+            Some("Chrome page")
+        );
+    }
+
+    #[test]
+    fn browser_url_data_objects_decode_native_urls_and_titles() {
+        let _com = TestComApartment::new();
+        for (format, text, title) in [
+            (
+                unsafe { super::RegisterClipboardFormatW(super::w!("UniformResourceLocatorW")) }
+                    as u16,
+                "https://example.com/a?x=1#part",
+                None,
+            ),
+            (
+                super::CF_UNICODETEXT.0,
+                "https://example.com/a?x=1#part",
+                None,
+            ),
+            (
+                unsafe { super::RegisterClipboardFormatW(super::w!("text/x-moz-url")) } as u16,
+                "https://example.com/a?x=1#part\nPage title",
+                Some("Page title"),
+            ),
+        ] {
+            let bytes: Vec<_> = text
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let data_object: IDataObject = WindowsFileDataObject {
+                paths: Vec::new(),
+                internal_token: None,
+                preferred_effect: DROPEFFECT_COPY,
+                performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+                logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+                test_offer_hdrop: false,
+                test_shell_id_list: None,
+                test_fail_shell_get_data: false,
+                test_url_formats: vec![(format, bytes)],
+            }
+            .into();
+            let payload = external_paths_from_data_object(&data_object).unwrap();
+            assert!(payload.paths().is_empty());
+            assert_eq!(payload.urls()[0].url, "https://example.com/a?x=1#part");
+            assert_eq!(payload.urls()[0].title.as_deref(), title);
+        }
     }
 
     #[test]

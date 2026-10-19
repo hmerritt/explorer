@@ -4578,6 +4578,87 @@ mod tests {
     }
 
     #[gpui::test]
+    fn paste_url_shortcuts_selects_files_without_rename_and_keeps_existing_files(
+        cx: &mut TestAppContext,
+    ) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let view = observe_active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_string(
+                "https://example.com/a?x=1#part".into(),
+            ))
+        });
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+        let paths: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(paths.len(), 1);
+        let first = paths[0].clone();
+        let original = fs::read(&first).unwrap();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                selected_names(view),
+                vec![first.file_name().unwrap().to_string_lossy().into_owned()]
+            );
+            assert!(!view.rename_is_active_for_path(&first));
+        });
+        cx.dispatch_action(PasteClipboard);
+        cx.run_until_parked();
+        assert_eq!(fs::read(&first).unwrap(), original);
+        let second = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path != &first)
+            .unwrap();
+        assert_eq!(
+            second.file_stem().unwrap().to_string_lossy(),
+            "example.com (2)"
+        );
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                selected_names(view),
+                vec![second.file_name().unwrap().to_string_lossy().into_owned()]
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn url_drop_uses_resolved_folder_and_browser_title(cx: &mut TestAppContext) {
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let view = active_test_view(&tabs, cx);
+        let payload = gpui::ExternalPaths::from_browser_url_list(
+            "https://example.com/?q=one&b=two#part\nExample title",
+        )
+        .unwrap();
+        cx.update(|window, app| {
+            view.update(app, |view, app| {
+                view.drop_external_payload_and_open_dialog(
+                    &payload,
+                    crate::explorer::drag_drop::DropDestination::Directory {
+                        item_path: temp.path().join("folder-link"),
+                        target_path: target.clone(),
+                    },
+                    gpui::Modifiers::default(),
+                    window,
+                    app,
+                );
+            })
+        });
+        cx.run_until_parked();
+        let files: Vec<_> = fs::read_dir(&target)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_stem().unwrap(), "Example title");
+        cx.read_entity(&view, |view, _| assert_eq!(view.path, temp.path()));
+    }
+
+    #[gpui::test]
     fn paste_clipboard_image_saves_file_selects_it_and_starts_rename(cx: &mut TestAppContext) {
         let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
         let view = observe_active_test_view(&tabs, cx);

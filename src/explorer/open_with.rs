@@ -384,6 +384,12 @@ impl ExplorerView {
                 let mut result = Ok(OpenWithOutcome::opened(false));
                 let mut result_path = paths.first().cloned();
                 for path in paths {
+                    if intent == OpenFileIntent::Default {
+                        if let Some(url) = super::url_shortcut::desktop_link_url(&path) {
+                            let _ = cx.update(|cx| cx.open_url(&url));
+                            continue;
+                        }
+                    }
                     result_path = Some(path.clone());
                     let intent = intent.clone();
                     result = cx

@@ -32,7 +32,8 @@ pub(crate) const FILE_CLIPBOARD_MIME_TYPES: [&str; 4] = [
 ];
 
 /// Text mime types that we'll accept from other programs.
-pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
+pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 3] =
+    ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 
 pub(crate) struct Clipboard {
     connection: Connection,
@@ -85,7 +86,7 @@ impl<T: ReceiveData> DataOffer<T> {
         self.mime_types.push(mime_type)
     }
 
-    fn has_mime_type(&self, mime_type: &str) -> bool {
+    pub(super) fn has_mime_type(&self, mime_type: &str) -> bool {
         self.mime_types.iter().any(|t| t == mime_type)
     }
 
@@ -165,7 +166,22 @@ impl<T: ReceiveData> DataOffer<T> {
         };
         let bytes = self.read_bytes(connection, uri_list_mime_type)?;
         let text = String::from_utf8(bytes).ok()?;
-        ClipboardFiles::from_uri_list(&text, operation).map(ClipboardItem::from)
+        ClipboardFiles::from_uri_list(&text, operation)
+            .map(ClipboardItem::from)
+            .or_else(|| {
+                crate::ExternalPaths::from_uri_list(&text)
+                    .filter(|payload| payload.paths().is_empty())
+                    .map(|payload| {
+                        ClipboardItem::new_string(
+                            payload
+                                .urls()
+                                .iter()
+                                .map(|url| url.url.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
+                    })
+            })
     }
 
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {

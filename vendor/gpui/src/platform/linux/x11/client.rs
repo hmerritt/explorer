@@ -7,9 +7,7 @@ use calloop::{
 };
 use collections::HashMap;
 use core::str;
-use http_client::Url;
 use log::Level;
-use smallvec::SmallVec;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashSet},
@@ -1059,9 +1057,17 @@ impl X11Client {
                             state.xdnd_state.other_window,
                         );
                     } else {
-                        if let Some(atom) = [arg2, arg3, arg4]
-                            .into_iter()
-                            .find(|atom| xdnd_is_atom_supported(*atom, &state.atoms))
+                        if let Some(atom) = [
+                            state.atoms.MozUrl,
+                            state.atoms.TextUriList,
+                            state.atoms.UTF8_STRING,
+                            state.atoms.TEXT_PLAIN_UTF8,
+                            state.atoms.TEXT_PLAIN,
+                            state.atoms.TEXT,
+                            state.atoms.STRING,
+                        ]
+                        .into_iter()
+                        .find(|atom| [arg2, arg3, arg4].contains(atom))
                         {
                             state.xdnd_state.drag_type = atom;
                         }
@@ -1153,17 +1159,28 @@ impl X11Client {
                 let Some(reply) = reply else {
                     return Some(());
                 };
-                if let Ok(file_list) = str::from_utf8(&reply.value) {
-                    let paths: SmallVec<[_; 2]> = file_list
-                        .lines()
-                        .filter_map(|path| Url::parse(path).log_err())
-                        .filter_map(|url| url.to_file_path().log_err())
+                let browser = state.xdnd_state.drag_type == state.atoms.MozUrl;
+                let text = if browser {
+                    let units: Vec<_> = reply
+                        .value
+                        .chunks_exact(2)
+                        .map(|v| u16::from_le_bytes([v[0], v[1]]))
                         .collect();
-                    let internal = crate::ExternalPaths::from_internal_uri_list(file_list);
-                    state.xdnd_state.internal = internal.is_some();
+                    String::from_utf16(&units).ok()
+                } else {
+                    str::from_utf8(&reply.value).ok().map(str::to_owned)
+                };
+                if let Some(payload) = text.and_then(|text| {
+                    if browser {
+                        ExternalPaths::from_browser_url_list(text.trim_end_matches('\0'))
+                    } else {
+                        ExternalPaths::from_uri_list(&text)
+                    }
+                }) {
+                    state.xdnd_state.internal = payload.internal_token().is_some();
                     let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                         position: state.xdnd_state.position,
-                        paths: internal.unwrap_or_else(|| crate::ExternalPaths::new(paths)),
+                        paths: payload,
                     });
                     drop(state);
                     window.handle_input(input);
@@ -2308,15 +2325,6 @@ fn check_gtk_frame_extents_supported(
     supported_atom_ids.contains(&atoms._GTK_FRAME_EXTENTS)
 }
 
-fn xdnd_is_atom_supported(atom: u32, atoms: &XcbAtoms) -> bool {
-    atom == atoms.TEXT
-        || atom == atoms.STRING
-        || atom == atoms.UTF8_STRING
-        || atom == atoms.TEXT_PLAIN
-        || atom == atoms.TEXT_PLAIN_UTF8
-        || atom == atoms.TextUriList
-}
-
 fn xdnd_get_supported_atom(
     xcb_connection: &XCBConnection,
     supported_atoms: &XcbAtoms,
@@ -2336,8 +2344,17 @@ fn xdnd_get_supported_atom(
     .log_with_level(Level::Warn)
         && let Some(atoms) = reply.value32()
     {
-        for atom in atoms {
-            if xdnd_is_atom_supported(atom, supported_atoms) {
+        let offered: Vec<_> = atoms.collect();
+        for atom in [
+            supported_atoms.MozUrl,
+            supported_atoms.TextUriList,
+            supported_atoms.UTF8_STRING,
+            supported_atoms.TEXT_PLAIN_UTF8,
+            supported_atoms.TEXT_PLAIN,
+            supported_atoms.TEXT,
+            supported_atoms.STRING,
+        ] {
+            if offered.contains(&atom) {
                 return atom;
             }
         }

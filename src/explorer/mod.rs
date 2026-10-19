@@ -63,6 +63,7 @@ mod thumbnail_io;
 mod tooltip;
 mod trash;
 mod trash_ui;
+mod url_shortcut;
 mod video;
 mod video_hover_preview;
 mod video_thumbnails;

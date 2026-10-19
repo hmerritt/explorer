@@ -88,8 +88,44 @@ pub(super) struct ClipboardMaterialization {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ClipboardTextPayload {
     Downloads(Vec<ClipboardDownload>),
+    Urls(Vec<ClipboardUrlAction>),
     VideoDownloads(Vec<ClipboardVideoDownload>),
     Materialization(ClipboardMaterialization),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum ClipboardUrlAction {
+    Download(ClipboardDownload),
+    Video(ClipboardVideoDownload),
+    Shortcut(super::url_shortcut::UrlShortcut),
+}
+
+pub(super) fn url_action(text: &str, title: Option<String>) -> Option<ClipboardUrlAction> {
+    let url = super::url_shortcut::supported_url(text)?;
+    if let Some(download) = video_download_from_url_text(url.as_str()) {
+        Some(ClipboardUrlAction::Video(download))
+    } else if let Some(download) = download_from_url_text(url.as_str()) {
+        Some(ClipboardUrlAction::Download(download))
+    } else {
+        Some(ClipboardUrlAction::Shortcut(
+            super::url_shortcut::UrlShortcut { url, title },
+        ))
+    }
+}
+
+fn url_actions_from_text(text: &str) -> Option<Vec<ClipboardUrlAction>> {
+    let lines: Vec<_> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines
+        .into_iter()
+        .map(|line| url_action(line, None))
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,6 +183,12 @@ pub(super) enum ClipboardSummaryDetails {
     },
     Downloads {
         count: usize,
+        urls: ClipboardUrlPreview,
+    },
+    Urls {
+        shortcut_count: usize,
+        download_count: usize,
+        video_count: usize,
         urls: ClipboardUrlPreview,
     },
     VideoDownloads {
@@ -562,6 +604,44 @@ fn clipboard_summary_inspection(item: &ClipboardItem) -> Option<ClipboardInspect
     fingerprint_bytes.extend_from_slice(markdown.as_bytes());
 
     let (label, details) = match payload {
+        ClipboardTextPayload::Urls(actions) => {
+            let shortcut_count = actions
+                .iter()
+                .filter(|a| matches!(a, ClipboardUrlAction::Shortcut(_)))
+                .count();
+            let download_count = actions
+                .iter()
+                .filter(|a| matches!(a, ClipboardUrlAction::Download(_)))
+                .count();
+            let video_count = actions
+                .iter()
+                .filter(|a| matches!(a, ClipboardUrlAction::Video(_)))
+                .count();
+            let label = if shortcut_count == actions.len() {
+                clipboard_count_label(shortcut_count, "URL shortcut", "URL shortcuts")
+            } else if shortcut_count == 0 {
+                clipboard_count_label(
+                    download_count + video_count,
+                    "URL download",
+                    "URL downloads",
+                )
+            } else {
+                format!(
+                    "{} URL shortcuts, {} downloads",
+                    shortcut_count,
+                    download_count + video_count
+                )
+            };
+            (
+                label,
+                ClipboardSummaryDetails::Urls {
+                    shortcut_count,
+                    download_count,
+                    video_count,
+                    urls: clipboard_url_preview(&text),
+                },
+            )
+        }
         ClipboardTextPayload::Downloads(downloads) => (
             clipboard_count_label(downloads.len(), "URL download", "URL downloads"),
             ClipboardSummaryDetails::Downloads {
@@ -972,6 +1052,9 @@ pub(super) fn clipboard_text_payload_from_item(
     }
     if let Some(downloads) = downloads_from_text(&text) {
         return Some(ClipboardTextPayload::Downloads(downloads));
+    }
+    if let Some(actions) = url_actions_from_text(&text) {
+        return Some(ClipboardTextPayload::Urls(actions));
     }
     if !text_can_materialize(&text) {
         return None;
@@ -1656,6 +1739,62 @@ mod tests {
     }
 
     #[test]
+    fn url_shortcuts_classify_single_batch_and_mixed_downloads() {
+        let item = ClipboardItem::new_string("https://example.com/a?x=1#frag".into());
+        let Some(ClipboardTextPayload::Urls(actions)) = clipboard_text_payload_from_item(&item)
+        else {
+            panic!("expected URL shortcut");
+        };
+        let ClipboardUrlAction::Shortcut(shortcut) = &actions[0] else {
+            panic!("expected shortcut");
+        };
+        assert_eq!(shortcut.url.as_str(), "https://example.com/a?x=1#frag");
+        assert!(clipboard_item_can_paste(Some(&item)));
+        let item = ClipboardItem::new_string(
+            "https://example.com/
+ftp://example.org/folder/
+https://example.com/file.zip
+https://youtu.be/dQw4w9WgXcQ"
+                .into(),
+        );
+        let Some(ClipboardTextPayload::Urls(actions)) = clipboard_text_payload_from_item(&item)
+        else {
+            panic!("expected mixed URL actions");
+        };
+        assert!(matches!(
+            &actions[..],
+            [
+                ClipboardUrlAction::Shortcut(_),
+                ClipboardUrlAction::Shortcut(_),
+                ClipboardUrlAction::Download(_),
+                ClipboardUrlAction::Video(_)
+            ]
+        ));
+        let summary = clipboard_summary_inspection(&item).unwrap().summary;
+        assert_eq!(summary.label, "2 URL shortcuts, 2 downloads");
+        assert!(matches!(
+            summary.details,
+            ClipboardSummaryDetails::Urls {
+                shortcut_count: 2,
+                download_count: 1,
+                video_count: 1,
+                ..
+            }
+        ));
+        for text in ["mailto:a@example.com", "custom://host/path", "https://"] {
+            assert!(!matches!(
+                clipboard_text_payload_from_item(&ClipboardItem::new_string(text.into())),
+                Some(ClipboardTextPayload::Urls(_))
+            ));
+        }
+        let prose = ClipboardItem::new_string("https://example.com/\nRead this page".into());
+        assert!(matches!(
+            clipboard_text_payload_from_item(&prose),
+            Some(ClipboardTextPayload::Materialization(_))
+        ));
+    }
+
+    #[test]
     fn download_clipboard_accepts_http_files_and_decodes_the_file_name() {
         let item = ClipboardItem::new_string(
             "https://example.com/releases/My%20File.tar.gz?download=1#asset".to_owned(),
@@ -1747,7 +1886,7 @@ mod tests {
     }
 
     #[test]
-    fn video_clipboard_accepts_batches_and_rejects_mixed_url_lists() {
+    fn video_clipboard_accepts_batches_and_classifies_mixed_url_lists() {
         let item = ClipboardItem::new_string(
             "https://youtu.be/dQw4w9WgXcQ\n\n https://www.youtube.com/shorts/aqz-KE-bpKQ "
                 .to_owned(),
@@ -1762,14 +1901,16 @@ mod tests {
         let mixed = ClipboardItem::new_string(
             "https://youtu.be/dQw4w9WgXcQ\nhttps://example.com/video.mp4".to_owned(),
         );
+        let Some(ClipboardTextPayload::Urls(actions)) = clipboard_text_payload_from_item(&mixed)
+        else {
+            panic!("expected mixed URL actions");
+        };
         assert!(matches!(
-            clipboard_text_payload_from_item(&mixed),
-            Some(ClipboardTextPayload::Materialization(
-                ClipboardMaterialization {
-                    file_name: "text.txt",
-                    ..
-                }
-            ))
+            &actions[..],
+            [
+                ClipboardUrlAction::Video(_),
+                ClipboardUrlAction::Download(_)
+            ]
         ));
     }
 

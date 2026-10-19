@@ -616,9 +616,19 @@ pub enum ExternalPathsDragStartResult {
     Failed,
 }
 
-/// A collection of paths from the platform, such as from a file drop.
+/// A URL offered by an external application, optionally with a browser-supplied title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalUrl {
+    /// Absolute URL advertised by the source.
+    pub url: String,
+    /// Optional human-readable title advertised by the source.
+    pub title: Option<String>,
+}
+
+/// Filesystem paths and URLs offered by the platform, such as from an external drop.
 #[derive(Debug, Clone, Default)]
 pub struct ExternalPaths {
+    urls: Vec<ExternalUrl>,
     paths: SmallVec<[PathBuf; 2]>,
     operations: ExternalPathDragOperations,
     internal_token: Option<String>,
@@ -628,6 +638,7 @@ impl ExternalPaths {
     /// Create a collection of platform file paths.
     pub fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
         Self {
+            urls: Vec::new(),
             paths: paths
                 .into_iter()
                 .filter(|path| !path.as_os_str().is_empty())
@@ -643,6 +654,7 @@ impl ExternalPaths {
         operations: ExternalPathDragOperations,
     ) -> Self {
         Self {
+            urls: Vec::new(),
             paths: paths
                 .into_iter()
                 .filter(|path| !path.as_os_str().is_empty())
@@ -658,6 +670,7 @@ impl ExternalPaths {
     }
     pub(crate) fn from_internal_token(token: String) -> Self {
         Self {
+            urls: Vec::new(),
             paths: SmallVec::new(),
             operations: ExternalPathDragOperations::MOVE,
             internal_token: Some(token),
@@ -673,6 +686,69 @@ impl ExternalPaths {
         Some(Self::from_internal_token(token.to_owned()))
     }
 
+    /// URLs carried by this drop, separate from native filesystem paths.
+    pub fn urls(&self) -> &[ExternalUrl] {
+        &self.urls
+    }
+
+    /// Add URL records without changing the native file payload.
+    pub fn with_urls(mut self, urls: Vec<ExternalUrl>) -> Self {
+        self.urls = urls;
+        self
+    }
+
+    /// Decode URI lists or plain URL text. Prose is never treated as file paths.
+    pub fn from_uri_list(value: &str) -> Option<Self> {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(internal) = Self::from_internal_uri_list(value) {
+            return Some(internal);
+        }
+        let mut paths = Vec::new();
+        let mut urls = Vec::new();
+        for line in value
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            if line.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+                return None;
+            }
+            let url = http_client::Url::parse(line).ok()?;
+            if url.scheme() == "file" {
+                paths.push(url.to_file_path().ok()?);
+            } else {
+                urls.push(ExternalUrl {
+                    url: url.to_string(),
+                    title: None,
+                });
+            }
+        }
+        let payload = Self::new(paths).with_urls(urls);
+        (!payload.is_empty()).then_some(payload)
+    }
+
+    /// Mozilla's browser drag format consists of URL/title line pairs.
+    pub fn from_browser_url_list(value: &str) -> Option<Self> {
+        let mut payload = Self::default();
+        let mut lines = value
+            .trim_start_matches('\u{feff}')
+            .trim_end_matches('\0')
+            .lines();
+        while let Some(url) = lines.next() {
+            let parsed = Self::from_uri_list(url)?;
+            let title = lines
+                .next()
+                .filter(|title| !title.trim().is_empty())
+                .map(str::to_owned);
+            payload.paths.extend(parsed.paths);
+            payload.urls.extend(parsed.urls.into_iter().map(|mut url| {
+                url.title = title.clone();
+                url
+            }));
+        }
+        (!payload.is_empty()).then_some(payload)
+    }
+
     /// Convert this collection of paths into a slice.
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
@@ -683,17 +759,22 @@ impl ExternalPaths {
         self.operations
     }
 
-    /// Returns true when no paths are present.
+    /// Returns true when neither filesystem paths nor URLs are present.
     pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
+        self.paths.is_empty() && self.urls.is_empty()
     }
 
-    /// Encode the paths as a freedesktop-compatible `text/uri-list` payload.
+    /// Encode the paths and URLs as a freedesktop-compatible `text/uri-list` payload.
     pub fn to_uri_list(&self) -> String {
         if let Some(token) = &self.internal_token {
             return format!("# gpui-internal-drag:{token}\r\n");
         }
-        uri_list_for_paths(&self.paths)
+        let mut value = uri_list_for_paths(&self.paths);
+        for url in &self.urls {
+            value.push_str(&url.url);
+            value.push_str("\r\n");
+        }
+        value
     }
 }
 
@@ -893,6 +974,37 @@ mod test {
         assert!(decoded.paths().is_empty());
         assert!(ExternalPaths::from_internal_uri_list("# gpui-internal-drag:../../live").is_none());
     }
+    #[test]
+    fn external_urls_decode_lists_and_browser_titles_without_becoming_paths() {
+        let payload = ExternalPaths::from_uri_list(
+            "# browser URLs\r\nhttps://example.com/a?x=1#part\r\nhttps://example.org/\r\n",
+        )
+        .unwrap();
+        assert!(payload.paths().is_empty());
+        assert!(!payload.is_empty());
+        assert_eq!(payload.urls().len(), 2);
+        assert_eq!(payload.urls()[0].url, "https://example.com/a?x=1#part");
+        let browser = ExternalPaths::from_browser_url_list(
+            "https://example.com/\nA title\nhttps://example.org/\nOther title",
+        )
+        .unwrap();
+        assert_eq!(browser.urls()[0].title.as_deref(), Some("A title"));
+        assert_eq!(browser.urls()[1].title.as_deref(), Some("Other title"));
+        for invalid in [
+            "ordinary text",
+            "https://example.com/\nprose",
+            "",
+            "# comment",
+        ] {
+            assert!(ExternalPaths::from_uri_list(invalid).is_none());
+        }
+        let path = std::env::temp_dir().join("URL drop test.txt");
+        let uri = http_client::Url::from_file_path(&path).unwrap();
+        let files = ExternalPaths::from_uri_list(uri.as_str()).unwrap();
+        assert_eq!(files.paths(), &[path]);
+        assert!(files.urls().is_empty());
+    }
+
     #[test]
     fn external_paths_default_to_copy() {
         let paths = ExternalPaths::new([PathBuf::from("/tmp/a.txt")]);

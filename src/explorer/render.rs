@@ -2696,8 +2696,8 @@ impl ExplorerView {
                     let destination = destination.clone();
                     move |this, paths: &ExternalPaths, window, cx| {
                         this.clear_drop_indicator();
-                        this.drop_external_paths_and_open_dialog(
-                            paths.paths(),
+                        this.drop_external_payload_and_open_dialog(
+                            paths,
                             destination.clone(),
                             window.modifiers(),
                             window,
@@ -3560,7 +3560,10 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         add_current_folder_drop_handlers(
-            div().id("explorer-empty-folder-drop-target").size_full(),
+            div()
+                .id("explorer-empty-folder-drop-target")
+                .debug_selector(|| "explorer-empty-folder-drop-target".to_owned())
+                .size_full(),
             CurrentFolderClickTarget::EmptyFolder,
             cx,
         )
@@ -5432,8 +5435,8 @@ fn add_drop_handlers(
             let destination = destination.clone();
             move |this, paths: &ExternalPaths, window, cx| {
                 this.clear_drop_indicator();
-                this.drop_external_paths_and_open_dialog(
-                    paths.paths(),
+                this.drop_external_payload_and_open_dialog(
+                    paths,
                     destination.clone(),
                     window.modifiers(),
                     window,
@@ -6843,8 +6846,8 @@ fn directory_bar_label(
             let destination = destination.clone();
             move |this, paths: &ExternalPaths, window, cx| {
                 this.clear_drop_indicator();
-                this.drop_external_paths_and_open_dialog(
-                    paths.paths(),
+                this.drop_external_payload_and_open_dialog(
+                    paths,
                     destination.clone(),
                     window.modifiers(),
                     window,
@@ -11295,6 +11298,32 @@ mod tests {
             )
         );
         cx.read_entity(&view, |view, _| assert_eq!(view.path, temp.path()));
+    }
+
+    #[gpui::test]
+    fn browser_url_drop_on_empty_folder_creates_shortcut(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.run_until_parked();
+        let position = run_until_debug_bounds(cx, "explorer-empty-folder-drop-target").center();
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths::from_browser_url_list("https://example.com/\nExample page")
+                .unwrap(),
+        });
+        cx.run_until_parked();
+        cx.simulate_event(gpui::FileDropEvent::Submit { position });
+        cx.run_until_parked();
+        let files: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_stem().unwrap(), "Example page");
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.operation_notice, None);
+            assert!(!view.rename_is_active_for_path(&files[0]));
+        });
     }
 
     #[gpui::test]

@@ -53,6 +53,7 @@ x11rb::atom_manager! {
         XdndActionList,
         TARGETS,
         TextUriList: b"text/uri-list",
+        MozUrl: b"text/x-moz-url",
         UTF8_STRING,
         TEXT,
         STRING,

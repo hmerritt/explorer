@@ -16,8 +16,6 @@ use calloop::{
 use calloop_wayland_source::WaylandSource;
 use collections::HashMap;
 use filedescriptor::Pipe;
-use http_client::Url;
-use smallvec::SmallVec;
 use util::ResultExt;
 use wayland_backend::client::ObjectId;
 use wayland_backend::protocol::WEnum;
@@ -2015,16 +2013,43 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
 
                     data_offer.set_actions(DndAction::Copy | DndAction::Move, DndAction::Copy);
 
+                    let Some(mime_type) = state
+                        .data_offers
+                        .iter()
+                        .find(|offer| offer.inner.id() == data_offer.id())
+                        .and_then(|offer| {
+                            [
+                                "text/x-moz-url",
+                                FILE_LIST_MIME_TYPE,
+                                "text/plain;charset=utf-8",
+                                "UTF8_STRING",
+                                "text/plain",
+                            ]
+                            .into_iter()
+                            .find(|mime| offer.has_mime_type(mime))
+                        })
+                    else {
+                        return;
+                    };
+                    data_offer.accept(serial, Some(mime_type.to_owned()));
                     let pipe = Pipe::new().unwrap();
-                    data_offer.receive(FILE_LIST_MIME_TYPE.to_string(), unsafe {
+                    data_offer.receive(mime_type.to_string(), unsafe {
                         BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
                     });
                     let fd = pipe.read;
                     drop(pipe.write);
 
-                    let read_task = state.common.background_executor.spawn(async {
+                    let read_task = state.common.background_executor.spawn(async move {
                         let buffer = unsafe { read_fd(fd)? };
-                        let text = String::from_utf8(buffer)?;
+                        let text = if mime_type == "text/x-moz-url" {
+                            let units: Vec<_> = buffer
+                                .chunks_exact(2)
+                                .map(|v| u16::from_le_bytes([v[0], v[1]]))
+                                .collect();
+                            String::from_utf16(&units)?
+                        } else {
+                            String::from_utf8(buffer)?
+                        };
                         anyhow::Ok(text)
                     });
 
@@ -2041,26 +2066,26 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 }
                             };
 
-                            let paths: SmallVec<[_; 2]> = file_list
-                                .lines()
-                                .filter_map(|path| Url::parse(path).log_err())
-                                .filter_map(|url| url.to_file_path().log_err())
-                                .collect();
-                            let position = Point::new(x.into(), y.into());
-
-                            let internal = crate::ExternalPaths::from_internal_uri_list(&file_list);
-                            if internal.is_some() {
-                                data_offer.set_actions(DndAction::Move, DndAction::Move);
-                            }
-                            // Prevent dropping arbitrary text from other programs.
-                            if paths.is_empty() && internal.is_none() {
+                            let payload = if mime_type == "text/x-moz-url" {
+                                crate::ExternalPaths::from_browser_url_list(
+                                    file_list.trim_end_matches('\0'),
+                                )
+                            } else {
+                                crate::ExternalPaths::from_uri_list(&file_list)
+                            };
+                            let Some(payload) = payload else {
                                 data_offer.destroy();
                                 return;
+                            };
+                            let position = Point::new(x.into(), y.into());
+                            if payload.internal_token().is_some() {
+                                data_offer.set_actions(DndAction::Move, DndAction::Move);
+                            } else if !payload.urls().is_empty() {
+                                data_offer.set_actions(DndAction::Copy, DndAction::Copy);
                             }
-
                             let input = PlatformInput::FileDrop(FileDropEvent::Entered {
                                 position,
-                                paths: internal.unwrap_or_else(|| crate::ExternalPaths::new(paths)),
+                                paths: payload,
                             });
 
                             let client = this.get_client();

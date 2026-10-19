@@ -186,6 +186,31 @@ fn clipboard_action_label(
         ClipboardSummaryDetails::Image {
             output_file_name, ..
         } => format!("Create {output_file_name} in {destination_name}"),
+        ClipboardSummaryDetails::Urls {
+            shortcut_count,
+            download_count,
+            video_count,
+            ..
+        } => {
+            let downloads = download_count + video_count;
+            if downloads == 0 {
+                format!(
+                    "Create {} in {destination_name}",
+                    count_label(*shortcut_count, "URL shortcut", "URL shortcuts")
+                )
+            } else if *shortcut_count == 0 {
+                format!(
+                    "Download {} to {destination_name}",
+                    count_label(downloads, "item", "items")
+                )
+            } else {
+                format!(
+                    "Create {} and download {} in {destination_name}",
+                    count_label(*shortcut_count, "URL shortcut", "URL shortcuts"),
+                    count_label(downloads, "item", "items")
+                )
+            }
+        }
         ClipboardSummaryDetails::Downloads { count, .. } => format!(
             "Download {} to {destination_name}",
             count_label(*count, "file", "files")
@@ -292,6 +317,9 @@ pub(super) fn clipboard_status_popup_preferred_width(
                 preferred_width =
                     preferred_width.max(detail_value_required_width(&value, popup_font, window));
             }
+        }
+        ClipboardSummaryDetails::Urls { urls, .. } => {
+            preferred_width = preferred_width.max(url_preview_required_width(urls, window));
         }
         ClipboardSummaryDetails::Downloads { count, urls } => {
             for value in [
@@ -415,6 +443,43 @@ fn render_clipboard_summary_details(
                 "clipboard-popup-total-size",
             ))
             .child(render_clipboard_image_preview(preview))
+            .into_any_element(),
+        ClipboardSummaryDetails::Urls {
+            shortcut_count,
+            download_count,
+            video_count,
+            urls,
+        } => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(clipboard_detail_row(
+                "Destination",
+                destination_label,
+                "clipboard-popup-destination",
+            ))
+            .when(shortcut_count > 0, |element| {
+                element.child(clipboard_detail_row(
+                    "Shortcuts",
+                    shortcut_count.to_string(),
+                    "clipboard-popup-shortcut-count",
+                ))
+            })
+            .when(download_count > 0, |element| {
+                element.child(clipboard_detail_row(
+                    "File downloads",
+                    download_count.to_string(),
+                    "clipboard-popup-download-count",
+                ))
+            })
+            .when(video_count > 0, |element| {
+                element.child(clipboard_detail_row(
+                    "Video downloads",
+                    video_count.to_string(),
+                    "clipboard-popup-video-count",
+                ))
+            })
+            .child(render_url_preview(urls))
             .into_any_element(),
         ClipboardSummaryDetails::Downloads { count, urls } => div()
             .flex()

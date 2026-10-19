@@ -1157,6 +1157,20 @@ impl Clipboard {
             let operation = self.kde_cutselection_operation(selection);
             return ClipboardFiles::from_uri_list(&text, operation)
                 .map(ClipboardItem::from)
+                .or_else(|| {
+                    crate::ExternalPaths::from_uri_list(&text)
+                        .filter(|payload| payload.paths().is_empty())
+                        .map(|payload| {
+                            ClipboardItem::new_string(
+                                payload
+                                    .urls()
+                                    .iter()
+                                    .map(|url| url.url.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            )
+                        })
+                })
                 .ok_or(Error::ConversionFailure);
         }
 

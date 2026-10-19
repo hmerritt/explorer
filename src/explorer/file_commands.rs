@@ -293,6 +293,9 @@ impl ExplorerView {
 
         if let Some(payload) = clipboard_text_payload_from_item(&item) {
             match payload {
+                ClipboardTextPayload::Urls(actions) => {
+                    self.apply_url_actions(actions, self.path.clone(), cx);
+                }
                 ClipboardTextPayload::Downloads(downloads) => {
                     for download in downloads {
                         self.start_clipboard_download(download, cx);
@@ -306,6 +309,72 @@ impl ExplorerView {
                 }
             }
         }
+    }
+
+    pub(super) fn apply_url_actions(
+        &mut self,
+        actions: Vec<super::clipboard::ClipboardUrlAction>,
+        destination: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_sidebar_group_view()
+            || !destination.is_dir()
+            || super::remote_fs::is_remote(&destination)
+            || super::archive_fs::is_archive_path(&destination)
+            || super::portable_devices::is_portable_path(&destination)
+            || !ExplorerFs::new().can_mutate(&destination)
+        {
+            self.set_error_notice("Could not create URL content in this location.");
+            cx.notify();
+            return;
+        }
+        self.clear_operation_notice();
+        let mut created = Vec::new();
+        let mut errors = Vec::new();
+        let mut videos = Vec::new();
+        for action in actions {
+            match action {
+                super::clipboard::ClipboardUrlAction::Shortcut(shortcut) => {
+                    match shortcut.create_in(&destination) {
+                        Ok(path) => created.push(path),
+                        Err(error) => errors.push(error),
+                    }
+                }
+                super::clipboard::ClipboardUrlAction::Download(download) => {
+                    self.start_clipboard_download_in(download, destination.clone(), cx)
+                }
+                super::clipboard::ClipboardUrlAction::Video(download) => videos.push(download),
+            }
+        }
+        if !videos.is_empty() {
+            self.start_video_downloads_in(videos, destination.clone(), cx);
+        }
+        if !created.is_empty() {
+            let selection = if destination == self.path {
+                created
+            } else {
+                Vec::new()
+            };
+            self.reload_async_with_options_preserving_live_selection(
+                crate::explorer::view::ReloadMode {
+                    cache_policy:
+                        crate::explorer::remote_directory_cache::DirectoryLoadPolicy::Fresh,
+                    preserve_selection: true,
+                    rebuild_sidebar: true,
+                    preserve_context_menu: false,
+                },
+                selection,
+                true,
+                false,
+                false,
+                cx,
+            );
+            self.emit_filesystem_changed(cx);
+        }
+        if !errors.is_empty() {
+            self.set_error_notice(errors.join("\n"));
+        }
+        cx.notify();
     }
 
     fn paste_file_clipboard(&mut self, clipboard: FileClipboard, cx: &mut Context<Self>) {

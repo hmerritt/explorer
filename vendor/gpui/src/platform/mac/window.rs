@@ -707,7 +707,7 @@ impl MacWindow {
             let () = msg_send![
                 native_window,
                 registerForDraggedTypes:
-                    NSArray::arrayWithObjects(nil, &[NSFilenamesPboardType, ns_string("dev.gpui.internal-drag")])
+                    NSArray::arrayWithObjects(nil, &[NSFilenamesPboardType, ns_string("public.file-url"), ns_string("public.url"), ns_string("public.utf8-plain-text"), ns_string("dev.gpui.internal-drag")])
             ];
             let () = msg_send![
                 native_window,
@@ -2593,17 +2593,52 @@ fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths
         return Some(ExternalPaths::from_internal_token(token.into()));
     }
     let filenames = unsafe { NSPasteboard::propertyListForType(pasteboard, NSFilenamesPboardType) };
-    if filenames == nil {
-        return None;
+    if filenames != nil {
+        for file in unsafe { filenames.iter() } {
+            let path = unsafe {
+                CStr::from_ptr(NSString::UTF8String(file))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            paths.push(PathBuf::from(path));
+        }
+        if !paths.is_empty() {
+            return Some(ExternalPaths::new(paths));
+        }
     }
-    for file in unsafe { filenames.iter() } {
-        let path = unsafe {
-            let f = NSString::UTF8String(file);
-            CStr::from_ptr(f).to_string_lossy().into_owned()
-        };
-        paths.push(PathBuf::from(path))
+    let items: id = unsafe { msg_send![pasteboard, pasteboardItems] };
+    let mut payload = ExternalPaths::default();
+    if items != nil {
+        for item in unsafe { items.iter() } {
+            let read = |kind: &str| -> Option<String> {
+                let value: id = unsafe { msg_send![item, stringForType: ns_string(kind)] };
+                if value == nil {
+                    None
+                } else {
+                    Some(unsafe {
+                        CStr::from_ptr(NSString::UTF8String(value))
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                }
+            };
+            let text = read("public.file-url")
+                .or_else(|| read("public.url"))
+                .or_else(|| read("public.utf8-plain-text"))?;
+            let parsed = ExternalPaths::from_uri_list(&text)?;
+            paths.extend_from_slice(parsed.paths());
+            let title = read("public.url-name");
+            let mut urls = payload.urls().to_vec();
+            urls.extend(parsed.urls().iter().cloned().map(|mut url| {
+                url.title = title.clone();
+                url
+            }));
+            payload = payload.with_urls(urls);
+        }
     }
-    Some(ExternalPaths::new(paths))
+    let urls = payload.urls().to_vec();
+    let payload = ExternalPaths::new(paths).with_urls(urls);
+    (!payload.is_empty()).then_some(payload)
 }
 
 fn start_macos_external_paths_drag(

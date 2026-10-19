@@ -1139,6 +1139,52 @@ impl ExplorerView {
         self.perform_file_drop(&paths, &resolved_destination, modifiers);
     }
 
+    pub(super) fn drop_external_payload_and_open_dialog(
+        &mut self,
+        payload: &gpui::ExternalPaths,
+        destination: DropDestination,
+        modifiers: Modifiers,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !payload.urls().is_empty() {
+            let Some(actions) = payload
+                .urls()
+                .iter()
+                .map(|url| super::clipboard::url_action(&url.url, url.title.clone()))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let target = destination.resolve(&self.path);
+            if !url_drop_target_valid(&target) {
+                return;
+            }
+            self.apply_url_actions(actions, target, cx);
+            // URL sources must never be deleted, including when Shift is held.
+            window.complete_external_paths_drop(1);
+        }
+        if !payload.paths().is_empty() {
+            let modifiers = if payload.urls().is_empty() {
+                modifiers
+            } else {
+                Modifiers {
+                    control: true,
+                    shift: false,
+                    alt: false,
+                    ..modifiers
+                }
+            };
+            self.drop_external_paths_and_open_dialog(
+                payload.paths(),
+                destination,
+                modifiers,
+                window,
+                cx,
+            );
+        }
+    }
+
     pub(super) fn drop_external_paths_and_open_dialog(
         &mut self,
         paths: &[PathBuf],
@@ -1434,6 +1480,21 @@ fn resolve_dragged_value_drop(
     }
 
     if let Some(paths) = dragged_value.downcast_ref::<gpui::ExternalPaths>() {
+        if !paths.urls().is_empty() {
+            let valid = url_drop_target_valid(destination)
+                && paths
+                    .urls()
+                    .iter()
+                    .all(|url| super::clipboard::url_action(&url.url, url.title.clone()).is_some());
+            return DraggedValueDropResolution {
+                resolved: if valid {
+                    ResolvedDrop::Link
+                } else {
+                    ResolvedDrop::Invalid
+                },
+                explicit_operation_required: false,
+            };
+        }
         let paths = normalize_external_drop_paths(paths.paths());
         let validity = external_drop_target_validity(
             destination_kind,
@@ -1457,6 +1518,14 @@ fn resolve_dragged_value_drop(
         resolved: resolve_drop_operation_for_paths(modifiers, false, &[], destination),
         explicit_operation_required: false,
     }
+}
+
+fn url_drop_target_valid(destination: &Path) -> bool {
+    destination.is_dir()
+        && !super::remote_fs::is_remote(destination)
+        && !super::archive_fs::is_archive_path(destination)
+        && !super::portable_devices::is_portable_path(destination)
+        && ExplorerFs::new().can_mutate(destination)
 }
 
 fn normalize_external_drop_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -1848,6 +1917,31 @@ mod tests {
             ),
             ResolvedDrop::Move
         );
+    }
+
+    #[test]
+    fn url_drops_offer_link_feedback_for_folders_and_reject_invalid_urls() {
+        let temp = TempDir::new();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let view = ExplorerView::new(temp.path().to_owned());
+        let payload = gpui::ExternalPaths::from_uri_list("https://example.com/").unwrap();
+        let destination = DropDestination::Directory {
+            item_path: target.clone(),
+            target_path: target,
+        };
+        let indicator = view
+            .drop_indicator_for_value(
+                &payload,
+                &destination,
+                Modifiers::default(),
+                gpui::point(px(1.0), px(1.0)),
+            )
+            .unwrap();
+        assert_eq!(indicator.operation, FileOperationKind::Link);
+        assert!(!view.can_trash_drop_value(&payload));
+        let unsupported = gpui::ExternalPaths::from_uri_list("mailto:a@example.com").unwrap();
+        assert!(!view.can_drop_value(&unsupported, &destination, Modifiers::default()));
     }
 
     #[test]

@@ -1113,7 +1113,20 @@ impl Platform for MacPlatform {
 
         unsafe {
             let types: id = pasteboard.types();
-            let string_item = self.read_string_item_from_clipboard(&state, pasteboard, types);
+            let string_item = self
+                .read_string_item_from_clipboard(&state, pasteboard, types)
+                .or_else(|| {
+                    let value: id = msg_send![pasteboard, stringForType: ns_string("public.url")];
+                    if value == nil {
+                        None
+                    } else {
+                        Some(ClipboardItem::new_string(
+                            CStr::from_ptr(NSString::UTF8String(value))
+                                .to_string_lossy()
+                                .into_owned(),
+                        ))
+                    }
+                });
 
             if string_item
                 .as_ref()

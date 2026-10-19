@@ -104,6 +104,20 @@ pub(crate) fn read_from_clipboard() -> Option<ClipboardItem> {
             ClipboardFormatType::Image => read_image_from_clipboard(item_format),
             ClipboardFormatType::Files => read_files_from_clipboard(),
         });
+        if item.is_none() {
+            let format = register_clipboard_format(windows::core::w!("UniformResourceLocatorW"));
+            if unsafe { IsClipboardFormatAvailable(format).is_ok() } {
+                item = with_clipboard_data(format, |data, size| {
+                    let units = unsafe { std::slice::from_raw_parts(data.cast::<u16>(), size / 2) };
+                    String::from_utf16(
+                        &units[..units.iter().position(|&c| c == 0).unwrap_or(units.len())],
+                    )
+                    .ok()
+                })
+                .flatten()
+                .map(ClipboardItem::new_string);
+            }
+        }
         let markdown = read_utf8_clipboard_format(*CLIPBOARD_MARKDOWN_FORMAT);
         if item.is_none() && markdown.is_some() {
             item = Some(ClipboardItem::new_string(String::new()));
