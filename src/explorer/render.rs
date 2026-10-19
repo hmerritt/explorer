@@ -1284,7 +1284,7 @@ impl ExplorerView {
         Some(overlay.into_any_element())
     }
 
-    fn render_image_hover_preview_overlay(
+    pub(super) fn render_image_hover_preview_overlay(
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
@@ -1416,15 +1416,6 @@ impl ExplorerView {
                 .shadow_md()
                 .rounded(px(IMAGE_HOVER_PREVIEW_RADIUS))
                 .overflow_hidden()
-                .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                    if this.update_image_hover_preview_alt(event.modifiers.alt) {
-                        if !event.modifiers.alt {
-                            this.cancel_video_hover_preview(cx);
-                            this.cancel_text_hover_preview();
-                        }
-                        cx.notify();
-                    }
-                }))
                 .child(content)
                 .into_any_element(),
         )
@@ -1494,6 +1485,21 @@ impl ExplorerView {
 
         self.image_hover_preview_alt = alt;
         true
+    }
+
+    pub(super) fn handle_hover_preview_modifiers(
+        &mut self,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = self.update_image_hover_preview_alt(modifiers.alt);
+        if !modifiers.alt {
+            changed |= self.cancel_video_hover_preview(cx);
+            changed |= self.cancel_text_hover_preview();
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     fn clear_image_hover_preview(&mut self) -> bool {
@@ -4298,12 +4304,8 @@ impl Render for ExplorerView {
             )
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 let drop_indicator_changed = this.update_drop_indicator_modifiers(event.modifiers);
-                let image_hover_changed = this.update_image_hover_preview_alt(event.modifiers.alt);
-                if !event.modifiers.alt {
-                    this.cancel_video_hover_preview(cx);
-                    this.cancel_text_hover_preview();
-                }
-                if drop_indicator_changed || image_hover_changed {
+                this.handle_hover_preview_modifiers(event.modifiers, cx);
+                if drop_indicator_changed {
                     cx.notify();
                 }
             }))
@@ -12856,8 +12858,24 @@ mod tests {
         cx.read_entity(&view, |view, _| {
             assert!(!view.image_hover_preview_alt);
         });
-        cx.update(|window, _| {
+        cx.update(|window, app| {
             assert!(!window.modifiers().alt);
+            view.update(app, |view, cx| {
+                assert!(
+                    view.render_image_hover_preview_overlay(window, cx)
+                        .is_none()
+                );
+            });
+        });
+        cx.simulate_modifiers_change(alt_modifiers());
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(
+                    view.render_image_hover_preview_overlay(window, cx)
+                        .is_some()
+                );
+            });
         });
     }
 

@@ -503,12 +503,49 @@ fn read_utf16_preview(
 mod tests {
     use std::{fs, io::Write};
 
+    use gpui::AppContext;
+
     use super::*;
     use crate::explorer::entry::FileEntry;
     use crate::explorer::test_support::TempDir;
 
     fn preview_entry(name: &str) -> FileEntry {
         FileEntry::test(name, false, Some(1), None)
+    }
+
+    #[gpui::test]
+    fn releasing_alt_cancels_loading_text_and_rejects_late_results(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        let path = temp.path().join("notes.txt");
+        fs::write(&path, "preview text").unwrap();
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            ExplorerView::new_unloaded_with_settings_for_test(
+                temp.path().to_path_buf(),
+                Some(cx.focus_handle()),
+                &crate::settings::ExplorerSettings::default(),
+            )
+        });
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let mut entry = preview_entry("notes.txt");
+                entry.path = path.clone();
+                view.image_hover_preview_alt = true;
+                assert!(matches!(
+                    view.hover_text_preview_for_entry(&entry, 20, cx),
+                    Some(TextHoverPreviewLookup::Loading)
+                ));
+                let generation = view.text_hover_preview.as_ref().unwrap().generation;
+                assert!(view.text_hover_preview_matches(&path, generation));
+                view.handle_hover_preview_modifiers(gpui::Modifiers::default(), cx);
+                assert!(view.text_hover_preview.is_none());
+                assert!(!view.text_hover_preview_matches(&path, generation));
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.text_hover_preview.is_none());
+            assert!(!view.image_hover_preview_alt);
+        });
     }
 
     #[test]

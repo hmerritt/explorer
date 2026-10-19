@@ -7,10 +7,10 @@ use std::{
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity,
-    ExternalPaths, FileDropEvent, FocusHandle, Focusable, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
-    ScrollHandle, SharedString, Styled, Window, canvas, div, font, prelude::*, px, relative, rgb,
-    rgba,
+    ExternalPaths, FileDropEvent, FocusHandle, Focusable, IntoElement, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Window, canvas, div,
+    font, prelude::*, px, relative, rgb, rgba,
 };
 
 use crate::explorer::{
@@ -2472,6 +2472,16 @@ impl Render for ExplorerTabs {
         let mut content = div()
             .font(app_font.clone())
             .key_context(split_key_context)
+            // Shared chrome and sibling panes are outside a pane's keyboard focus path.
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                if let Some(tab) = this.active_tab() {
+                    for pane in &tab.panes {
+                        pane.view.update(cx, |view, cx| {
+                            view.handle_hover_preview_modifiers(event.modifiers, cx);
+                        });
+                    }
+                }
+            }))
             .on_action(cx.listener(Self::handle_new_tab))
             .on_action(cx.listener(Self::handle_new_window))
             .on_action(cx.listener(Self::handle_close_tab))
@@ -3073,6 +3083,171 @@ mod tests {
         &'a mut gpui::VisualTestContext,
     ) {
         test_tabs_with_files(cx, &["a.txt", "b.txt"])
+    }
+
+    #[gpui::test]
+    fn stationary_alt_hover_with_shared_chrome_focus(cx: &mut TestAppContext) {
+        assert_stationary_alt_hover(cx, false, false);
+    }
+
+    #[gpui::test]
+    fn stationary_alt_hover_with_unfocused_split_pane(cx: &mut TestAppContext) {
+        assert_stationary_alt_hover(cx, true, false);
+    }
+
+    #[gpui::test]
+    fn stationary_alt_hover_with_large_icons_and_shared_chrome_focus(cx: &mut TestAppContext) {
+        assert_stationary_alt_hover(cx, false, true);
+    }
+
+    fn assert_stationary_alt_hover(cx: &mut TestAppContext, split: bool, large_icons: bool) {
+        use crate::settings::FileViewMode;
+
+        let temp = TempDir::new();
+        fs::write(temp.path().join("notes.txt"), "preview text").unwrap();
+        fs::write(temp.path().join("unsupported.bin"), [0, 1, 2]).unwrap();
+        let mut settings = ExplorerSettings::default();
+        let mode = if large_icons {
+            FileViewMode::LargeIcons
+        } else {
+            FileViewMode::Details
+        };
+        settings.view.mode = mode;
+        settings.view.mode_media = mode;
+        cx.set_global(SettingsState::for_test(settings));
+        let (tabs, cx) = test_tabs_at_path(cx, temp.path().to_path_buf());
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.view_mode = mode;
+                cx.notify();
+            });
+        });
+
+        if split {
+            cx.update(|window, app| {
+                tabs.update(app, |tabs, cx| {
+                    let focus = cx.focus_handle();
+                    focus.focus(window);
+                    let sibling = cx.new(|_| {
+                        let mut sibling = ExplorerView::new_with_focus_handle_for_test(
+                            temp.path().to_path_buf(),
+                            focus,
+                        );
+                        sibling.set_shared_chrome_hosted(true);
+                        sibling
+                    });
+                    let tab = &mut tabs.tabs[0];
+                    assert!(tab.layout.insert_split(
+                        PaneId(1),
+                        PaneId(2),
+                        SplitDirection::Right,
+                        1
+                    ));
+                    tab.panes.push(ExplorerPane {
+                        id: PaneId(2),
+                        view: sibling,
+                    });
+                    tab.activate_pane(PaneId(2));
+                    cx.notify();
+                });
+            });
+        } else {
+            cx.dispatch_action(SearchEdit);
+        }
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            assert!(!view.read(app).focus_handle(app).is_focused(window));
+        });
+
+        // Entry selectors repeat across panes; use the first pane's geometry.
+        let pane = cx.debug_bounds("explorer-pane-1").unwrap();
+        let entry = cx
+            .debug_bounds(if large_icons {
+                "explorer-large-icon-entry-0"
+            } else {
+                "explorer-entry-0"
+            })
+            .unwrap();
+        let position = gpui::point(pane.left() + px(55.0), entry.center().y);
+        cx.simulate_mouse_move(position, None, Modifiers::default());
+        cx.run_until_parked();
+        let hovered = cx.read_entity(&view, |view, _| {
+            let preview = view
+                .image_hover_preview
+                .as_ref()
+                .expect("hovered text file");
+            assert_eq!(preview.entry.name, "notes.txt");
+            preview.clone()
+        });
+
+        for alt in [true, false, true, false] {
+            cx.simulate_modifiers_change(Modifiers {
+                alt,
+                ..Modifiers::default()
+            });
+            cx.run_until_parked();
+            cx.update(|window, app| {
+                view.update(app, |view, cx| {
+                    assert_eq!(view.image_hover_preview_alt, alt);
+                    assert_eq!(view.image_hover_preview.as_ref(), Some(&hovered));
+                    // Debug bounds retain old overlays, so inspect the current render result.
+                    assert_eq!(
+                        view.render_image_hover_preview_overlay(window, cx)
+                            .is_some(),
+                        alt
+                    );
+                    if !alt {
+                        assert!(view.text_hover_preview.is_none());
+                        assert!(view.video_hover_preview.is_none());
+                    }
+                });
+            });
+        }
+
+        // Allow pending preview work to finish after release; it must stay hidden.
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(
+                    view.render_image_hover_preview_overlay(window, cx)
+                        .is_none()
+                );
+                assert!(view.text_hover_preview.is_none());
+            });
+        });
+
+        let unsupported = cx
+            .debug_bounds(if large_icons {
+                "explorer-large-icon-entry-1"
+            } else {
+                "explorer-entry-1"
+            })
+            .unwrap();
+        let unsupported_position = if large_icons {
+            unsupported.center()
+        } else {
+            gpui::point(position.x, unsupported.center().y)
+        };
+        let blank_position = gpui::point(position.x, pane.bottom() - px(20.0));
+        for position in [unsupported_position, blank_position] {
+            cx.simulate_mouse_move(position, None, Modifiers::default());
+            cx.simulate_modifiers_change(Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            });
+            cx.run_until_parked();
+            cx.update(|window, app| {
+                view.update(app, |view, cx| {
+                    assert!(view.image_hover_preview.is_none());
+                    assert!(
+                        view.render_image_hover_preview_overlay(window, cx)
+                            .is_none()
+                    );
+                });
+            });
+            cx.simulate_modifiers_change(Modifiers::default());
+        }
     }
 
     fn test_tabs_at_path<'a>(

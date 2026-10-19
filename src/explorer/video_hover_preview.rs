@@ -485,6 +485,40 @@ mod tests {
     use crate::explorer::image_thumbnails::ThumbnailSourcePolicy;
 
     #[gpui::test]
+    fn releasing_alt_cancels_video_session_and_rejects_late_frames(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            ExplorerView::new_unloaded_with_settings_for_test(
+                PathBuf::from("preview"),
+                Some(cx.focus_handle()),
+                &crate::settings::ExplorerSettings::default(),
+            )
+        });
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                let path = PathBuf::from("movie.mp4");
+                let cancel = Arc::new(AtomicBool::new(false));
+                view.image_hover_preview_alt = true;
+                view.video_hover_preview = Some(VideoHoverPreviewSession {
+                    path: path.clone(),
+                    size: 400,
+                    generation: 1,
+                    cancel: cancel.clone(),
+                    child: Arc::new(Mutex::new(None)),
+                    task: None,
+                    frame: None,
+                    loading_thumbnail: None,
+                    failed: false,
+                });
+                assert!(view.video_hover_preview_matches(&path, 1));
+                view.handle_hover_preview_modifiers(gpui::Modifiers::default(), cx);
+                assert!(cancel.load(Ordering::Relaxed));
+                assert!(view.video_hover_preview.is_none());
+                assert!(!view.video_hover_preview_matches(&path, 1));
+            });
+        });
+    }
+
+    #[gpui::test]
     fn cache_only_standard_policy_blocks_video_hover_preview_source_playback(
         cx: &mut gpui::TestAppContext,
     ) {
