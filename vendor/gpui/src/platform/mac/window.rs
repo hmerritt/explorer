@@ -2626,7 +2626,7 @@ fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths
                 .or_else(|| read("public.url"))
                 .or_else(|| read("public.utf8-plain-text"))?;
             let parsed = ExternalPaths::from_uri_list(&text)?;
-            paths.extend_from_slice(parsed.paths());
+            paths.extend(parsed.paths().iter().cloned());
             let title = read("public.url-name");
             let mut urls = payload.urls().to_vec();
             urls.extend(parsed.urls().iter().cloned().map(|mut url| {

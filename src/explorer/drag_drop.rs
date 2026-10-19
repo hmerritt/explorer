@@ -1162,6 +1162,7 @@ impl ExplorerView {
             }
             self.apply_url_actions(actions, target, cx);
             // URL sources must never be deleted, including when Shift is held.
+            #[cfg(target_os = "windows")]
             window.complete_external_paths_drop(1);
         }
         if !payload.paths().is_empty() {
