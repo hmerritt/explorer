@@ -168,6 +168,7 @@ img {
   html[data-motion-pending]
     :is(
       [data-hero-reveal],
+      [data-hero-screenshot-reveal],
       [data-reveal],
       [data-section-copy],
       [data-nav-reveal]

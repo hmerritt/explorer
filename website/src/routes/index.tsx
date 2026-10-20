@@ -174,7 +174,7 @@ function Hero({
           <ShareLinks />
         </div>
       </div>
-      <figure className="hero-screenshot">
+      <figure className="hero-screenshot" data-hero-screenshot-reveal>
         <figcaption className="image-caption label">
           <span>A familiar place for your files</span>
           <span>Screenshot</span>
@@ -435,15 +435,17 @@ function GetStarted() {
     <section id="start" className="frame start-section" data-section-motion>
       <SectionBar number="05" label="Get started" note="Built in the open" />
       <div className="start-content">
-        <span className="label">Open source · Free</span>
+        <span className="label" data-reveal>
+          Open source · Free
+        </span>
         <h2 data-reveal>
           Help shape <span className="accent">Explorer</span>.
         </h2>
-        <p>
+        <p data-reveal>
           Found a bug? Have a feature in mind? Report issues, share feedback and
           contribute on GitHub.
         </p>
-        <div className="hero-actions">
+        <div className="hero-actions" data-reveal>
           <ButtonLink href={`${REPOSITORY}/issues`} primary>
             Report an issue
           </ButtonLink>

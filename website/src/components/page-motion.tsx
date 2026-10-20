@@ -48,6 +48,9 @@ export function PageMotion() {
           const hero = query('[data-hero-reveal]')
           gsap.set(hero, { ...hidden })
           opening.to(hero, { ...revealTween(), stagger: 0.08 }, 0)
+          const screenshot = query('[data-hero-screenshot-reveal]')
+          gsap.set(screenshot, { ...hidden })
+          opening.to(screenshot, revealTween(), 0.4)
           const fastForward = () => opening.timeScale(4)
           const inputs = ['wheel', 'pointerdown', 'keydown', 'touchstart']
           inputs.forEach((name) =>
@@ -100,7 +103,8 @@ export function PageMotion() {
             gsap.set(element, { ...hidden })
             ScrollTrigger.create({
               trigger: element,
-              start: group ? 'top 88%' : 'top 85%',
+              // Bottom-of-page content must reveal even when it cannot reach 85%.
+              start: group ? 'top 88%' : 'clamp(top 85%)',
               once: true,
               onEnter: () => {
                 const bounds = group?.getBoundingClientRect()

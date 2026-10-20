@@ -294,7 +294,7 @@ export function Footer() {
   return (
     <footer className="site-footer frame">
       <div className="footer-main">
-        <div className="footer-brand">
+        <div className="footer-brand" data-reveal>
           <a href="#explorer" className="brand">
             <img src="/icon.png" width="40" height="40" alt="" />
             <span>Explorer</span>
@@ -306,7 +306,7 @@ export function Footer() {
           </p>
         </div>
         {groups.map(({ title, links }) => (
-          <nav key={title} aria-label={title}>
+          <nav key={title} aria-label={title} data-reveal>
             <h2 className="label">{title}</h2>
             <ul>
               {links.map(([name, href]) => (
@@ -318,7 +318,7 @@ export function Footer() {
           </nav>
         ))}
       </div>
-      <div className="footer-bottom label">
+      <div className="footer-bottom label" data-reveal>
         <span className="footer-tagline">Explorer · Free and open source</span>
         <a href="https://mrrtt.me">
           <span>Made with ❤️ by Harry Merritt</span>
