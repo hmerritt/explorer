@@ -40,7 +40,7 @@ export const Route = createFileRoute('/')({
           name: 'Explorer',
           url: HOME_URL,
           description:
-            'A free cross-platform file explorer packed with features. Tabs, split-views, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.',
+            'A free cross-platform file explorer packed with features. Tabs, split-screen, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.',
           applicationCategory: 'UtilitiesApplication',
           operatingSystem: 'macOS, Linux, Windows',
           isAccessibleForFree: true,
@@ -57,31 +57,32 @@ export const Route = createFileRoute('/')({
 })
 
 const highlights = [
+  ['Native. And fast.', 'Built from the ground up. Written in Rust with GPUI.'],
   [
-    'Familiar by design',
-    'The menus, shortcuts and file interactions you already know. The Windows Explorer experience, wherever you work.',
+    'Tabs & Split-screen support',
+    'Each individual tab can be made split-screen, with support for nested splits both vertically and horizontally.',
   ],
   [
-    'Native. And fast.',
-    'Written in Rust with GPUI. A GPU-accelerated desktop interface, without Electron or a web view.',
+    'Instant preview media files',
+    'Images, videos, PDFs, EPUBs, and text files can all be instantly previewed when you hold Alt key and hover over them.',
   ],
   [
-    'A place for every tab',
-    'Keep folders close with tabs and pinned sidebar locations. Move between projects without losing your place.',
+    'Image viewer and EPUB reader',
+    'Inside Explorer is a fully functional Image viewer and EPUB reader, both GPU-accelerated just like Explorer is. You can set Explorer as the default program for Images and EPUBs.',
   ],
   [
-    'Look before you open',
-    'Hold Alt and hover to preview images, videos, PDFs and text. Open images in the built-in viewer.',
+    'Download files and YT videos',
+    <>
+      A built-in HTTP downloader allows you to literally paste in URLs to
+      download them into the current directory. <code>yt-dlp</code> is also
+      supported to download youtube videos, and most other video websites.
+    </>,
   ],
   [
-    'Find your files',
-    'Type to search the current folder or search through subfolders. No pre-indexing required.',
+    'Settings & Customization',
+    'All features can be customized and changed. The contextmenu is fully customizable so you only see the programs you actually want to use.',
   ],
-  [
-    'Get things done',
-    'Copy, move, rename and inspect your files. Create ZIPs, extract archives and work with removable storage.',
-  ],
-]
+] as const
 
 const gallery = [
   {
@@ -146,7 +147,7 @@ function Hero({
           <br className="desktop-break" /> and Windows.
         </h1>
         <p className="hero-description" data-hero-reveal>
-          A file explorer packed with features: Tabs, split-views, instant
+          A file explorer packed with features: Tabs, split-screen, instant
           previews, SFTP support, URL downloads, Git repo integrations, a built
           in image viewer and EPUB reader.
         </p>

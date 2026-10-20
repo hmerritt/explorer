@@ -12,7 +12,7 @@ const origin = siteOrigin(process.env.VITE_SITE_URL, true)
 const home = `${origin}/`
 const html = read('index.html')
 const originalDescription =
-  'A free cross-platform file explorer packed with features. Tabs, split-views, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.'
+  'A free cross-platform file explorer packed with features. Tabs, split-screen, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader. Free and open source.'
 
 // These tests run after the production build, separately from source unit tests.
 test('prerendered analytics script matches the optional production configuration', () => {
@@ -106,7 +106,7 @@ test('homepage keeps semantic content and serves optimized media with original l
   assert.ok(paragraph)
   assert.equal(
     paragraph[1].replace(/\s+/g, ' ').trim(),
-    'A file explorer packed with features: Tabs, split-views, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader.',
+    'A file explorer packed with features: Tabs, split-screen, instant previews, SFTP support, URL downloads, Git repo integrations, a built in image viewer and EPUB reader.',
   )
   assert.match(html, /href="\/images\/overview.png"/)
   const hero = (html.match(/<img\b[^>]*>/g) ?? []).find((tag) =>
