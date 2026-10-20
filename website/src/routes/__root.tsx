@@ -26,6 +26,7 @@ export const Route = createRootRoute({
         content: description,
       },
       { name: 'theme-color', content: '#f2f1ee' },
+      { name: 'apple-mobile-web-app-title', content: 'Explorer' },
       { property: 'og:type', content: 'website' },
       { property: 'og:site_name', content: 'Explorer' },
       { property: 'og:title', content: title },
@@ -45,8 +46,20 @@ export const Route = createRootRoute({
     ],
     links: [
       { rel: 'stylesheet', href: stylesheet },
-      { rel: 'icon', href: '/favicon.ico', sizes: 'any' },
-      { rel: 'icon', href: '/icon.png', type: 'image/png' },
+      {
+        rel: 'icon',
+        type: 'image/png',
+        href: '/favicon-96x96.png',
+        sizes: '96x96',
+      },
+      { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' },
+      { rel: 'shortcut icon', href: '/favicon.ico' },
+      {
+        rel: 'apple-touch-icon',
+        sizes: '180x180',
+        href: '/apple-touch-icon.png',
+      },
+      { rel: 'manifest', href: '/site.webmanifest' },
       {
         rel: 'preload',
         href: '/fonts/archivo-latin.woff2',
