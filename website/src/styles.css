@@ -731,13 +731,15 @@ pre {
 .section-navigation {
   position: fixed;
   inset: 0;
-  z-index: 10;
+  /* Keep the tracker and its paper masks above sticky section bars. */
+  z-index: 21;
   pointer-events: none;
   font: 620 34px/1 var(--font-display);
   text-transform: uppercase;
 }
 .tracker-link {
   position: absolute;
+  z-index: 2;
   pointer-events: auto;
 }
 .tracker-static-label {
@@ -745,6 +747,7 @@ pre {
 }
 .tracker-letter {
   position: absolute;
+  z-index: 1;
   top: 0;
   left: 0;
   white-space: pre;
@@ -770,17 +773,29 @@ pre {
 }
 .tracker-pool {
   position: absolute;
+  z-index: 0;
   right: 0;
   width: var(--tracker-pool-width, 420px);
-  background: color-mix(in srgb, var(--paper) 80%, transparent);
+  background: var(--paper);
+  -webkit-backdrop-filter: blur(9px);
   backdrop-filter: blur(9px);
 }
 .tracker-pool--top {
   top: 49px;
+  -webkit-mask-image: radial-gradient(
+    100% 100% at 100% 0%,
+    black 38%,
+    transparent 97%
+  );
   mask-image: radial-gradient(100% 100% at 100% 0%, black 38%, transparent 97%);
 }
 .tracker-pool--bottom {
   bottom: 0;
+  -webkit-mask-image: radial-gradient(
+    100% 100% at 100% 100%,
+    black 38%,
+    transparent 97%
+  );
   mask-image: radial-gradient(
     100% 100% at 100% 100%,
     black 38%,
@@ -822,7 +837,7 @@ pre {
   overflow: hidden;
   clip-path: inset(49px 0 0);
   pointer-events: none;
-  z-index: 11;
+  z-index: 22;
   font: 400 8px/1 var(--mono);
   color: var(--ink);
 }
