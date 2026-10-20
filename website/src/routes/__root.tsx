@@ -8,6 +8,7 @@ import {
 import type { ReactNode } from 'react'
 import stylesheet from '../styles.css?url'
 import { SITE_URL, HOME_URL } from '../lib/releases'
+import { motionBootstrap } from '../lib/page-motion'
 
 const title = 'Explorer — Windows File Explorer for macOS, Linux and Windows'
 const plausibleUrl = import.meta.env.VITE_PLAUSIBLE_URL
@@ -62,8 +63,9 @@ export const Route = createRootRoute({
 
 function RootDocument({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: motionBootstrap }} />
         {plausibleUrl && (
           <script
             defer

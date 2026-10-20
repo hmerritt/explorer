@@ -67,10 +67,16 @@ export function Header() {
         }
       }}
     >
-      <a className="header-logo" href="#explorer" aria-label="Explorer home">
+      <a
+        data-nav-reveal
+        className="header-logo"
+        href="#explorer"
+        aria-label="Explorer home"
+      >
         <img src="/icon.png" alt="" width="32" height="32" />
       </a>
       <button
+        data-nav-reveal
         ref={toggle}
         className="menu-toggle"
         type="button"
@@ -81,6 +87,7 @@ export function Header() {
         {open ? 'Close ×' : 'Menu +'}
       </button>
       <nav
+        data-nav-reveal
         id="main-navigation"
         className={`main-navigation ${open ? 'is-open' : ''}`}
         aria-label="Main navigation"
@@ -93,10 +100,10 @@ export function Header() {
             </a>
           ))}
       </nav>
-      <a className="header-github" href={REPOSITORY}>
+      <a data-nav-reveal className="header-github" href={REPOSITORY}>
         GitHub <GitHubIcon />
       </a>
-      <a className="header-download" href="#download">
+      <a data-nav-reveal className="header-download" href="#download">
         Download <Arrow down />
       </a>
     </header>
@@ -113,12 +120,27 @@ export function SectionBar({
   note: string
 }) {
   return (
-    <div className="section-bar">
-      <span>
-        {number} / {label}
-      </span>
-      <span>{note}</span>
-    </div>
+    <>
+      <span className="section-rule" data-section-rule aria-hidden="true" />
+      <span
+        className="section-tick section-tick--left"
+        data-section-tick
+        aria-hidden="true"
+      />
+      <span
+        className="section-tick section-tick--right"
+        data-section-tick
+        aria-hidden="true"
+      />
+      <div className="section-bar">
+        <div className="section-bar-copy" data-section-copy>
+          <span>
+            {number} / {label}
+          </span>
+          <span>{note}</span>
+        </div>
+      </div>
+    </>
   )
 }
 

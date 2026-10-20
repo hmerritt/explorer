@@ -100,7 +100,9 @@ test('software metadata is present before JavaScript and describes actual free d
 
 test('homepage keeps semantic content and serves optimized media with original links', () => {
   assert.equal((html.match(/<h1\b/g) ?? []).length, 1)
-  const paragraph = html.match(/<p class="hero-description">([\s\S]*?)<\/p>/)
+  const paragraph = html.match(
+    /<p class="hero-description"[^>]*>([\s\S]*?)<\/p>/,
+  )
   assert.ok(paragraph)
   assert.equal(
     paragraph[1].replace(/\s+/g, ' ').trim(),

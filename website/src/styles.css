@@ -123,6 +123,61 @@ img {
   border-inline: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
 }
+[data-section-motion] {
+  position: relative;
+}
+.section-rule,
+.section-tick {
+  position: absolute;
+  pointer-events: none;
+  background: var(--line);
+}
+.section-rule {
+  inset: 0 0 auto;
+  height: 1px;
+  transform-origin: left;
+}
+.section-tick {
+  top: -5px;
+  width: 1px;
+  height: 10px;
+}
+.section-tick::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  left: -5px;
+  width: 10px;
+  height: 1px;
+  background: inherit;
+}
+.section-tick--left {
+  left: -1px;
+}
+.section-tick--right {
+  right: -1px;
+}
+.section-tick--left::after {
+  left: 0;
+  width: 6px;
+}
+.section-tick--right::after {
+  width: 6px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html[data-motion-pending]
+    :is(
+      [data-hero-reveal],
+      [data-reveal],
+      [data-section-copy],
+      [data-nav-reveal]
+    ) {
+    visibility: hidden;
+  }
+  html[data-motion-pending] :is([data-section-rule], [data-section-tick]) {
+    opacity: 0;
+  }
+}
 .label,
 .section-bar,
 .button,
@@ -263,6 +318,13 @@ h3 {
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
 }
+.section-bar-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
 .section-bar span:last-child {
   text-align: right;
 }
@@ -272,6 +334,15 @@ h3 {
   display: flex;
   align-items: center;
   flex-direction: column;
+}
+.hero-identity,
+.hero-action-area {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+}
+.hero-action-area {
+  width: 100%;
 }
 .hero-icon {
   width: 112px;

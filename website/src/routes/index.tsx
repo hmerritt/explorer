@@ -1,4 +1,5 @@
 import { MediaPreview } from '../components/media-viewer'
+import { PageMotion } from '../components/page-motion'
 import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { staticFunctionMiddleware } from '@tanstack/start-static-server-functions'
@@ -118,50 +119,59 @@ function Hero({
 }) {
   const { label, href } = heroDownload(release, platform)
   return (
-    <section id="explorer" className="frame">
+    <section id="explorer" className="frame" data-section-motion>
       <SectionBar
         number="01"
         label="Explorer"
         note="File explorer · Free and open source"
       />
       <div className="hero-content">
-        <img
-          className="hero-icon"
-          src="/icon.png"
-          alt="Explorer app icon"
-          width="112"
-          height="112"
-        />
-        <div className="hero-brand">
-          <span>Explorer</span>
-          {/*<span className="number-tag"> [VERSION-NUMBER] </span>*/}
+        <div className="hero-identity" data-hero-reveal>
+          <img
+            className="hero-icon"
+            src="/icon.png"
+            alt="Explorer app icon"
+            width="112"
+            height="112"
+          />
+          <div className="hero-brand">
+            <span>Explorer</span>
+            {/*<span className="number-tag"> [VERSION-NUMBER] </span>*/}
+          </div>
         </div>
-        <h1>
+        <h1 data-hero-reveal>
           <span className="strikethrough">Windows</span> File Explorer.
           <br />
           On <span className="accent">macOS</span>, Linux
           <br className="desktop-break" /> and Windows.
         </h1>
-        <p className="hero-description">
+        <p className="hero-description" data-hero-reveal>
           A file explorer packed with features: Tabs, split-views, instant
           previews, SFTP support, URL downloads, Git repo integrations, a built
           in image viewer and EPUB reader.
         </p>
-        <div className="hero-actions">
-          <ButtonLink href={href} primary down download={!href.startsWith('#')}>
-            {label}
-          </ButtonLink>
-          <ButtonLink href={REPOSITORY} icon={<GitHubIcon />}>
-            View on GitHub
-          </ButtonLink>
+        <div className="hero-action-area" data-hero-reveal>
+          <div className="hero-actions">
+            <ButtonLink
+              href={href}
+              primary
+              down
+              download={!href.startsWith('#')}
+            >
+              {label}
+            </ButtonLink>
+            <ButtonLink href={REPOSITORY} icon={<GitHubIcon />}>
+              View on GitHub
+            </ButtonLink>
+          </div>
+          <a className="other-downloads label" href="#download">
+            Other platforms and downloads <Arrow down />
+          </a>
+          <p className="platform-label label">
+            macOS · Linux · Windows · Free and open source
+          </p>
+          <ShareLinks />
         </div>
-        <a className="other-downloads label" href="#download">
-          Other platforms and downloads <Arrow down />
-        </a>
-        <p className="platform-label label">
-          macOS · Linux · Windows · Free and open source
-        </p>
-        <ShareLinks />
       </div>
       <figure className="hero-screenshot">
         <figcaption className="image-caption label">
@@ -187,16 +197,16 @@ function Hero({
 
 function Highlights() {
   return (
-    <section id="highlights" className="frame">
+    <section id="highlights" className="frame" data-section-motion>
       <SectionBar number="02" label="Highlights" note="File explorer" />
       <div className="section-heading">
-        <h2>
+        <h2 data-reveal>
           What’s <span className="accent">inside</span>.
         </h2>
       </div>
-      <ol className="highlights-grid">
+      <ol className="highlights-grid" data-reveal-group>
         {highlights.map(([title, description], index) => (
-          <li key={title}>
+          <li key={title} data-reveal>
             <span className="label feature-number">0{index + 1}</span>
             <h3>{title}</h3>
             <p>{description}</p>
@@ -209,11 +219,11 @@ function Highlights() {
 
 function Gallery() {
   return (
-    <section id="gallery" className="frame">
+    <section id="gallery" className="frame" data-section-motion>
       <SectionBar number="03" label="Screenshots" note="Captured in Explorer" />
-      <div className="gallery-grid">
+      <div className="gallery-grid" data-reveal-group>
         {gallery.map((image, index) => (
-          <figure key={image.name}>
+          <figure key={image.name} data-reveal>
             {image.video !== undefined ? (
               <MediaPreview
                 src={image.video}
@@ -315,7 +325,7 @@ function Downloads({
   platform: Platform | null
 }) {
   return (
-    <section id="download" className="frame">
+    <section id="download" className="frame" data-section-motion>
       <SectionBar number="04" label="Download" note="Free · Open source" />
       <div className="downloads-grid">
         {platforms.map((item, index) => {
@@ -324,6 +334,7 @@ function Downloads({
           )
           return (
             <article
+              data-reveal
               id={`download-${item.id}`}
               key={item.id}
               className={`download-card ${platform === item.id ? 'your-platform' : ''}`}
@@ -367,7 +378,7 @@ function Downloads({
         })}
       </div>
       <div className="release-source-grid">
-        <div>
+        <div data-reveal>
           <span className="label">Release</span>
           <h3>
             {release.version ? (
@@ -392,7 +403,7 @@ function Downloads({
           </div>
           <p className="label release-platforms">macOS · Windows · Linux</p>
         </div>
-        <div>
+        <div data-reveal>
           <span className="label">Build from source</span>
           <h3>
             Run it <span className="accent">today</span>.
@@ -420,11 +431,11 @@ function Downloads({
 
 function GetStarted() {
   return (
-    <section id="start" className="frame start-section">
+    <section id="start" className="frame start-section" data-section-motion>
       <SectionBar number="05" label="Get started" note="Built in the open" />
       <div className="start-content">
         <span className="label">Open source · Free</span>
-        <h2>
+        <h2 data-reveal>
           Help shape <span className="accent">Explorer</span>.
         </h2>
         <p>
@@ -464,6 +475,7 @@ function Home() {
       </main>
       <Footer />
       <SectionNavigator />
+      <PageMotion />
     </>
   )
 }
