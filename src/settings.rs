@@ -439,7 +439,7 @@ pub enum CustomContextMenuItem {
         label: String,
         exe: PathBuf,
         icon: Option<PathBuf>,
-        args: Vec<String>,
+        args: Option<Vec<String>>,
         only: Vec<String>,
     },
     Submenu {
@@ -489,13 +489,13 @@ fn default_context_menu_items_for(
                         label: "Add to archive...".to_owned(),
                         exe: PathBuf::from("7zG"),
                         icon: None,
-                        args: vec![
+                        args: Some(vec![
                             "a".to_owned(),
                             "-ad".to_owned(),
                             "-saa".to_owned(),
                             "{path}".to_owned(),
                             "{paths}".to_owned(),
-                        ],
+                        ]),
                         only: vec!["*file".to_owned(), "*folder".to_owned()],
                     }
                 } else {
@@ -506,7 +506,7 @@ fn default_context_menu_items_for(
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("wt"),
                     icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
-                    args: vec!["-d".to_owned(), "{paths}".to_owned()],
+                    args: Some(vec!["-d".to_owned(), "{paths}".to_owned()]),
                     only: only(),
                 },
             ];
@@ -524,7 +524,11 @@ fn default_context_menu_items_for(
                 label: label.to_owned(),
                 exe: PathBuf::from("/usr/bin/open"),
                 icon: icon.map(PathBuf::from),
-                args: vec!["-a".to_owned(), application.to_owned(), "{path}".to_owned()],
+                args: Some(vec![
+                    "-a".to_owned(),
+                    application.to_owned(),
+                    "{path}".to_owned(),
+                ]),
                 only: only(),
             }
         }
@@ -535,7 +539,7 @@ fn default_context_menu_items_for(
                     label: "Ghostty".to_owned(),
                     exe: PathBuf::from("ghostty"),
                     icon: Some(PathBuf::from(GHOSTTY_ICON_URL)),
-                    args: vec!["{cwd}".to_owned()],
+                    args: Some(vec!["{cwd}".to_owned()]),
                     only: only(),
                 }
             } else if executable_available("xdg-terminal-exec") {
@@ -544,7 +548,7 @@ fn default_context_menu_items_for(
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("xdg-terminal-exec"),
                     icon: None,
-                    args: vec!["{cwd}".to_owned()],
+                    args: Some(vec!["{cwd}".to_owned()]),
                     only: only(),
                 }
             } else if executable_available("x-terminal-emulator") {
@@ -553,7 +557,7 @@ fn default_context_menu_items_for(
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("x-terminal-emulator"),
                     icon: None,
-                    args: vec!["{cwd}".to_owned()],
+                    args: Some(vec!["{cwd}".to_owned()]),
                     only: only(),
                 }
             } else {
@@ -645,7 +649,7 @@ impl Serialize for CustomContextMenuItem {
                 if icon.is_some() {
                     length += 1;
                 }
-                if !args.is_empty() {
+                if args.is_some() {
                     length += 1;
                 }
                 if !only.is_empty() {
@@ -657,7 +661,7 @@ impl Serialize for CustomContextMenuItem {
                 if let Some(icon) = icon {
                     map.serialize_entry("icon", icon)?;
                 }
-                if !args.is_empty() {
+                if let Some(args) = args {
                     map.serialize_entry("args", args)?;
                 }
                 if !only.is_empty() {
@@ -785,8 +789,7 @@ impl<'de> Deserialize<'de> for CustomContextMenuItem {
             .remove("args")
             .map(deserialize_context_menu_args)
             .transpose()
-            .map_err(de::Error::custom)?
-            .unwrap_or_default();
+            .map_err(de::Error::custom)?;
 
         Ok(Self::Item {
             in_paths,
@@ -2124,10 +2127,12 @@ fn migrate_settings_for_platform(settings: &mut ExplorerSettings, platform: Conf
         if label == "Ghostty"
             && exe == Path::new("ghostty")
             && icon.as_deref() == Some(Path::new(GHOSTTY_ICON_URL))
-            && args == &["--working-directory", "{path}"]
+            && args
+                .as_ref()
+                .is_some_and(|args| args == &["--working-directory", "{path}"])
             && only == &["*directory", "*folders"]
         {
-            *args = vec!["{cwd}".to_owned()];
+            *args = Some(vec!["{cwd}".to_owned()]);
         }
     }
 }
@@ -3610,13 +3615,13 @@ mod tests {
                     label: "Add to archive...".to_owned(),
                     exe: PathBuf::from("7zG"),
                     icon: None,
-                    args: vec![
+                    args: Some(vec![
                         "a".to_owned(),
                         "-ad".to_owned(),
                         "-saa".to_owned(),
                         "{path}".to_owned(),
                         "{paths}".to_owned(),
-                    ],
+                    ]),
                     only: vec!["*file".to_owned(), "*folder".to_owned()],
                 },
                 CustomContextMenuItem::Item {
@@ -3624,7 +3629,7 @@ mod tests {
                     label: "Terminal".to_owned(),
                     exe: PathBuf::from("wt"),
                     icon: Some(PathBuf::from(WINDOWS_TERMINAL_ICON_URL)),
-                    args: vec!["-d".to_owned(), "{paths}".to_owned()],
+                    args: Some(vec!["-d".to_owned(), "{paths}".to_owned()]),
                     only: vec!["*directory".to_owned(), "*folders".to_owned()],
                 },
             ]
@@ -3652,7 +3657,11 @@ mod tests {
                     label: "cmux".to_owned(),
                     exe: PathBuf::from("/usr/bin/open"),
                     icon: Some(PathBuf::from(CMUX_ICON_URL)),
-                    args: vec!["-a".to_owned(), "cmux".to_owned(), "{path}".to_owned()],
+                    args: Some(vec![
+                        "-a".to_owned(),
+                        "cmux".to_owned(),
+                        "{path}".to_owned()
+                    ]),
                     only: vec!["*directory".to_owned(), "*folders".to_owned()],
                 },
             ]
@@ -3668,14 +3677,14 @@ mod tests {
             [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
                 if label == "Ghostty"
                     && icon == Path::new(GHOSTTY_ICON_URL)
-                    && args == &["-a", "Ghostty", "{path}"]
+                    && args.as_ref().is_some_and(|args| args == &["-a", "Ghostty", "{path}"])
         ));
 
         let terminal = default_context_menu_items_for(ConfigPlatform::MacOS, |_| false, |_| false);
         assert!(matches!(
             terminal.as_slice(),
             [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { label, icon: None, args, .. }]
-                if label == "Terminal" && args == &["-a", "Terminal", "{path}"]
+                if label == "Terminal" && args.as_ref().is_some_and(|args| args == &["-a", "Terminal", "{path}"])
         ));
     }
 
@@ -3687,7 +3696,7 @@ mod tests {
             [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { label, icon: Some(icon), args, .. }]
                 if label == "Ghostty"
                     && icon == Path::new(GHOSTTY_ICON_URL)
-                    && args == &["{cwd}"]
+                    && args.as_ref().is_some_and(|args| args == &["{cwd}"])
         ));
 
         let xdg = default_context_menu_items_for(
@@ -3698,7 +3707,7 @@ mod tests {
         assert!(matches!(
             xdg.as_slice(),
             [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { exe, args, .. }]
-                if exe == Path::new("xdg-terminal-exec") && args == &["{cwd}"]
+                if exe == Path::new("xdg-terminal-exec") && args.as_ref().is_some_and(|args| args == &["{cwd}"])
         ));
 
         let legacy = default_context_menu_items_for(
@@ -3709,7 +3718,7 @@ mod tests {
         assert!(matches!(
             legacy.as_slice(),
             [CustomContextMenuItem::Action { .. }, CustomContextMenuItem::Item { exe, args, .. }]
-                if exe == Path::new("x-terminal-emulator") && args == &["{cwd}"]
+                if exe == Path::new("x-terminal-emulator") && args.as_ref().is_some_and(|args| args == &["{cwd}"])
         ));
         assert_eq!(
             default_context_menu_items_for(ConfigPlatform::Linux, |_| false, |_| false),
@@ -3739,7 +3748,7 @@ mod tests {
         let loaded = load_settings_document_from_path_for(&path, ConfigPlatform::Linux).unwrap();
         assert!(matches!(
             loaded.value.contextmenu.items.as_slice(),
-            [CustomContextMenuItem::Item { args, .. }] if args == &["{cwd}"]
+            [CustomContextMenuItem::Item { args, .. }] if args.as_ref().is_some_and(|args| args == &["{cwd}"])
         ));
 
         let normalized: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
@@ -3793,7 +3802,7 @@ mod tests {
                     label: "Ghostty".to_owned(),
                     exe: PathBuf::from("ghostty"),
                     icon: Some(PathBuf::from(GHOSTTY_ICON_URL)),
-                    args: vec!["--working-directory".to_owned(), "{path}".to_owned()],
+                    args: Some(vec!["--working-directory".to_owned(), "{path}".to_owned()]),
                     only: vec!["*directory".to_owned(), "*folders".to_owned()],
                 }],
             },
@@ -4852,10 +4861,61 @@ mod tests {
                     &items[0],
                     CustomContextMenuItem::Item { exe, args, only, .. }
                         if exe == Path::new("~/bin/inspect")
-                            && args == &vec!["--mode".to_owned(), "deep".to_owned()]
+                            && args == &Some(vec!["--mode".to_owned(), "deep".to_owned()])
                             && only == &vec!["txt".to_owned(), ".MD".to_owned()]
                 )
         ));
+    }
+
+    #[test]
+    fn contextmenu_argument_intent_survives_normalization_and_saving() {
+        let directory = unique_temp_dir("contextmenu-argument-intent");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(SETTINGS_FILE_NAME);
+        // Exercise both flat and legacy settings, including recursive groups.
+        let items = serde_json::json!([
+            {"label": "Default", "exe": "tool"},
+            {"label": "Empty array", "exe": "tool", "args": []},
+            {"label": "Empty string", "exe": "tool", "args": ""},
+            {"label": "Tools", "items": [
+                {"label": "Nested default", "exe": "tool"},
+                {"label": "Nested empty", "exe": "tool", "args": []},
+                {"label": "Flags", "exe": "tool", "args": "--inspect"}
+            ]}
+        ]);
+        for contextmenu in [items.clone(), serde_json::json!({"directory": items})] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({"contextmenu": contextmenu})).unwrap(),
+            )
+            .unwrap();
+            let loaded = load_settings_document_from_path(&path).unwrap();
+            let normalized: Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let commands = &normalized["contextmenu"];
+            assert!(commands[0].get("args").is_none());
+            assert_eq!(commands[1]["args"], serde_json::json!([]));
+            assert_eq!(commands[2]["args"], serde_json::json!([]));
+            assert!(commands[3]["items"][0].get("args").is_none());
+            assert_eq!(commands[3]["items"][1]["args"], serde_json::json!([]));
+            assert_eq!(
+                commands[3]["items"][2]["args"],
+                serde_json::json!(["--inspect"])
+            );
+            assert!(matches!(
+                &loaded.value.contextmenu.items[0],
+                CustomContextMenuItem::Item { args: None, .. }
+            ));
+            assert!(
+                matches!(&loaded.value.contextmenu.items[1], CustomContextMenuItem::Item { args: Some(args), .. } if args.is_empty())
+            );
+            save_settings_to_path(&path, &loaded.value).unwrap();
+            let reloaded = load_settings_document_from_path(&path).unwrap();
+            assert_eq!(reloaded.value.contextmenu, loaded.value.contextmenu);
+            let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["contextmenu"], normalized["contextmenu"]);
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -4881,20 +4941,20 @@ mod tests {
         assert!(matches!(
             &settings.contextmenu.items[0],
             CustomContextMenuItem::Item { args, .. }
-                if args == &vec![
+                if args == &Some(vec![
                     "--line".to_owned(),
                     "two words".to_owned(),
                     "{path}".to_owned()
-                ]
+                ])
         ));
         assert!(matches!(
             &settings.contextmenu.items[1],
             CustomContextMenuItem::Item { args, .. }
-                if args == &vec![
+                if args == &Some(vec![
                     "--line".to_owned(),
                     "two words".to_owned(),
                     "{paths}".to_owned()
-                ]
+                ])
         ));
     }
 
@@ -5126,7 +5186,7 @@ mod tests {
                         label: "Missing absolute".to_owned(),
                         exe: missing_absolute.clone(),
                         icon: None,
-                        args: Vec::new(),
+                        args: None,
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
@@ -5134,7 +5194,7 @@ mod tests {
                         label: "Missing PATH command".to_owned(),
                         exe: PathBuf::from("definitely-not-an-explorer-test-command"),
                         icon: None,
-                        args: Vec::new(),
+                        args: None,
                         only: Vec::new(),
                     },
                 ],
@@ -5199,7 +5259,7 @@ mod tests {
                     label: "Known tool".to_owned(),
                     exe: PathBuf::from("~/bin/known-tool"),
                     icon: None,
-                    args: Vec::new(),
+                    args: None,
                     only: vec![
                         "*video".to_owned(),
                         "*photo".to_owned(),
@@ -5426,7 +5486,7 @@ mod tests {
                     label: "Inspect".to_owned(),
                     exe: PathBuf::from("~/bin/inspect"),
                     icon: Some(icon.clone()),
-                    args: Vec::new(),
+                    args: None,
                     only: vec!["rs".to_owned(), ".toml".to_owned()],
                 }],
             },

@@ -402,7 +402,8 @@ impl ExplorerView {
             .unwrap_or_default();
         let targets = self.selected_paths();
         let selected_entries = self.selected_entries();
-        let custom_working_directory = item_context_menu_working_directory(&entry.path, &self.path);
+        let custom_working_directory =
+            item_context_menu_working_directory(&entry.path, entry.is_directory_like(), &self.path);
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
             entry_context_menu_items_with_custom_in_directory(
@@ -433,7 +434,10 @@ impl ExplorerView {
             return false;
         }
 
-        let Some(focused_entry_path) = self.focused_entry().map(|entry| entry.path.clone()) else {
+        let Some((focused_entry_path, focused_entry_is_directory)) = self
+            .focused_entry()
+            .map(|entry| (entry.path.clone(), entry.is_directory_like()))
+        else {
             return false;
         };
 
@@ -464,8 +468,11 @@ impl ExplorerView {
             .unwrap_or_default();
         let targets = self.selected_paths();
         let selected_entries = self.selected_entries();
-        let custom_working_directory =
-            item_context_menu_working_directory(&focused_entry_path, &self.path);
+        let custom_working_directory = item_context_menu_working_directory(
+            &focused_entry_path,
+            focused_entry_is_directory,
+            &self.path,
+        );
         self.context_menu = Some(ContextMenuState::new_with_native_icon_entry(
             origin,
             entry_context_menu_items_with_custom_in_directory(
@@ -997,37 +1004,24 @@ fn run_custom_command_with(
 
 fn custom_command_arguments(args: &[String], targets: &[PathBuf]) -> Vec<OsString> {
     let mut arguments = Vec::new();
-    let mut expanded_placeholder = false;
 
     for arg in args {
         match arg.as_str() {
             "{path}" => {
-                expanded_placeholder = true;
                 if let Some(target) = targets.first() {
                     arguments.push(crate::os_paths::native_path(target));
                 }
             }
             "{paths}" => {
-                expanded_placeholder = true;
                 arguments.extend(
                     targets
                         .iter()
                         .map(|target| crate::os_paths::native_path(target)),
                 );
             }
-            "{cwd}" => {
-                expanded_placeholder = true;
-            }
+            "{cwd}" => {}
             _ => arguments.push(OsString::from(arg)),
         }
-    }
-
-    if !expanded_placeholder {
-        arguments.extend(
-            targets
-                .iter()
-                .map(|target| crate::os_paths::native_path(target)),
-        );
     }
 
     arguments
@@ -1402,7 +1396,14 @@ fn linux_loop_device_from_loop_setup_stdout(stdout: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn item_context_menu_working_directory(item_path: &Path, current_directory: &Path) -> PathBuf {
+fn item_context_menu_working_directory(
+    item_path: &Path,
+    is_directory: bool,
+    current_directory: &Path,
+) -> PathBuf {
+    if is_directory {
+        return item_path.to_path_buf();
+    }
     item_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1508,7 +1509,15 @@ fn entry_context_menu_items_with_custom(
 ) -> Vec<ContextMenuItem> {
     let working_directory = targets
         .first()
-        .map(|target| item_context_menu_working_directory(target, Path::new(".")))
+        .map(|target| {
+            item_context_menu_working_directory(
+                target,
+                selected_entries
+                    .first()
+                    .is_some_and(|entry| entry.is_directory_like()),
+                Path::new("."),
+            )
+        })
         .unwrap_or_else(|| PathBuf::from("."));
     entry_context_menu_items_with_custom_in_directory(
         single_directory_open_target,
@@ -2129,8 +2138,21 @@ fn configured_context_menu_item(
                 label: label.clone(),
                 command: ContextMenuCommand::RunCustom {
                     executable,
-                    args: args.clone(),
-                    targets: targets.to_vec(),
+                    // Resolve the omitted-args default using the menu's entry metadata.
+                    // Explicit placeholders retain access to every selected target.
+                    args: args.clone().unwrap_or_else(|| vec!["{paths}".to_owned()]),
+                    targets: if args.is_some() {
+                        targets.to_vec()
+                    } else {
+                        match target {
+                            CustomContextMenuTarget::Directory => Vec::new(),
+                            CustomContextMenuTarget::Entries(entries) => entries
+                                .iter()
+                                .filter(|entry| !entry.is_directory_like())
+                                .map(|entry| entry.path.clone())
+                                .collect(),
+                        }
+                    },
                     working_directory: working_directory.to_path_buf(),
                 },
                 enabled: true,
@@ -2659,7 +2681,7 @@ mod tests {
             label: label.to_owned(),
             exe: configured_executable_path(),
             icon: None,
-            args: Vec::new(),
+            args: None,
             only: only.iter().map(|value| (*value).to_owned()).collect(),
         }];
         custom_menu_for_configured_entries(&configured, &selected_entries, false)
@@ -4215,14 +4237,14 @@ mod tests {
             PathBuf::from("first/a.txt"),
             PathBuf::from("invoked/folder"),
         ];
-        let working_directory = PathBuf::from("invoked");
+        let working_directory = PathBuf::from("invoked/folder");
         let configured = vec![
             CustomContextMenuItem::Item {
                 in_paths: Vec::new(),
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: vec!["--inspect".to_owned()],
+                args: Some(vec!["--inspect".to_owned()]),
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
@@ -4234,7 +4256,7 @@ mod tests {
                     label: "Deep inspect".to_owned(),
                     exe: executable.clone(),
                     icon: None,
-                    args: Vec::new(),
+                    args: None,
                     only: Vec::new(),
                 }],
             },
@@ -4250,7 +4272,10 @@ mod tests {
             false,
             &configured,
             &targets,
-            &[],
+            &[
+                FileEntry::test("first/a.txt", false, None, None),
+                FileEntry::test("invoked/folder", true, None, None),
+            ],
             &working_directory,
         );
 
@@ -4286,7 +4311,7 @@ mod tests {
                             ..
                         },
                         ..
-                    }) if child_targets == &targets
+                    }) if child_targets == &targets[..1]
                         && child_working_directory == &working_directory
                 )
         ));
@@ -4312,7 +4337,7 @@ mod tests {
                 label: "Image icon".to_owned(),
                 exe: command.clone(),
                 icon: Some(image_icon.clone()),
-                args: Vec::new(),
+                args: None,
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
@@ -4320,7 +4345,7 @@ mod tests {
                 label: "Executable icon".to_owned(),
                 exe: command.clone(),
                 icon: Some(icon_executable.clone()),
-                args: Vec::new(),
+                args: None,
                 only: Vec::new(),
             },
         ];
@@ -4367,7 +4392,7 @@ mod tests {
             label: "Inspect".to_owned(),
             exe: executable,
             icon: None,
-            args: Vec::new(),
+            args: None,
             only: Vec::new(),
         };
         let configured = vec![
@@ -4424,7 +4449,7 @@ mod tests {
             label: "Inspect".to_owned(),
             exe: executable.clone(),
             icon: None,
-            args: Vec::new(),
+            args: None,
             only: Vec::new(),
         };
         let configured = vec![
@@ -4433,7 +4458,7 @@ mod tests {
                 label: "URL action".to_owned(),
                 exe: executable,
                 icon: Some(PathBuf::from(action_url)),
-                args: Vec::new(),
+                args: None,
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
@@ -4484,7 +4509,7 @@ mod tests {
                 label: "Missing".to_owned(),
                 exe: missing.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
@@ -4492,7 +4517,7 @@ mod tests {
                 label: "Inspect".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: Vec::new(),
             },
             CustomContextMenuItem::Submenu {
@@ -4505,7 +4530,7 @@ mod tests {
                         label: "Missing child".to_owned(),
                         exe: missing.clone(),
                         icon: None,
-                        args: Vec::new(),
+                        args: None,
                         only: Vec::new(),
                     },
                     CustomContextMenuItem::Item {
@@ -4513,7 +4538,7 @@ mod tests {
                         label: "Deep inspect".to_owned(),
                         exe: executable.clone(),
                         icon: None,
-                        args: Vec::new(),
+                        args: None,
                         only: Vec::new(),
                     },
                 ],
@@ -4527,7 +4552,7 @@ mod tests {
                     label: "Only missing".to_owned(),
                     exe: missing,
                     icon: None,
-                    args: Vec::new(),
+                    args: None,
                     only: Vec::new(),
                 }],
             },
@@ -4814,7 +4839,7 @@ mod tests {
                 label: "Text tool".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: vec!["txt".to_owned(), ".MD".to_owned()],
             },
             CustomContextMenuItem::Item {
@@ -4822,7 +4847,7 @@ mod tests {
                 label: "Image tool".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: vec!["png".to_owned()],
             },
             CustomContextMenuItem::Item {
@@ -4830,7 +4855,7 @@ mod tests {
                 label: "Any tool".to_owned(),
                 exe: executable,
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: Vec::new(),
             },
         ];
@@ -5153,7 +5178,7 @@ mod tests {
             label: "Code tool".to_owned(),
             exe: executable,
             icon: None,
-            args: Vec::new(),
+            args: None,
             only: vec!["rs".to_owned(), ".toml".to_owned()],
         }];
         let matching_targets = vec![PathBuf::from("main.rs"), PathBuf::from("Cargo.TOML")];
@@ -5227,7 +5252,7 @@ mod tests {
                 label: "Image tool".to_owned(),
                 exe: executable,
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: vec!["png".to_owned()],
             }],
         }];
@@ -5264,7 +5289,7 @@ mod tests {
                 label: "Implicit entry-only".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: Vec::new(),
             },
             CustomContextMenuItem::Item {
@@ -5272,7 +5297,7 @@ mod tests {
                 label: "Inspect directory".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: vec!["*directory".to_owned()],
             },
             CustomContextMenuItem::Item {
@@ -5280,7 +5305,7 @@ mod tests {
                 label: "Png or directory".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: vec![".png".to_owned(), "*directory".to_owned()],
             },
             CustomContextMenuItem::Item {
@@ -5288,7 +5313,7 @@ mod tests {
                 label: "Text-only directory".to_owned(),
                 exe: executable.clone(),
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: vec!["txt".to_owned()],
             },
             CustomContextMenuItem::Item {
@@ -5296,7 +5321,7 @@ mod tests {
                 label: "Folder-only directory".to_owned(),
                 exe: executable,
                 icon: None,
-                args: Vec::new(),
+                args: None,
                 only: vec!["*folder".to_owned()],
             },
         ];
@@ -5325,7 +5350,7 @@ mod tests {
                     ..
                 },
                 ..
-            } if targets.as_slice() == std::slice::from_ref(&directory)
+            } if targets.is_empty()
                 && working_directory == &directory
         ));
         assert!(menu_has_label(&items, "Png or directory"));
@@ -5361,7 +5386,7 @@ mod tests {
             label: "Open in Zed".to_owned(),
             exe: executable.clone(),
             icon: None,
-            args: Vec::new(),
+            args: None,
             only: Vec::new(),
         }];
 
@@ -5542,20 +5567,177 @@ mod tests {
         assert_eq!(
             item_context_menu_working_directory(
                 Path::new("search/nested/result.txt"),
+                false,
                 &current_directory,
             ),
             PathBuf::from("search/nested")
         );
         assert_eq!(
-            item_context_menu_working_directory(Path::new("result.txt"), &current_directory),
+            item_context_menu_working_directory(Path::new("result.txt"), false, &current_directory),
             current_directory
+        );
+    }
+
+    #[test]
+    fn custom_command_working_directory_uses_folder_itself_including_roots() {
+        for path in ["search/nested/folder", "/", "folder"] {
+            let path = Path::new(path);
+            assert_eq!(
+                item_context_menu_working_directory(path, true, Path::new("current")),
+                path,
+            );
+        }
+    }
+
+    #[test]
+    fn configured_commands_respect_argument_intent_and_entry_types() {
+        let entries = vec![
+            FileEntry::test("first/a.txt", false, None, None),
+            FileEntry::test("second/folder with spaces", true, None, None),
+            FileEntry::test("third/b.txt", false, None, None),
+        ];
+        for selected_entries in [&entries[..1], &entries[1..2], &entries[..]] {
+            let targets = selected_entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>();
+            let cwd = item_context_menu_working_directory(
+                &selected_entries[0].path,
+                selected_entries[0].is_directory_like(),
+                Path::new("current"),
+            );
+            for args in [
+                None,
+                Some(vec![]),
+                Some(vec!["--inspect".to_owned()]),
+                Some(vec!["{path}".to_owned()]),
+                Some(vec!["{paths}".to_owned()]),
+            ] {
+                let configured = CustomContextMenuItem::Item {
+                    in_paths: Vec::new(),
+                    label: "Inspect".to_owned(),
+                    exe: configured_executable_path(),
+                    icon: None,
+                    args: args.clone(),
+                    only: Vec::new(),
+                };
+                let item = configured_context_menu_item(
+                    &configured,
+                    &targets,
+                    CustomContextMenuTarget::Entries(selected_entries),
+                    false,
+                    "test",
+                    &cwd,
+                )
+                .unwrap();
+                let ContextMenuItem::Action {
+                    command:
+                        ContextMenuCommand::RunCustom {
+                            executable,
+                            args: command_args,
+                            targets: command_targets,
+                            working_directory,
+                        },
+                    ..
+                } = item
+                else {
+                    panic!("expected custom command")
+                };
+                let expected = match args.as_deref() {
+                    None => selected_entries
+                        .iter()
+                        .filter(|entry| !entry.is_directory_like())
+                        .map(|entry| crate::os_paths::native_path(&entry.path))
+                        .collect(),
+                    Some(args) => custom_command_arguments(args, &targets),
+                };
+                let mut launches = 0;
+                run_custom_command_with(
+                    &executable,
+                    &command_args,
+                    &command_targets,
+                    &working_directory,
+                    |_, actual, actual_cwd| {
+                        launches += 1;
+                        assert_eq!(actual, expected);
+                        assert_eq!(actual_cwd.as_os_str(), crate::os_paths::native_path(&cwd));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(launches, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn background_commands_only_pass_explicit_directory_placeholders() {
+        let directory = PathBuf::from("current folder");
+        for (args, expected) in [
+            (None, vec![]),
+            (Some(vec![]), vec![]),
+            (
+                Some(vec!["--inspect".to_owned()]),
+                vec![OsString::from("--inspect")],
+            ),
+            (
+                Some(vec!["{path}".to_owned()]),
+                vec![crate::os_paths::native_path(&directory)],
+            ),
+            (
+                Some(vec!["{paths}".to_owned()]),
+                vec![crate::os_paths::native_path(&directory)],
+            ),
+        ] {
+            let configured = CustomContextMenuItem::Item {
+                in_paths: Vec::new(),
+                label: "Inspect".to_owned(),
+                exe: configured_executable_path(),
+                icon: None,
+                args,
+                only: vec!["*directory".to_owned()],
+            };
+            let item = configured_context_menu_item(
+                &configured,
+                std::slice::from_ref(&directory),
+                CustomContextMenuTarget::Directory,
+                false,
+                "test",
+                &directory,
+            )
+            .unwrap();
+            let ContextMenuItem::Action {
+                command:
+                    ContextMenuCommand::RunCustom {
+                        args,
+                        targets,
+                        working_directory,
+                        ..
+                    },
+                ..
+            } = item
+            else {
+                panic!("expected custom command")
+            };
+            assert_eq!(working_directory, directory);
+            assert_eq!(custom_command_arguments(&args, &targets), expected);
+        }
+    }
+
+    #[test]
+    fn explicit_arguments_never_append_targets() {
+        let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
+        assert!(custom_command_arguments(&[], &targets).is_empty());
+        assert_eq!(
+            custom_command_arguments(&["--inspect".to_owned()], &targets),
+            vec![OsString::from("--inspect")]
         );
     }
 
     #[test]
     fn custom_command_launches_once_with_all_targets_in_order() {
         let executable = configured_executable_path();
-        let args = vec!["--inspect".to_owned()];
+        let args = vec!["--inspect".to_owned(), "{paths}".to_owned()];
         let targets = vec![PathBuf::from("a.txt"), PathBuf::from("folder")];
         let working_directory = PathBuf::from("current");
         let mut calls = Vec::new();
@@ -5597,17 +5779,11 @@ mod tests {
             PathBuf::from(r"C:/first folder\file.txt"),
             PathBuf::from(r"//host/share/folder/"),
         ];
-        for args in [
-            vec![
-                "https://example.com/a/b".to_owned(),
-                "--literal=C:/keep/slashes".to_owned(),
-            ],
-            vec![
-                "https://example.com/a/b".to_owned(),
-                "--literal=C:/keep/slashes".to_owned(),
-                "{paths}".to_owned(),
-            ],
-        ] {
+        for args in [vec![
+            "https://example.com/a/b".to_owned(),
+            "--literal=C:/keep/slashes".to_owned(),
+            "{paths}".to_owned(),
+        ]] {
             run_custom_command_with(
                 Path::new(r"C:/tools\program.exe"),
                 &args,

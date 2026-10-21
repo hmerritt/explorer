@@ -196,6 +196,24 @@ no-dialog ZIP action is configured as:
 }
 ```
 
+Custom executables run in the context item's directory: a selected file's containing
+folder, a selected folder itself, or the current directory for a background menu.
+Multiple selections launch one process using the focused/right-clicked item's directory.
+
+When `args` is omitted, selected file paths are passed automatically, in selection order;
+folder paths are excluded. When `args` is present, only the supplied arguments are used:
+
+- `"args": []` (or `"args": ""`) runs with no arguments, even for files.
+- `"args": ["--inspect"]` passes only `--inspect`.
+- `"args": ["{path}"]` passes the first selected path, including a folder.
+- `"args": ["--inspect", "{paths}"]` passes the flag followed by every selected path.
+
+On background menus, `{path}` and `{paths}` refer to the current directory.
+Placeholders expand only when they occupy a whole argument; embedded text stays literal.
+The existing `{cwd}` token adds no argument and leaves the contextual working directory in use.
+Argument strings use shell quoting to split arguments; executables are launched directly.
+Explicit empty arguments remain explicit when settings are saved.
+
 Custom commands, built-in actions, and groups can use `in` to restrict where they appear.
 An absolute path matches that directory and every child directory:
 
