@@ -8781,11 +8781,11 @@ mod tests {
         cx.run_until_parked();
 
         // Repeat from the replacement selection to cover consecutive deletions.
-        for target in [target, target - 1] {
-            let (deleted, previous) = cx.update(|_, app| {
+        for _ in 0..2 {
+            let (deleted, next) = cx.update(|_, app| {
                 view.update(app, |view, cx| {
                     let deleted = view.entries[target].path.clone();
-                    let previous = view.entries[target - 1].path.clone();
+                    let next = view.entries[target + 1].path.clone();
                     view.restore_selection_from_paths(std::slice::from_ref(&deleted));
                     if trash {
                         view.trash_selected_paths(cx);
@@ -8797,13 +8797,13 @@ mod tests {
                         view.confirm_pending_permanent_delete(cx);
                         cx.notify();
                     }
-                    (deleted, previous)
+                    (deleted, next)
                 })
             });
             cx.run_until_parked();
             assert!(!deleted.exists());
             cx.read_entity(&view, |view, _| {
-                assert_eq!(view.selected_paths(), vec![previous]);
+                assert_eq!(view.selected_paths(), vec![next]);
                 crate::explorer::test_support::assert_approx_eq(
                     view.scrollbar_metrics().unwrap().scroll_top,
                     before,

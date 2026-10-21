@@ -3086,7 +3086,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn successful_delete_selects_and_reveals_the_previous_row_in_a_large_folder(
+    fn successful_delete_selects_and_reveals_the_next_row_in_a_large_folder(
         cx: &mut TestAppContext,
     ) {
         let temp = TempDir::new();
@@ -3095,7 +3095,7 @@ mod tests {
                 .expect("create test file");
         }
         let deleted = temp.path().join("item-040.txt");
-        let previous = temp.path().join("item-039.txt");
+        let next = temp.path().join("item-041.txt");
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
         cx.run_until_parked();
 
@@ -3112,8 +3112,8 @@ mod tests {
 
         assert!(!deleted.exists());
         cx.read_entity(&view, |view, _| {
-            assert_eq!(view.selected_paths(), vec![previous]);
-            assert_eq!(view.selection.focused_index, Some(39));
+            assert_eq!(view.selected_paths(), vec![next]);
+            assert_eq!(view.selection.focused_index, Some(40));
             assert!(
                 view.scrollbar_metrics()
                     .is_some_and(|metrics| metrics.scroll_top > 0.0),

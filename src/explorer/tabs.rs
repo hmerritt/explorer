@@ -5059,9 +5059,9 @@ mod tests {
 
     #[gpui::test]
     fn confirmed_trash_selects_the_next_surviving_item(cx: &mut TestAppContext) {
-        let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt"]);
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt", "d.txt"]);
         let view = active_test_view(&tabs, cx);
-        let paths = vec![temp.path().join("a.txt"), temp.path().join("b.txt")];
+        let paths = vec![temp.path().join("b.txt"), temp.path().join("c.txt")];
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
@@ -5075,13 +5075,13 @@ mod tests {
                 assert!(view.pending_trash_task.is_some());
                 assert_eq!(view.pending_deleted_paths, paths);
                 assert!(paths.iter().all(|path| path.exists()));
-                assert_eq!(selected_names(view), vec!["c.txt"]);
+                assert_eq!(selected_names(view), vec!["d.txt"]);
                 assert_eq!(
                     view.entries
                         .iter()
                         .map(|entry| entry.name.as_str())
                         .collect::<Vec<_>>(),
-                    vec!["c.txt"]
+                    vec!["a.txt", "d.txt"]
                 );
                 assert!(view.has_background_operation());
                 assert!(view.file_operation_undo_stack.is_empty());
@@ -5091,9 +5091,10 @@ mod tests {
 
         assert!(!paths[0].exists());
         assert!(!paths[1].exists());
-        assert!(temp.path().join("c.txt").exists());
+        assert!(temp.path().join("a.txt").exists());
+        assert!(temp.path().join("d.txt").exists());
         cx.read_entity(&view, |view, _| {
-            assert_eq!(selected_names(view), vec!["c.txt"]);
+            assert_eq!(selected_names(view), vec!["d.txt"]);
             assert!(view.pending_trash_task.is_none());
             assert!(view.pending_deleted_paths.is_empty());
             assert!(!view.has_background_operation());
@@ -5104,9 +5105,9 @@ mod tests {
 
     #[gpui::test]
     fn confirmed_permanent_delete_selects_the_next_surviving_item(cx: &mut TestAppContext) {
-        let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt"]);
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &["a.txt", "b.txt", "c.txt", "d.txt"]);
         let view = active_test_view(&tabs, cx);
-        let paths = vec![temp.path().join("a.txt"), temp.path().join("b.txt")];
+        let paths = vec![temp.path().join("b.txt"), temp.path().join("c.txt")];
 
         cx.update(|_, app| {
             view.update(app, |view, cx| {
@@ -5121,9 +5122,10 @@ mod tests {
 
         assert!(!paths[0].exists());
         assert!(!paths[1].exists());
-        assert!(temp.path().join("c.txt").exists());
+        assert!(temp.path().join("a.txt").exists());
+        assert!(temp.path().join("d.txt").exists());
         cx.read_entity(&view, |view, _| {
-            assert_eq!(selected_names(view), vec!["c.txt"]);
+            assert_eq!(selected_names(view), vec!["d.txt"]);
         });
     }
 

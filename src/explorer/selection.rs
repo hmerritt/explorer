@@ -94,13 +94,13 @@ impl ExplorerView {
             .filter_map(|(ix, entry)| removed_paths.contains(entry.path.as_path()).then_some(ix))
             .next()?;
 
-        self.entries[..first_removed_index]
+        self.entries[first_removed_index + 1..]
             .iter()
-            .rev()
             .find(|entry| !removed_paths.contains(entry.path.as_path()))
             .or_else(|| {
-                self.entries[first_removed_index + 1..]
+                self.entries[..first_removed_index]
                     .iter()
+                    .rev()
                     .find(|entry| !removed_paths.contains(entry.path.as_path()))
             })
             .map(|entry| entry.path.clone())
@@ -542,12 +542,12 @@ mod tests {
     }
 
     #[test]
-    fn selection_after_removing_paths_prefers_survivor_before_first_removed_row() {
+    fn selection_after_removing_paths_prefers_survivor_after_first_removed_row() {
         let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"]);
 
         assert_eq!(
             view.selection_after_removing_paths(&[PathBuf::from("b.txt"), PathBuf::from("d.txt"),]),
-            Some(PathBuf::from("a.txt"))
+            Some(PathBuf::from("c.txt"))
         );
     }
 
@@ -562,14 +562,17 @@ mod tests {
     }
 
     #[test]
-    fn selection_after_removing_paths_handles_single_items_and_first_item_fallback() {
+    fn selection_after_removing_paths_handles_single_items_and_removed_ranges() {
         let view = test_view_with_entries(&["a.txt", "b.txt", "c.txt", "d.txt"]);
         for (removed, expected) in [
-            (vec!["b.txt"], Some("a.txt")),
+            (vec!["b.txt"], Some("c.txt")),
             (vec!["d.txt"], Some("c.txt")),
             (vec!["a.txt"], Some("b.txt")),
             (vec!["a.txt", "b.txt"], Some("c.txt")),
             (vec!["a.txt", "c.txt"], Some("b.txt")),
+            (vec!["b.txt", "c.txt"], Some("d.txt")),
+            (vec!["b.txt", "c.txt", "d.txt"], Some("a.txt")),
+            (vec!["d.txt", "b.txt"], Some("c.txt")),
         ] {
             assert_eq!(
                 view.selection_after_removing_paths(
@@ -590,7 +593,7 @@ mod tests {
         let view = test_view_with_entries(&["d.txt", "b.txt", "a.txt"]);
         assert_eq!(
             view.selection_after_removing_paths(&["b.txt".into()]),
-            Some("d.txt".into())
+            Some("a.txt".into())
         );
         assert_eq!(view.selection_after_removing_paths(&[]), None);
     }
@@ -632,7 +635,7 @@ mod tests {
 
         assert_eq!(
             view.selection_after_removing_paths(&[PathBuf::from("file-b.txt")]),
-            Some(PathBuf::from("folder-a"))
+            Some(PathBuf::from("folder-c"))
         );
     }
 
