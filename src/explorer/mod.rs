@@ -100,13 +100,13 @@ pub use actions::{
     RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut, RenameDelete,
     RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight, RenameSelectAll,
     RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectRight, RenameSelectWordLeft,
-    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, SearchBackspace,
-    SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
-    SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
-    SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
-    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
-    SelectPreviousTab, SelectTabByIndex, SplitPaneDown, SplitPaneLeft, SplitPaneRight, SplitPaneUp,
-    TextInputRedo, TextInputUndo, TrashSelected, UndoFileOperation,
+    RenameSelectWordRight, RenameSelected, RenameWordLeft, RenameWordRight, RestoreClosedTab,
+    SearchBackspace, SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut,
+    SearchDelete, SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight,
+    SearchSelectAll, SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight,
+    SearchSelectWordLeft, SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll,
+    SelectNextTab, SelectPreviousTab, SelectTabByIndex, SplitPaneDown, SplitPaneLeft,
+    SplitPaneRight, SplitPaneUp, TextInputRedo, TextInputUndo, TrashSelected, UndoFileOperation,
 };
 pub(crate) use app_icons::initialize as initialize_native_icon_cache;
 pub(crate) use cache_cleanup::initialize as initialize_cache_cleanup;

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -15,8 +15,8 @@ use gpui::{
 
 use crate::explorer::{
     CloseTab, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, MovePaneDown,
-    MovePaneLeft, MovePaneRight, MovePaneUp, NewTab, NewWindow, SelectNextTab, SelectPreviousTab,
-    SelectTabByIndex, SplitPaneDown, SplitPaneLeft, SplitPaneRight, SplitPaneUp,
+    MovePaneLeft, MovePaneRight, MovePaneUp, NewTab, NewWindow, RestoreClosedTab, SelectNextTab,
+    SelectPreviousTab, SelectTabByIndex, SplitPaneDown, SplitPaneLeft, SplitPaneRight, SplitPaneUp,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     drag_drop::{DraggedEntries, DropDestination},
     icons::{
@@ -36,6 +36,7 @@ use crate::window_chrome::{
 };
 
 const TAB_BAR_HEIGHT: f32 = TITLEBAR_HEIGHT;
+const CLOSED_TAB_HISTORY_LIMIT: usize = 15;
 const CLIPBOARD_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TAB_WIDTH: f32 = 225.0;
 const TAB_MIN_WIDTH: f32 = 160.0;
@@ -133,6 +134,64 @@ enum PaneNode {
 }
 
 impl PaneNode {
+    fn closed_split(&self, pane: PaneId) -> Option<ClosedSplit> {
+        let Self::Split {
+            id,
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        let closed_first = matches!(first.as_ref(), Self::Leaf(id) if *id == pane);
+        if closed_first || matches!(second.as_ref(), Self::Leaf(id) if *id == pane) {
+            return Some(ClosedSplit {
+                id: *id,
+                axis: *axis,
+                ratio: *ratio,
+                closed_first,
+                sibling: if closed_first { second } else { first }.as_ref().clone(),
+            });
+        }
+        first
+            .closed_split(pane)
+            .or_else(|| second.closed_split(pane))
+    }
+
+    fn restore_split_at(&mut self, target: &PaneNode, pane: PaneId, split: &ClosedSplit) -> bool {
+        let matches = match (&*self, target) {
+            (Self::Leaf(current), Self::Leaf(target)) => current == target,
+            (Self::Split { id: current, .. }, Self::Split { id: target, .. }) => current == target,
+            _ => false,
+        };
+        if matches {
+            let sibling = Box::new(std::mem::replace(self, Self::Leaf(pane)));
+            let restored = Box::new(Self::Leaf(pane));
+            let (first, second) = if split.closed_first {
+                (restored, sibling)
+            } else {
+                (sibling, restored)
+            };
+            *self = Self::Split {
+                id: split.id,
+                axis: split.axis,
+                ratio: split.ratio,
+                first,
+                second,
+            };
+            return true;
+        }
+        match self {
+            Self::Leaf(_) => false,
+            Self::Split { first, second, .. } => {
+                first.restore_split_at(target, pane, split)
+                    || second.restore_split_at(target, pane, split)
+            }
+        }
+    }
+
     fn pane_ids(&self, ids: &mut Vec<PaneId>) {
         match self {
             Self::Leaf(id) => ids.push(*id),
@@ -442,6 +501,47 @@ struct ExplorerPane {
     view: Entity<ExplorerView>,
 }
 
+struct ClosedPane {
+    id: PaneId,
+    path: PathBuf,
+    sidebar_group: Option<SidebarGroupKind>,
+}
+
+impl ClosedPane {
+    fn snapshot(pane: &ExplorerPane, cx: &App) -> Self {
+        let view = pane.view.read(cx);
+        Self {
+            id: pane.id,
+            path: view.path().to_path_buf(),
+            sidebar_group: view.active_sidebar_group(),
+        }
+    }
+}
+
+struct ClosedSplit {
+    id: u64,
+    axis: SplitAxis,
+    ratio: f32,
+    closed_first: bool,
+    sibling: PaneNode,
+}
+
+enum ClosedTabEntry {
+    Tab {
+        id: TabId,
+        index: usize,
+        panes: Vec<ClosedPane>,
+        layout: PaneNode,
+        active_pane: PaneId,
+    },
+    Pane {
+        owner: TabId,
+        tab_index: usize,
+        pane: ClosedPane,
+        split: ClosedSplit,
+    },
+}
+
 #[derive(Clone)]
 struct ExplorerTab {
     id: TabId,
@@ -527,6 +627,7 @@ struct TabDragPreview {
 
 pub struct ExplorerTabs {
     tabs: Vec<ExplorerTab>,
+    closed_tabs: VecDeque<ClosedTabEntry>,
     active_tab: TabId,
     next_tab_id: u64,
     next_pane_id: u64,
@@ -601,6 +702,7 @@ impl ExplorerTabs {
 
         Self {
             tabs: vec![ExplorerTab::single(first_id, PaneId(1), view)],
+            closed_tabs: VecDeque::new(),
             active_tab: first_id,
             next_tab_id: 2,
             next_pane_id: 2,
@@ -633,6 +735,7 @@ impl ExplorerTabs {
 
         Self {
             tabs: vec![ExplorerTab::single(first_id, PaneId(1), view)],
+            closed_tabs: VecDeque::new(),
             active_tab: first_id,
             next_tab_id: 2,
             next_pane_id: 2,
@@ -684,6 +787,17 @@ impl ExplorerTabs {
     ) -> ExplorerPane {
         let pane_id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
+        self.create_pane_with_id(pane_id, path, focus_handle, window, cx)
+    }
+
+    fn create_pane_with_id(
+        &mut self,
+        pane_id: PaneId,
+        path: PathBuf,
+        focus_handle: FocusHandle,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> ExplorerPane {
         let view = cx.new(|cx| {
             let mut view =
                 ExplorerView::new_watched_with_focus_handle(path, focus_handle, Some(window), cx);
@@ -692,6 +806,24 @@ impl ExplorerTabs {
         });
         observe_tab_view(&view, window, cx);
         ExplorerPane { id: pane_id, view }
+    }
+
+    fn create_restored_pane(
+        &mut self,
+        snapshot: ClosedPane,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> ExplorerPane {
+        let focus = cx.focus_handle();
+        let pane = self.create_pane_with_id(snapshot.id, snapshot.path, focus, window, cx);
+        if let Some(group) = snapshot.sidebar_group {
+            pane.view.update(cx, |view, cx| {
+                view.navigate_to_sidebar_group(group, cx);
+                view.back_stack.clear();
+                view.forward_stack.clear();
+            });
+        }
+        pane
     }
 
     fn add_foreground_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -873,6 +1005,17 @@ impl ExplorerTabs {
         }
 
         let closing = self.tabs.remove(index);
+        self.remember_closed(ClosedTabEntry::Tab {
+            id: closing.id,
+            index,
+            panes: closing
+                .panes
+                .iter()
+                .map(|pane| ClosedPane::snapshot(pane, cx))
+                .collect(),
+            layout: closing.layout.clone(),
+            active_pane: closing.active_pane,
+        });
         for pane in closing.panes {
             self.prepare_closed_view(pane.view, cx);
         }
@@ -906,6 +1049,92 @@ impl ExplorerTabs {
         }
     }
 
+    fn remember_closed(&mut self, entry: ClosedTabEntry) {
+        self.closed_tabs.push_back(entry);
+        if self.closed_tabs.len() > CLOSED_TAB_HISTORY_LIMIT {
+            self.closed_tabs.pop_front();
+        }
+    }
+
+    fn restore_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(entry) = self.closed_tabs.pop_back() else {
+            return false;
+        };
+        self.cancel_active_tab_thumbnail_extraction(cx);
+        match entry {
+            ClosedTabEntry::Tab {
+                id,
+                index,
+                panes,
+                layout,
+                active_pane,
+            } => {
+                let panes: Vec<_> = panes
+                    .into_iter()
+                    .map(|pane| self.create_restored_pane(pane, window, cx))
+                    .collect();
+                let view = panes
+                    .iter()
+                    .find(|pane| pane.id == active_pane)
+                    .expect("closed tab must contain its focused pane")
+                    .view
+                    .clone();
+                let index = index.min(self.tabs.len());
+                self.tabs.insert(
+                    index,
+                    ExplorerTab {
+                        id,
+                        view,
+                        panes,
+                        layout,
+                        active_pane,
+                    },
+                );
+                self.active_tab = id;
+            }
+            ClosedTabEntry::Pane {
+                owner,
+                tab_index,
+                pane,
+                split,
+            } => {
+                let pane = self.create_restored_pane(pane, window, cx);
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == owner) {
+                    if !tab.layout.restore_split_at(&split.sibling, pane.id, &split) {
+                        let mut siblings = Vec::new();
+                        split.sibling.pane_ids(&mut siblings);
+                        let anchor = siblings
+                            .into_iter()
+                            .find(|id| tab.layout.contains(*id))
+                            .unwrap_or(tab.active_pane);
+                        let restored =
+                            tab.layout
+                                .restore_split_at(&PaneNode::Leaf(anchor), pane.id, &split);
+                        debug_assert!(restored, "active pane must accept restored split");
+                    }
+                    let pane_id = pane.id;
+                    tab.panes.push(pane);
+                    tab.activate_pane(pane_id);
+                    self.active_tab = owner;
+                } else {
+                    let id = TabId(self.next_tab_id);
+                    self.next_tab_id += 1;
+                    let index = tab_index.min(self.tabs.len());
+                    self.tabs
+                        .insert(index, ExplorerTab::single(id, pane.id, pane.view));
+                    self.active_tab = id;
+                }
+            }
+        }
+        self.tab_context_menu = None;
+        self.dock_target = None;
+        self.split_resize_drag = None;
+        self.clear_obsolete_layout_state();
+        self.scroll_active_tab_into_view();
+        self.focus_active_tab(window, cx);
+        true
+    }
+
     fn close_focused_pane(
         &mut self,
         workspace_tab: TabId,
@@ -921,19 +1150,30 @@ impl ExplorerTabs {
             return;
         }
 
+        let tab = &self.tabs[tab_index];
+        let Some(split) = tab.layout.closed_split(pane_id) else {
+            return;
+        };
+        let Some(pane_index) = tab.panes.iter().position(|pane| pane.id == pane_id) else {
+            return;
+        };
+        let closed_pane = ClosedPane::snapshot(&tab.panes[pane_index], cx);
         let removed = {
             let tab = &mut self.tabs[tab_index];
             if !tab.layout.remove(pane_id) {
                 return;
             }
-            let Some(pane_index) = tab.panes.iter().position(|pane| pane.id == pane_id) else {
-                return;
-            };
             let removed = tab.panes.remove(pane_index);
             let next_pane = tab.layout.first_pane();
             tab.activate_pane(next_pane);
             removed
         };
+        self.remember_closed(ClosedTabEntry::Pane {
+            owner: workspace_tab,
+            tab_index,
+            pane: closed_pane,
+            split,
+        });
         self.prepare_closed_view(removed.view, cx);
         self.clear_obsolete_layout_state();
         self.focus_active_tab(window, cx);
@@ -1332,6 +1572,17 @@ impl ExplorerTabs {
     fn handle_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_active_tab(window, cx);
         cx.notify();
+    }
+
+    fn handle_restore_closed_tab(
+        &mut self,
+        _: &RestoreClosedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.restore_closed_tab(window, cx) {
+            cx.notify();
+        }
     }
 
     fn handle_select_next_tab(
@@ -2485,6 +2736,7 @@ impl Render for ExplorerTabs {
             .on_action(cx.listener(Self::handle_new_tab))
             .on_action(cx.listener(Self::handle_new_window))
             .on_action(cx.listener(Self::handle_close_tab))
+            .on_action(cx.listener(Self::handle_restore_closed_tab))
             .on_action(cx.listener(Self::handle_select_next_tab))
             .on_action(cx.listener(Self::handle_select_previous_tab))
             .on_action(cx.listener(Self::handle_select_tab_by_index))
@@ -3052,6 +3304,515 @@ mod tests {
     #[test]
     fn tab_icon_font_remains_dedicated() {
         assert_eq!(tab_icon_font().family, "Segoe Fluent Icons");
+    }
+
+    #[test]
+    fn closed_split_restores_around_the_current_sibling_subtree() {
+        let mut layout = PaneNode::Leaf(PaneId(1));
+        assert!(layout.insert_split(PaneId(1), PaneId(2), SplitDirection::Right, 1));
+        assert!(layout.insert_split(PaneId(2), PaneId(3), SplitDirection::Down, 2));
+        layout.set_ratio(1, 0.3);
+        let split = layout.closed_split(PaneId(1)).unwrap();
+        assert!(layout.remove(PaneId(1)));
+        layout.set_ratio(2, 0.7);
+        assert!(layout.insert_split(PaneId(3), PaneId(4), SplitDirection::Left, 3));
+        let sibling = layout.clone();
+        assert!(layout.restore_split_at(&split.sibling, PaneId(1), &split));
+        assert_eq!(layout.split_ratio(1), Some((SplitAxis::Horizontal, 0.3)));
+        let PaneNode::Split { second, .. } = layout else {
+            panic!("restored split")
+        };
+        assert_eq!(*second, sibling);
+    }
+
+    #[test]
+    fn closed_split_restores_every_direction_and_nested_parent() {
+        for direction in [
+            SplitDirection::Left,
+            SplitDirection::Right,
+            SplitDirection::Up,
+            SplitDirection::Down,
+        ] {
+            for closed in [PaneId(2), PaneId(3)] {
+                let mut layout = PaneNode::Leaf(PaneId(1));
+                layout.insert_split(PaneId(1), PaneId(2), SplitDirection::Right, 1);
+                layout.insert_split(PaneId(2), PaneId(3), direction, 2);
+                layout.set_ratio(1, 0.4);
+                layout.set_ratio(2, 0.65);
+                let original = layout.clone();
+                let split = layout.closed_split(closed).unwrap();
+                assert!(layout.remove(closed));
+                assert!(layout.restore_split_at(&split.sibling, closed, &split));
+                assert_eq!(layout, original);
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_clamps_position_after_remaining_tabs_are_merged(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                for _ in 0..3 {
+                    tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                }
+                let closed = tabs.tabs[3].id;
+                tabs.close_tab(closed, window, cx);
+                let owner = tabs.tabs[0].id;
+                let pane = tabs.tabs[0].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    pane,
+                    SplitDirection::Right,
+                    window,
+                    cx
+                ));
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    pane,
+                    SplitDirection::Down,
+                    window,
+                    cx
+                ));
+                assert_eq!(tabs.closed_tabs.len(), 1);
+                assert!(tabs.restore_closed_tab(window, cx));
+                assert_eq!(tabs.tabs.len(), 2);
+                assert_eq!(tabs.tabs[1].id, closed);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_preserves_sidebar_group_location(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                tabs.tabs[1].view.update(cx, |view, cx| {
+                    view.navigate_to_sidebar_group(SidebarGroupKind::Drives, cx);
+                });
+                tabs.close_tab(tabs.tabs[1].id, window, cx);
+                assert!(tabs.restore_closed_tab(window, cx));
+                let view = tabs.active_tab().unwrap().view.read(cx);
+                assert_eq!(view.active_sidebar_group(), Some(SidebarGroupKind::Drives));
+                assert!(view.back_stack.is_empty());
+                assert!(view.forward_stack.is_empty());
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_uses_close_time_directory_position_and_fresh_view(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                tabs.add_background_tab(temp.path().join("b"), window, cx);
+                let id = tabs.tabs[1].id;
+                let old_view = tabs.tabs[1].view.clone();
+                old_view.update(cx, |view, _| {
+                    view.navigate_to_directory(
+                        temp.path().join("b"),
+                        crate::explorer::navigation::HistoryMode::Record,
+                    );
+                });
+                tabs.close_tab(id, window, cx);
+                assert!(tabs.restore_closed_tab(window, cx));
+                assert_eq!(tabs.tabs[1].id, id);
+                assert_eq!(tabs.active_tab, id);
+                assert_eq!(tabs.tabs[1].view.read(cx).path(), temp.path().join("b"));
+                assert_ne!(tabs.tabs[1].view.entity_id(), old_view.entity_id());
+                assert!(tabs.tabs[1].view.read(cx).selected_paths().is_empty());
+                assert!(tabs.closed_tabs.is_empty());
+                assert!(!tabs.restore_closed_tab(window, cx));
+            })
+        });
+        assert_active_tab_focused(&tabs, cx);
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_preserves_nested_splits_and_all_directories(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let owner = tabs.active_tab;
+                let first = tabs.tabs[0].active_pane;
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let second = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    first,
+                    SplitDirection::Right,
+                    window,
+                    cx
+                ));
+                tabs.add_background_tab(temp.path().join("b"), window, cx);
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    second,
+                    SplitDirection::Down,
+                    window,
+                    cx
+                ));
+                tabs.tabs[0].layout.set_ratio(1, 0.31);
+                tabs.tabs[0].layout.set_ratio(2, 0.68);
+                tabs.tabs[0].activate_pane(second);
+                let layout = tabs.tabs[0].layout.clone();
+                let paths: Vec<_> = tabs.tabs[0]
+                    .panes
+                    .iter()
+                    .map(|pane| (pane.id, pane.view.read(cx).path().to_path_buf()))
+                    .collect();
+                tabs.close_tab(owner, window, cx);
+                assert_eq!(tabs.closed_tabs.len(), 1);
+                assert_eq!(tabs.tabs.len(), 1); // Existing last-split close creates a startup tab.
+                assert!(tabs.restore_closed_tab(window, cx));
+                let restored = tabs.active_tab().unwrap();
+                assert_eq!(restored.id, owner);
+                assert_eq!(restored.layout, layout);
+                assert_eq!(restored.active_pane, second);
+                for (id, path) in paths {
+                    assert_eq!(restored.pane(id).unwrap().view.read(cx).path(), path);
+                }
+                let next_pane = tabs.next_pane_id;
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                assert_eq!(tabs.tabs.last().unwrap().active_pane, PaneId(next_pane));
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_pane_after_owner_tab_preserves_surviving_navigation(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let owner = tabs.active_tab;
+                let first = tabs.tabs[0].active_pane;
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let closed = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    first,
+                    SplitDirection::Left,
+                    window,
+                    cx
+                ));
+                tabs.tabs[0].layout.set_ratio(1, 0.38);
+                let layout = tabs.tabs[0].layout.clone();
+                tabs.close_active_tab(window, cx);
+                assert_eq!(tabs.closed_tabs.len(), 1);
+                tabs.tabs[0].view.update(cx, |view, _| {
+                    view.navigate_to_directory(
+                        temp.path().join("b"),
+                        crate::explorer::navigation::HistoryMode::Record,
+                    );
+                });
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                tabs.close_tab(owner, window, cx);
+                assert_eq!(tabs.closed_tabs.len(), 2);
+                assert!(tabs.restore_closed_tab(window, cx));
+                assert_eq!(tabs.active_tab, owner);
+                let survivor = tabs.tabs[0].view.clone();
+                assert!(tabs.restore_closed_tab(window, cx));
+                let restored = tabs.active_tab().unwrap();
+                assert_eq!(restored.layout, layout);
+                assert_eq!(restored.active_pane, closed);
+                assert_eq!(
+                    restored.pane(first).unwrap().view.entity_id(),
+                    survivor.entity_id()
+                );
+                assert_eq!(survivor.read(cx).path(), temp.path().join("b"));
+                assert_eq!(restored.view.read(cx).path(), temp.path().join("a"));
+            })
+        });
+        assert_active_tab_focused(&tabs, cx);
+    }
+
+    #[gpui::test]
+    fn restore_closed_pane_uses_surviving_sibling_then_active_pane(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let owner = tabs.active_tab;
+                let first = tabs.tabs[0].active_pane;
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let second = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    first,
+                    SplitDirection::Right,
+                    window,
+                    cx
+                ));
+                tabs.add_background_tab(temp.path().join("b"), window, cx);
+                let third = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    second,
+                    SplitDirection::Down,
+                    window,
+                    cx
+                ));
+                tabs.tabs[0].activate_pane(first);
+                tabs.close_active_tab(window, cx);
+                // Remove the original sibling subtree without recording another closure.
+                assert!(tabs.tabs[0].layout.remove(third));
+                tabs.tabs[0].panes.retain(|pane| pane.id != third);
+                tabs.tabs[0].activate_pane(second);
+                assert!(tabs.restore_closed_tab(window, cx));
+                assert_eq!(
+                    tabs.tabs[0].layout,
+                    PaneNode::Split {
+                        id: 1,
+                        axis: SplitAxis::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(PaneNode::Leaf(first)),
+                        second: Box::new(PaneNode::Leaf(second)),
+                    }
+                );
+                tabs.close_active_tab(window, cx);
+                // Replace the remaining pane, leaving none of the recorded siblings.
+                let focus = cx.focus_handle();
+                let replacement = tabs.create_pane(temp.path().to_path_buf(), focus, window, cx);
+                let replacement_id = replacement.id;
+                tabs.tabs[0].panes = vec![replacement];
+                tabs.tabs[0].layout = PaneNode::Leaf(replacement_id);
+                tabs.tabs[0].activate_pane(replacement_id);
+                assert!(tabs.restore_closed_tab(window, cx));
+                assert!(tabs.tabs[0].layout.contains(replacement_id));
+                assert!(tabs.tabs[0].layout.contains(first));
+                assert_eq!(tabs.tabs[0].active_pane, first);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_pane_after_unsplit_opens_standalone_tab(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b"]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let owner = tabs.active_tab;
+                let first = tabs.tabs[0].active_pane;
+                tabs.add_background_tab(temp.path().join("a"), window, cx);
+                let second = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    first,
+                    SplitDirection::Right,
+                    window,
+                    cx
+                ));
+                tabs.add_background_tab(temp.path().join("b"), window, cx);
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    second,
+                    SplitDirection::Down,
+                    window,
+                    cx
+                ));
+                let closed = tabs.tabs[0].active_pane;
+                tabs.close_active_tab(window, cx);
+                assert!(tabs.unsplit_tab(owner, window, cx));
+                assert_eq!(tabs.closed_tabs.len(), 1);
+                let survivors: Vec<_> = tabs.tabs.iter().map(|tab| tab.view.entity_id()).collect();
+                assert!(tabs.restore_closed_tab(window, cx));
+                assert_eq!(tabs.tabs.len(), 3);
+                assert_eq!(tabs.tabs[0].active_pane, closed);
+                assert_eq!(tabs.tabs[0].view.read(cx).path(), temp.path().join("b"));
+                assert_eq!(
+                    tabs.tabs[1..]
+                        .iter()
+                        .map(|tab| tab.view.entity_id())
+                        .collect::<Vec<_>>(),
+                    survivors
+                );
+                assert!(tabs.tabs.iter().all(|tab| !tab.is_split()));
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_history_evicts_oldest_and_ignores_failed_closures(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.close_active_tab(window, cx);
+                tabs.close_tab(TabId(999), window, cx);
+                assert!(tabs.closed_tabs.is_empty());
+                assert!(!tabs.restore_closed_tab(window, cx));
+                let mut ids = Vec::new();
+                for _ in 0..16 {
+                    tabs.add_foreground_tab(temp.path().to_path_buf(), window, cx);
+                    ids.push(tabs.active_tab);
+                    tabs.close_active_tab(window, cx);
+                }
+                assert_eq!(tabs.closed_tabs.len(), 15);
+                for id in ids[1..].iter().rev() {
+                    assert!(tabs.restore_closed_tab(window, cx));
+                    assert_eq!(tabs.active_tab, *id);
+                }
+                assert!(!tabs.restore_closed_tab(window, cx));
+                assert_eq!(tabs.tabs.len(), 16);
+                assert!(!tabs.tabs.iter().any(|tab| tab.id == ids[0]));
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_history_is_local_to_its_window(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let (first, first_cx) = test_tabs_at_path(cx, path.clone());
+        first_cx.update(|window, app| {
+            first.update(app, |tabs, cx| {
+                tabs.add_background_tab(path.clone(), window, cx);
+                tabs.close_tab(tabs.tabs[1].id, window, cx);
+                assert_eq!(tabs.closed_tabs.len(), 1);
+            })
+        });
+        let (second, second_cx) = test_tabs_at_path(cx, path);
+        second_cx.update(|window, app| {
+            second.update(app, |tabs, cx| {
+                assert!(!tabs.restore_closed_tab(window, cx));
+                assert_eq!(tabs.tabs.len(), 1);
+            })
+        });
+        cx.read(|app| assert_eq!(first.read(app).closed_tabs.len(), 1));
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_reloads_missing_directory_without_losing_other_panes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["missing"]);
+        let missing = temp.path().join("missing");
+        let (restored, survivor) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let owner = tabs.active_tab;
+                let first = tabs.tabs[0].active_pane;
+                tabs.add_background_tab(missing.clone(), window, cx);
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    first,
+                    SplitDirection::Right,
+                    window,
+                    cx
+                ));
+                tabs.close_tab(owner, window, cx);
+                fs::remove_dir(&missing).unwrap();
+                assert!(tabs.restore_closed_tab(window, cx));
+                let tab = tabs.active_tab().unwrap();
+                (tab.view.clone(), tab.pane(first).unwrap().view.clone())
+            })
+        });
+        cx.run_until_parked();
+        cx.read_entity(&restored, |view, _| {
+            assert_eq!(view.path(), missing);
+            assert!(view.read_error.is_some());
+        });
+        cx.read_entity(&survivor, |view, _| {
+            assert_eq!(view.path(), temp.path());
+            assert!(view.read_error.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_does_not_duplicate_background_downloads(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                let owner = tabs.tabs[1].id;
+                let original = tabs.tabs[1].view.clone();
+                original.update(cx, |view, _| {
+                    view.download_notice_rows
+                        .push(transfer_download_row(7, temp.path().to_path_buf()))
+                });
+                tabs.close_tab(owner, window, cx);
+                assert!(tabs.restore_closed_tab(window, cx));
+                let restored = tabs.active_tab().unwrap().view.clone();
+                assert_ne!(restored.entity_id(), original.entity_id());
+                assert!(!restored.read(cx).has_active_downloads());
+                assert!(!restored.read(cx).has_background_operation());
+                assert!(original.read(cx).has_active_downloads());
+                assert_eq!(tabs.background_operation_tabs.len(), 1);
+                assert_eq!(
+                    tabs.background_operation_tabs[0].entity_id(),
+                    original.entity_id()
+                );
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn restore_closed_tab_shortcut_dispatches_from_directory_and_text_inputs(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        cx.update(|app| app.bind_keys(crate::app::platform_key_bindings()));
+        let (temp, tabs, cx) = test_tabs_with_directories_and_files(cx, &[], &["a.txt"]);
+        let shortcut = if cfg!(target_os = "macos") {
+            "cmd-shift-t"
+        } else {
+            "ctrl-shift-t"
+        };
+        for input in ["directory", "address", "search", "rename"] {
+            cx.update(|window, app| {
+                tabs.update(app, |tabs, cx| {
+                    tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                    tabs.close_tab(tabs.tabs.last().unwrap().id, window, cx);
+                    tabs.active_tab().unwrap().view.update(cx, |view, cx| {
+                        match input {
+                            "address" => {
+                                assert!(view.start_address_bar_edit(window, cx));
+                            }
+                            "search" => view.handle_search_edit(&SearchEdit, window, cx),
+                            "rename" => {
+                                view.select_single_path(&temp.path().join("a.txt"));
+                                assert!(view.start_rename_selected(window, cx));
+                            }
+                            _ => view.focus_explorer(window),
+                        }
+                        cx.notify();
+                    });
+                    cx.notify();
+                })
+            });
+            cx.simulate_keystrokes(shortcut);
+            cx.read_entity(&tabs, |tabs, _| {
+                assert!(
+                    tabs.closed_tabs.is_empty(),
+                    "{input} focus must dispatch restore"
+                );
+            });
+            assert_active_tab_focused(&tabs, cx);
+            cx.run_until_parked();
+        }
     }
 
     fn test_tabs_with_files<'a>(

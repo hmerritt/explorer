@@ -45,13 +45,13 @@ use crate::explorer::{
     RenameLineHome, RenameNoop, RenamePaste, RenameRight, RenameSelectAll, RenameSelectDown,
     RenameSelectEnd, RenameSelectHome, RenameSelectLeft, RenameSelectLineEnd, RenameSelectLineHome,
     RenameSelectRight, RenameSelectUp, RenameSelectWordLeft, RenameSelectWordRight, RenameSelected,
-    RenameUp, RenameWordLeft, RenameWordRight, SearchBackspace, SearchBackspaceWord, SearchCancel,
-    SearchCommit, SearchCopy, SearchCut, SearchDelete, SearchEdit, SearchEnd, SearchHome,
-    SearchLeft, SearchPaste, SearchRight, SearchSelectAll, SearchSelectEnd, SearchSelectHome,
-    SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft, SearchSelectWordRight,
-    SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab, SelectPreviousTab, SelectTabByIndex,
-    SplitPaneDown, SplitPaneLeft, SplitPaneRight, SplitPaneUp, TextInputRedo, TextInputUndo,
-    TrashSelected, UndoFileOperation,
+    RenameUp, RenameWordLeft, RenameWordRight, RestoreClosedTab, SearchBackspace,
+    SearchBackspaceWord, SearchCancel, SearchCommit, SearchCopy, SearchCut, SearchDelete,
+    SearchEdit, SearchEnd, SearchHome, SearchLeft, SearchPaste, SearchRight, SearchSelectAll,
+    SearchSelectEnd, SearchSelectHome, SearchSelectLeft, SearchSelectRight, SearchSelectWordLeft,
+    SearchSelectWordRight, SearchWordLeft, SearchWordRight, SelectAll, SelectNextTab,
+    SelectPreviousTab, SelectTabByIndex, SplitPaneDown, SplitPaneLeft, SplitPaneRight, SplitPaneUp,
+    TextInputRedo, TextInputUndo, TrashSelected, UndoFileOperation,
 };
 use crate::image_viewer::{
     ImageOpenNext, ImageOpenPrevious, ImageToggleActualSize, ImageZoomIn, ImageZoomOut,
@@ -1155,6 +1155,7 @@ fn push_mac_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-n", NewWindow, None),
         KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("cmd-shift-t", RestoreClosedTab, None),
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("f2", RenameSelected, Some("Explorer")),
     ]);
@@ -1186,6 +1187,7 @@ fn push_windows_like_key_bindings(bindings: &mut Vec<KeyBinding>) {
         KeyBinding::new("ctrl-shift-s", OpenSettings, None),
         KeyBinding::new("ctrl-n", NewWindow, None),
         KeyBinding::new("ctrl-t", NewTab, None),
+        KeyBinding::new("ctrl-shift-t", RestoreClosedTab, None),
         KeyBinding::new("ctrl-w", CloseTab, None),
         KeyBinding::new("ctrl-1", SelectTabByIndex { index: 0 }, None),
         KeyBinding::new("ctrl-2", SelectTabByIndex { index: 1 }, None),
@@ -2182,6 +2184,12 @@ mod tests {
         assert!(has_binding(&bindings, OpenSettings, "cmd-,", None));
         assert!(has_binding(&bindings, NewWindow, "cmd-n", None));
         assert!(has_binding(&bindings, NewTab, "cmd-t", None));
+        assert!(has_binding(
+            &bindings,
+            RestoreClosedTab,
+            "cmd-shift-t",
+            None
+        ));
         assert!(has_binding(&bindings, CloseTab, "cmd-w", None));
     }
 
@@ -2324,6 +2332,12 @@ mod tests {
         ));
         assert!(has_binding(&bindings, NewWindow, "ctrl-n", None));
         assert!(has_binding(&bindings, NewTab, "ctrl-t", None));
+        assert!(has_binding(
+            &bindings,
+            RestoreClosedTab,
+            "ctrl-shift-t",
+            None
+        ));
         assert!(has_binding(&bindings, CloseTab, "ctrl-w", None));
         assert!(has_binding(
             &bindings,

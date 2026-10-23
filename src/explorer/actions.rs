@@ -132,6 +132,7 @@ actions!(
         NewWindow,
         NewTab,
         CloseTab,
+        RestoreClosedTab,
         SelectNextTab,
         SelectPreviousTab,
         SplitPaneLeft,
