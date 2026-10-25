@@ -18,5 +18,5 @@ cask "explorer" do
   app "Explorer.app"
   binary "#{appdir}/Explorer.app/Contents/MacOS/explorer", target: "explorer"
 
-  zap trash: "~/Library/Application Support/com.hmerritt.explorer"
+  zap trash: "~/.config/explorer"
 end

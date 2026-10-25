@@ -53,19 +53,23 @@ class Explorer < Formula
 
         (share/"icons/hicolor/512x512/apps").install libexec/"explorer.app/share/icons/hicolor/512x512/apps/explorer.png"
 
-        (share/"applications").mkpath
-        (share/"applications/com.hmerritt.explorer.desktop").write <<~DESKTOP
+        desktop_entry = <<~DESKTOP
           [Desktop Entry]
           Type=Application
           Name=Explorer
           Comment=File Explorer for Windows, macOS, and Linux, built with GPUI.
           Exec=#{opt_bin}/explorer %F
-          Icon=#{opt_share}/icons/hicolor/512x512/apps/explorer.png
+          Icon=__ICON__
           Terminal=false
           Categories=Utility;FileManager;
-          MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
+          MimeType=inode/directory;application/epub+zip;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
           StartupNotify=true
         DESKTOP
+        (share/"applications").mkpath
+        (share/"applications/com.hmerritt.explorer.desktop").write desktop_entry.sub(
+          "Icon=__ICON__",
+          "Icon=#{opt_share}/icons/hicolor/512x512/apps/explorer.png",
+        )
 
         (bin/"explorer-register-desktop").write <<~SH
           #!/usr/bin/env sh
@@ -94,16 +98,7 @@ class Explorer < Formula
 
           mkdir -p "$applications_dir"
           cat > "$desktop_file" <<EOF
-          [Desktop Entry]
-          Type=Application
-          Name=Explorer
-          Comment=File Explorer for Windows, macOS, and Linux, built with GPUI.
-          Exec=#{opt_bin}/explorer %F
-          Icon=$icon_path
-          Terminal=false
-          Categories=Utility;FileManager;
-          MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;
-          StartupNotify=true
+          #{desktop_entry.sub("Icon=__ICON__", "Icon=$icon_path").chomp}
           EOF
 
           if command -v update-desktop-database >/dev/null 2>&1; then
@@ -207,13 +202,14 @@ class Explorer < Formula
         desktop_entry = (share/"applications/com.hmerritt.explorer.desktop").read
         assert_match stable_exec, desktop_entry
         assert_match stable_icon, desktop_entry
-        assert_match "MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;", desktop_entry
+        assert_match "MimeType=inode/directory;application/epub+zip;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;", desktop_entry
         refute_match versioned_exec, desktop_entry
         refute_match versioned_icon, desktop_entry
 
         register_desktop = (bin/"explorer-register-desktop").read
         assert_match stable_exec, register_desktop
-        assert_match "MimeType=inode/directory;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;", register_desktop
+        assert_match "MimeType=inode/directory;application/epub+zip;image/avif;image/bmp;image/x-MS-bmp;image/x-bmp;image/gif;image/jpeg;image/png;image/svg+xml;image/tiff;image/webp;image/vnd.microsoft.icon;image/ico;image/icon;image/x-ico;image/x-icon;", register_desktop
+        assert_match "Icon=$icon_path", register_desktop
         assert_match "bundle_icon=\"#{opt_libexec}/explorer.app/share/#{icon_path}\"", register_desktop
         assert_match "share_icon=\"#{opt_share}/#{icon_path}\"", register_desktop
         refute_match versioned_exec, register_desktop
