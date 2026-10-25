@@ -216,7 +216,6 @@ pub(crate) fn windows_local_os_drive_root() -> Option<PathBuf> {
                     buffer.truncate(length as usize);
                     let system_dir = String::from_utf16(&buffer).ok()?;
                     if let Some(root) = Path::new(&system_dir).components().next() {
-                        println!("windows_local_os_drive_root: {:?}", root.as_os_str());
                         return Some(PathBuf::from(format!(
                             "{}\\",
                             root.as_os_str().to_string_lossy()

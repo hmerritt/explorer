@@ -62,7 +62,6 @@ pub(super) struct RecursiveSearchPath {
     file_name: OsString,
     normalized_name: String,
     depth: usize,
-    materialized_entry: Option<FileEntry>,
 }
 
 impl RecursiveSearchPath {
@@ -238,7 +237,6 @@ fn scan_recursive_paths_with_progress(
                 file_name: entry.file_name,
                 normalized_name: entry.client_state,
                 depth,
-                materialized_entry: None,
             });
             if let Some(progress) = progress {
                 progress.store(paths.len(), Ordering::Relaxed);
@@ -363,10 +361,6 @@ fn materialize_recursive_entry(
 ) -> Option<FileEntry> {
     if cancel.load(Ordering::Relaxed) {
         return None;
-    }
-
-    if let Some(entry) = &recursive_path.materialized_entry {
-        return Some(entry.clone());
     }
 
     let path = recursive_path.path();
@@ -520,7 +514,6 @@ mod tests {
                         normalized_name: file_name.to_string_lossy().to_lowercase(),
                         file_name,
                         depth,
-                        materialized_entry: None,
                     }
                 })
                 .collect::<Vec<_>>(),

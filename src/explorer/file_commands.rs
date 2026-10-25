@@ -411,10 +411,10 @@ impl ExplorerView {
             return;
         }
         if crate::explorer::portable_devices::is_portable_path(&self.path)
-            || clipboard.paths.iter().any(|path| {
-                super::remote_fs::is_remote(path)
-                    || crate::explorer::portable_devices::is_portable_path(path)
-            })
+            || clipboard
+                .paths
+                .iter()
+                .any(|path| crate::explorer::portable_devices::is_portable_path(path))
         {
             self.start_portable_transfer(
                 clipboard.paths,

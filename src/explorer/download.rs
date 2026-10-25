@@ -1422,7 +1422,7 @@ fn bounded_ytdlp_message(bytes: &[u8]) -> String {
     while !message.is_char_boundary(start) {
         start += 1;
     }
-    format!("â€¦{}", &message[start..])
+    format!("…{}", &message[start..])
 }
 
 fn ytdlp_executable_from_path() -> Option<PathBuf> {
@@ -2183,6 +2183,9 @@ mod tests {
         let tail = read_bounded_tail(oversized.as_slice(), YTDLP_ERROR_MESSAGE_LIMIT)
             .expect("bounded tail");
         assert_eq!(tail.len(), YTDLP_ERROR_MESSAGE_LIMIT);
+        let truncated = bounded_ytdlp_message(&oversized);
+        assert_eq!(truncated.chars().next(), Some('…'));
+        assert_eq!(truncated.len(), YTDLP_ERROR_MESSAGE_LIMIT + '…'.len_utf8());
     }
 
     const YTDLP_TEST_MODE: &str = "EXPLORER_TEST_YTDLP_MODE";

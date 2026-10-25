@@ -1455,10 +1455,7 @@ impl PropertiesDialog {
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move {
-                        let path = property_media_local_path(path)?;
-                        load_audio_cover_previews(&path)
-                    }
+                    async move { load_audio_cover_previews(&path) }
                 })
                 .await;
 
@@ -1534,28 +1531,6 @@ impl PropertiesDialog {
         ));
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
-            let media_path = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { property_media_local_path(path) }
-                })
-                .await;
-            let path = match media_path {
-                Ok(path) => path,
-                Err(error) => {
-                    let _ = this.update(cx, |dialog, cx| {
-                        if dialog.spectrum_generation == generation {
-                            dialog.spectrum_task = None;
-                            dialog.spectrum_cancel = None;
-                            dialog.spectrum_state = PropertySpectrumState::Failed(error);
-                            cx.notify();
-                        }
-                    });
-                    return;
-                }
-            };
-
             let result = cx
                 .background_executor()
                 .spawn({
@@ -1655,30 +1630,6 @@ impl PropertiesDialog {
             }
 
             let started = Instant::now();
-            let media_path = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { property_media_local_path(path) }
-                })
-                .await;
-            let path = match media_path {
-                Ok(path) => path,
-                Err(error) => {
-                    let _ = this.update(cx, |dialog, cx| {
-                        if dialog.apply_spectrum_refinement_result(
-                            spectrum_generation,
-                            refinement_generation,
-                            target,
-                            Err(error),
-                        ) {
-                            cx.notify();
-                        }
-                    });
-                    return;
-                }
-            };
-
             let result = cx
                 .background_executor()
                 .spawn({
@@ -1802,35 +1753,6 @@ impl PropertiesDialog {
         ));
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
-            let media_path = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    async move { property_media_local_path(path) }
-                })
-                .await;
-            let path = match media_path {
-                Ok(path) => path,
-                Err(error) => {
-                    crate::debug_options::log_property_timing(
-                        started.elapsed(),
-                        format_args!(
-                            "video frames failed path={} error={}",
-                            path.display(),
-                            error
-                        ),
-                    );
-                    let _ = this.update(cx, |dialog, cx| {
-                        if dialog.frames_generation == generation {
-                            dialog.frames_task = None;
-                            dialog.frames_cancel = None;
-                            dialog.frames_state = PropertyFramesState::Failed(error);
-                            cx.notify();
-                        }
-                    });
-                    return;
-                }
-            };
             let requests = cx
                 .background_executor()
                 .spawn({
@@ -5357,10 +5279,6 @@ fn path_may_have_exif(path: &Path) -> bool {
 
 fn path_may_have_media_details(path: &Path) -> bool {
     path_may_have_exif(path) || ffprobe_metadata_kind_for_path(path).is_some()
-}
-
-fn property_media_local_path(path: PathBuf) -> Result<PathBuf, String> {
-    Ok(path)
 }
 
 const VIDEO_FRAME_COUNT: usize = 20;

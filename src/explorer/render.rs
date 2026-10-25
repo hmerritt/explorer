@@ -2779,7 +2779,6 @@ impl ExplorerView {
             )))
             .border_1()
             .border_color(rgb(0xffffff))
-            // .border_color(rgb(0x949494))
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
         row = add_entry_hover_preview(row, entry.clone(), cx);
@@ -8162,8 +8161,8 @@ fn codebase_makeup_segment_corner_radii(
 
 fn git_entry_marker_strip(marker: GitEntryMarker) -> Div {
     let color = match marker {
-        GitEntryMarker::New => 0x289a47,     // 36a646
-        GitEntryMarker::Changed => 0xfcc629, // e69500
+        GitEntryMarker::New => 0x289a47,
+        GitEntryMarker::Changed => 0xfcc629,
     };
     div()
         .debug_selector(|| "git-entry-marker-strip".to_owned())

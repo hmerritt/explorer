@@ -1602,10 +1602,6 @@ fn entry_context_menu_items_with_custom_in_directory(
         if let Some(entry) = selected_entries
             .first()
             .filter(|entry| entry_is_open_with_context_menu_target(entry))
-            .filter(|entry| {
-                let _ = entry;
-                true
-            })
         {
             items.push(crate::explorer::open_with::context_menu_item(&entry.path));
         }
