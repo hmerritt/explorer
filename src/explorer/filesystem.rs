@@ -1730,7 +1730,6 @@ impl From<bool> for EntryVisibility {
     }
 }
 
-#[allow(dead_code)]
 pub(super) fn load_entries(
     path: &Path,
     visibility: impl Into<EntryVisibility>,

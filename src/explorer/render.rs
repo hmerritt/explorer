@@ -4741,7 +4741,6 @@ fn operation_notice_style(kind: OperationNoticeKind) -> (u32, u32, u32, &'static
     match kind {
         OperationNoticeKind::Error => (0xfff4f4, 0xf1c7c7, 0x6f1d1d, "operation-notice-error"),
         OperationNoticeKind::Info => (0xf5f5f5, 0xd9d9d9, 0x404040, "operation-notice-info"),
-        OperationNoticeKind::Success => (0xf1fbf2, 0xb8dfbd, 0x166b25, "operation-notice-success"),
     }
 }
 
@@ -13870,7 +13869,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_notice_styles_cover_error_info_and_success() {
+    fn operation_notice_styles_cover_error_and_info() {
         assert_eq!(
             operation_notice_style(OperationNoticeKind::Error),
             (0xfff4f4, 0xf1c7c7, 0x6f1d1d, "operation-notice-error")
@@ -13878,10 +13877,6 @@ mod tests {
         assert_eq!(
             operation_notice_style(OperationNoticeKind::Info),
             (0xf5f5f5, 0xd9d9d9, 0x404040, "operation-notice-info")
-        );
-        assert_eq!(
-            operation_notice_style(OperationNoticeKind::Success),
-            (0xf1fbf2, 0xb8dfbd, 0x166b25, "operation-notice-success")
         );
     }
 

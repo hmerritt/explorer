@@ -19,14 +19,12 @@ pub(super) enum ExplorerLocation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(super) enum ExplorerRefreshDriver {
     Notify,
     Poll,
     Events,
 }
 
-#[allow(dead_code)]
 pub(super) struct ExplorerFs;
 
 impl ExplorerFs {
@@ -100,7 +98,6 @@ impl ExplorerFs {
         }
     }
 
-    #[allow(dead_code)]
     pub(super) fn list_dir(
         &self,
         path: &Path,
@@ -189,7 +186,6 @@ impl ExplorerFs {
     }
 }
 
-#[allow(dead_code)]
 fn list_local_dir(path: &Path, visibility: EntryVisibility) -> io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(path)? {

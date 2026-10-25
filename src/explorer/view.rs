@@ -281,12 +281,10 @@ pub(super) struct OperationNotice {
     pub(super) text: String,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OperationNoticeKind {
     Error,
     Info,
-    Success,
 }
 
 impl OperationNotice {
@@ -297,17 +295,9 @@ impl OperationNotice {
         }
     }
 
-    #[allow(dead_code)]
     pub(super) fn info(text: impl Into<String>) -> Self {
         Self {
             kind: OperationNoticeKind::Info,
-            text: text.into(),
-        }
-    }
-
-    pub(super) fn success(text: impl Into<String>) -> Self {
-        Self {
-            kind: OperationNoticeKind::Success,
             text: text.into(),
         }
     }
@@ -2696,11 +2686,6 @@ impl ExplorerView {
 
     pub(super) fn set_info_notice(&mut self, text: impl Into<String>) {
         self.operation_notice = Some(OperationNotice::info(text));
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn set_success_notice(&mut self, text: impl Into<String>) {
-        self.operation_notice = Some(OperationNotice::success(text));
     }
 
     pub(super) fn is_directory_loading(&self) -> bool {
