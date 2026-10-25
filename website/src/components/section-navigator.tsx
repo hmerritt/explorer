@@ -105,7 +105,6 @@ export function AnimatedSectionNavigator({
         if (position === layout.activeIndex)
           link.setAttribute('aria-current', 'location')
         else link.removeAttribute('aria-current')
-        groups[index].dataset.phase = label.phase
         letters[index].forEach((element, letterIndex) => {
           const pose = label.letters[letterIndex]
           element.style.transform = `translate3d(${pose.x}px, ${pose.y}px, 0) translate(-50%, -50%) rotate(${pose.rotation}deg) scale(${pose.scale})`

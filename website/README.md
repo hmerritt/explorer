@@ -42,9 +42,9 @@ The release service retains its five-second timeout and GitHub releases fallback
 on cold failures. Only published Mac ZIPs, Linux tarballs and Windows
 installer/portable downloads are shown. No API secret is required.
 
-The icon comes from `assets/explorer.png`. The four screenshots in
+The icon comes from `assets/explorer.png`. The three screenshots in
 `public/images/` are actual Explorer captures using the isolated README demo
-fixture: overview, large icons, image viewer and image properties. PNGs are
+fixture: overview, large icons and image viewer. PNGs are
 retained for full-size links; the page uses optimized WebP versions.
 `scripts/prepare-images.py` regenerates those WebPs and the 1200 × 630 social
 card from the captures (requires Python and Pillow). The capture dimensions are

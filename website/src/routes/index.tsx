@@ -137,7 +137,6 @@ function Hero({
           />
           <div className="hero-brand">
             <span>Explorer</span>
-            {/*<span className="number-tag"> [VERSION-NUMBER] </span>*/}
           </div>
         </div>
         <h1 data-hero-reveal>

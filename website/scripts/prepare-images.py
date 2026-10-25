@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 root = Path(__file__).resolve().parents[1] / "public"
-for name in ("overview", "large-icons", "image-viewer", "properties"):
+for name in ("overview", "large-icons", "image-viewer"):
     with Image.open(root / "images" / f"{name}.png") as capture:
         capture.convert("RGB").save(root / "images" / f"{name}.webp", quality=95, method=6)
         print(f"{name}: {capture.width} x {capture.height}")
