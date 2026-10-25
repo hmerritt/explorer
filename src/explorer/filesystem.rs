@@ -3848,10 +3848,6 @@ fn prepare_extract_archive_operation(
     destination: &Path,
 ) -> Result<FileOperationJob, String> {
     let archive_diagnostics = ArchiveDiagnostics::start();
-    let mut total_timing = crate::debug_options::ArchiveTiming::start(
-        "prepare.total",
-        format_args!("archives={}", archives.len()),
-    );
 
     if archives.is_empty() {
         return Err("No archive files were selected.".to_owned());
@@ -3884,23 +3880,11 @@ fn prepare_extract_archive_operation(
             ));
         }
 
-        let mut listing_timing = crate::debug_options::ArchiveTiming::start(
-            "prepare.list",
-            format_args!("archive={archive:?}"),
-        );
         let listing_started = Instant::now();
         let listing = archive_listing(archive);
         let listing_elapsed = listing_started.elapsed();
-        if listing.is_ok() {
-            listing_timing.ok();
-        }
-        drop(listing_timing);
         let listing = listing?;
 
-        let mut plan_timing = crate::debug_options::ArchiveTiming::start(
-            "prepare.plan",
-            format_args!("archive={archive:?}"),
-        );
         let plan_started = Instant::now();
         let archive_size = fs::metadata(archive)
             .map(|metadata| metadata.len())
@@ -3959,7 +3943,6 @@ fn prepare_extract_archive_operation(
                 source_is_dir: false,
             });
         }
-        plan_timing.ok();
     }
 
     let job = FileOperationJob {
@@ -3970,7 +3953,6 @@ fn prepare_extract_archive_operation(
         archive_diagnostics,
         copy_verify: true,
     };
-    total_timing.ok();
     Ok(job)
 }
 
@@ -4870,21 +4852,6 @@ pub(super) fn execute_file_operation_with_progress(
     }
 
     let operation_diagnostics = job.archive_diagnostics.clone();
-    let archive_timings_enabled = crate::debug_options::archive_timings_enabled();
-    let archive_count = if job.kind == FileOperationKind::Extract && archive_timings_enabled {
-        job.steps
-            .iter()
-            .filter(|step| matches!(step, FileOperationStep::ExtractArchive { .. }))
-            .count()
-    } else {
-        0
-    };
-    let mut total_timing = (job.kind == FileOperationKind::Extract).then(|| {
-        crate::debug_options::ArchiveTiming::start(
-            "execute.total",
-            format_args!("archives={archive_count}"),
-        )
-    });
     let mut operated_destinations = HashSet::new();
     let copy_options = copy_options_for_operation(job.copy_verify);
     let mut progress = job.initial_progress();
@@ -4895,9 +4862,6 @@ pub(super) fn execute_file_operation_with_progress(
             progress.phase = FileOperationPhase::Cancelled;
             progress.cancellable = false;
             on_progress(progress);
-            if let Some(timing) = total_timing.as_mut() {
-                timing.cancelled();
-            }
             if let Some(diagnostics) = &operation_diagnostics {
                 diagnostics.finish("cancelled");
             }
@@ -4986,13 +4950,6 @@ pub(super) fn execute_file_operation_with_progress(
             } => {
                 progress.phase = FileOperationPhase::Extracting;
                 on_progress(progress.clone());
-                let backend = archive_timings_enabled
-                    .then(|| archive_extract_backend(archive))
-                    .unwrap_or_default();
-                let mut extract_timing = crate::debug_options::ArchiveTiming::start(
-                    "execute.extract",
-                    format_args!("archive={archive:?} backend={backend}"),
-                );
                 let sampler = diagnostics.as_ref().map(ArchiveHandle::sampler);
                 if let Some(diagnostics) = diagnostics {
                     let conflicts =
@@ -5060,17 +5017,6 @@ pub(super) fn execute_file_operation_with_progress(
                 if let (Some(diagnostics), Some(sampler)) = (diagnostics, sampler) {
                     diagnostics.finish(outcome, sampler.finish());
                 }
-                match &result {
-                    Ok(()) => extract_timing.ok(),
-                    Err(FileOperationError::Cancelled) => {
-                        extract_timing.cancelled();
-                        if let Some(timing) = total_timing.as_mut() {
-                            timing.cancelled();
-                        }
-                    }
-                    Err(FileOperationError::Failed(_)) => {}
-                }
-                drop(extract_timing);
                 if result.is_err() {
                     if let Some(diagnostics) = &operation_diagnostics {
                         diagnostics.finish(outcome);
@@ -5090,12 +5036,6 @@ pub(super) fn execute_file_operation_with_progress(
         }
     }
 
-    let mut finalize_timing = (job.kind == FileOperationKind::Extract).then(|| {
-        crate::debug_options::ArchiveTiming::start(
-            "execute.finalize",
-            format_args!("archives={archive_count}"),
-        )
-    });
     let mut summary = FileOperationSummary::default();
     summary.kind = job.kind;
     summary.archive_diagnostics = operation_diagnostics;
@@ -5137,12 +5077,6 @@ pub(super) fn execute_file_operation_with_progress(
     progress.cancellable = false;
     on_progress(progress);
 
-    if let Some(timing) = finalize_timing.as_mut() {
-        timing.ok();
-    }
-    if let Some(timing) = total_timing.as_mut() {
-        timing.ok();
-    }
     Ok(summary)
 }
 

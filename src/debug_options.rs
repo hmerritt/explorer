@@ -6,8 +6,6 @@ use std::{
     time::Duration,
 };
 
-use gpui::{App, Global};
-
 const DEBUG_NAV: u8 = 1 << 0;
 const DEBUG_SEARCH: u8 = 1 << 1;
 const DEBUG_ICONS: u8 = 1 << 2;
@@ -30,28 +28,6 @@ struct NavTimingBatchState {
 
 pub(crate) struct NavTimingBatch {
     active: bool,
-}
-
-pub(crate) struct ArchiveTiming {
-    _private: (),
-}
-
-impl ArchiveTiming {
-    pub(crate) fn start(_stage: &'static str, _details: fmt::Arguments<'_>) -> Self {
-        Self { _private: () }
-    }
-
-    pub(crate) fn ok(&mut self) {
-        // Detailed archive summaries replace the legacy stage timer.
-    }
-
-    pub(crate) fn cancelled(&mut self) {
-        // Detailed archive summaries replace the legacy stage timer.
-    }
-}
-
-impl Drop for ArchiveTiming {
-    fn drop(&mut self) {}
 }
 
 impl NavTimingBatch {
@@ -106,8 +82,6 @@ impl Drop for NavTimingBatch {
 pub(crate) struct DebugOptions {
     flags: u8,
 }
-
-impl Global for DebugOptions {}
 
 impl DebugOptions {
     pub(crate) fn nav_timings(self) -> bool {
@@ -171,13 +145,12 @@ impl DebugOptions {
     }
 }
 
-pub(crate) fn initialize(cx: &mut App, args: impl IntoIterator<Item = OsString>) {
+pub(crate) fn initialize(args: impl IntoIterator<Item = OsString>) {
     let (options, warnings) = parse_debug_options(args);
     for warning in warnings {
         eprintln!("{warning}");
     }
     PROCESS_DEBUG_FLAGS.store(options.flags, Ordering::Relaxed);
-    cx.set_global(options);
 }
 
 pub(crate) fn nav_timings_enabled() -> bool {

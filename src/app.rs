@@ -1459,7 +1459,7 @@ fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
 fn initialize_application(cx: &mut App, args: Vec<OsString>) {
     register_embedded_fonts(cx);
     crate::http_client::initialize(cx);
-    crate::debug_options::initialize(cx, args);
+    crate::debug_options::initialize(args);
     crate::settings::initialize(cx);
     initialize_explorer_window_registry(cx);
     crate::explorer::initialize_cache_directory();
