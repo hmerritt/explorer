@@ -42,6 +42,7 @@ pub(super) enum CopyDurability {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum CopySyncMode {
+    #[cfg(test)]
     ExplorerReplace,
     #[default]
     RsyncUpdate,
@@ -65,6 +66,7 @@ impl Default for CopyOptions {
 }
 
 impl CopyOptions {
+    #[cfg(test)]
     pub(super) fn explorer_safe() -> Self {
         Self {
             sync_mode: CopySyncMode::ExplorerReplace,
@@ -438,6 +440,7 @@ fn copy_with_delta_progress_impl(
                         on_progress,
                     )?
             }
+            #[cfg(test)]
             CopySyncMode::ExplorerReplace => destination_is_identical_to_source(
                 source,
                 destination,
@@ -1039,6 +1042,7 @@ fn verify_and_repair(
     Ok(())
 }
 
+#[cfg(test)]
 fn destination_is_identical_to_source(
     source: &Path,
     destination: &Path,
