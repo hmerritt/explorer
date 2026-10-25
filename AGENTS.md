@@ -23,7 +23,7 @@ truth for visible behavior and interaction design.
 - The main application entry point is `src/main.rs`.
 - Window and application setup lives in `src/app.rs`.
 - Explorer UI, navigation, rendering, sorting, formatting, and filesystem
-  behavior are currently concentrated in `src/explorer.rs`.
+  behavior live in the `src/explorer/` module tree.
 - `assets/explorer.png` is the canonical app icon source. Windows `.ico` and
   resource files are derived or platform-specific assets.
 
