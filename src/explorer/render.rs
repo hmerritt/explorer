@@ -2650,69 +2650,7 @@ impl ExplorerView {
             });
 
         if accepts_directory_drop {
-            row = row
-                .can_drop({
-                    let destination = destination.clone();
-                    let entity = entity.clone();
-                    move |dragged_value, window, cx| {
-                        entity.update(cx, |this, _| {
-                            this.can_drop_value_nonblocking(
-                                dragged_value,
-                                &destination,
-                                window.modifiers(),
-                            )
-                        })
-                    }
-                })
-                .drag_over::<DraggedEntries>(|style, _, _, _| {
-                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-                })
-                .drag_over::<ExternalPaths>(|style, _, _, _| {
-                    style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-                })
-                .on_drag_move::<DraggedEntries>({
-                    let destination = destination.clone();
-                    let entity = entity.clone();
-                    move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                        update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-                    }
-                })
-                .on_drag_move::<ExternalPaths>({
-                    let destination = destination.clone();
-                    let entity = entity.clone();
-                    move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                        update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-                    }
-                })
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, dragged: &DraggedEntries, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_internal_entries_and_open_dialog(
-                            dragged,
-                            destination.clone(),
-                            window.modifiers(),
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }))
-                .on_drop(cx.listener({
-                    let destination = destination.clone();
-                    move |this, paths: &ExternalPaths, window, cx| {
-                        this.clear_drop_indicator();
-                        this.drop_external_payload_and_open_dialog(
-                            paths,
-                            destination.clone(),
-                            window.modifiers(),
-                            window,
-                            cx,
-                        );
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }));
+            row = add_drop_handlers(row, destination, true, entity.clone(), cx);
         }
 
         if is_bin {
@@ -6789,7 +6727,7 @@ fn directory_bar_label(
     };
     let entity = cx.entity();
 
-    div()
+    let segment = div()
         .id(("breadcrumb-segment", index))
         .debug_selector(move || format!("breadcrumb-segment-{debug_label}"))
         .min_w(px(0.0))
@@ -6800,65 +6738,8 @@ fn directory_bar_label(
         .rounded(px(6.0))
         .cursor_default()
         .hover(|style| style.bg(rgb(NAV_BUTTON_HOVER_BG)))
-        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY))
-        .can_drop({
-            let destination = destination.clone();
-            let entity = entity.clone();
-            move |dragged_value, window, cx| {
-                entity.update(cx, |this, _| {
-                    this.can_drop_value_nonblocking(dragged_value, &destination, window.modifiers())
-                })
-            }
-        })
-        .drag_over::<DraggedEntries>(|style, _, _, _| {
-            style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-        })
-        .drag_over::<ExternalPaths>(|style, _, _, _| {
-            style.bg(rgb(0xe5f3ff)).border_color(rgb(0x0078d7))
-        })
-        .on_drag_move::<DraggedEntries>({
-            let destination = destination.clone();
-            let entity = entity.clone();
-            move |event: &DragMoveEvent<DraggedEntries>, window, cx| {
-                update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-            }
-        })
-        .on_drag_move::<ExternalPaths>({
-            let destination = destination.clone();
-            let entity = entity.clone();
-            move |event: &DragMoveEvent<ExternalPaths>, window, cx| {
-                update_drag_cursor_if_hovered(&entity, event, &destination, window, cx);
-            }
-        })
-        .on_drop(cx.listener({
-            let destination = destination.clone();
-            move |this, dragged: &DraggedEntries, window, cx| {
-                this.clear_drop_indicator();
-                this.drop_internal_entries_and_open_dialog(
-                    dragged,
-                    destination.clone(),
-                    window.modifiers(),
-                    cx,
-                );
-                cx.stop_propagation();
-                cx.notify();
-            }
-        }))
-        .on_drop(cx.listener({
-            let destination = destination.clone();
-            move |this, paths: &ExternalPaths, window, cx| {
-                this.clear_drop_indicator();
-                this.drop_external_payload_and_open_dialog(
-                    paths,
-                    destination.clone(),
-                    window.modifiers(),
-                    window,
-                    cx,
-                );
-                cx.stop_propagation();
-                cx.notify();
-            }
-        }))
+        .active(|style| style.opacity(NAV_BUTTON_ACTIVE_OPACITY));
+    add_drop_handlers(segment, destination, true, entity, cx)
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.navigate_to_directory_with_watcher(
                 navigation_target.clone(),
