@@ -21,8 +21,7 @@ use crate::explorer::{
     entry::FileEntry,
     resumable_copy::{
         CopyDurability, CopyOptions, cleanup_resumable_copy_progress,
-        copy_file_contents_parallel_with_progress, copy_with_delta_progress_with_options,
-        destination_content_matches_source_with_progress, destination_quick_matches_source,
+        copy_with_delta_progress_with_options, destination_content_matches_source_with_progress,
     },
 };
 
@@ -3031,13 +3030,6 @@ enum CopyNamePolicy {
     UseCopyNamesInSameDirectory,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CopyEngine {
-    Standard,
-    ResumableDelta,
-}
-
 fn copy_options_for_operation(copy_verify: bool) -> CopyOptions {
     let durability = if crate::debug_options::copy_fast_enabled() {
         CopyDurability::Fast
@@ -3157,13 +3149,11 @@ enum FileOperationStep {
         source: PathBuf,
         destination: PathBuf,
         conflict: bool,
-        engine: CopyEngine,
     },
     MoveFile {
         source: PathBuf,
         destination: PathBuf,
         conflict: bool,
-        copy_engine: CopyEngine,
     },
     CreateLink {
         source: PathBuf,
@@ -3185,13 +3175,11 @@ enum ParallelFileTask {
     Copy {
         source: PathBuf,
         destination: PathBuf,
-        engine: CopyEngine,
     },
     Move {
         source: PathBuf,
         destination: PathBuf,
         conflict: bool,
-        copy_engine: CopyEngine,
     },
 }
 
@@ -3606,19 +3594,16 @@ fn plan_path_operation(
         let conflict = destination.exists();
         stats.total_files += 1;
         stats.total_bytes = stats.total_bytes.saturating_add(metadata.len());
-        let copy_engine = copy_engine_for_paths(source, destination, conflict);
         match kind {
             FileOperationKind::Copy => steps.push(FileOperationStep::CopyFile {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
                 conflict,
-                engine: copy_engine,
             }),
             FileOperationKind::Move => steps.push(FileOperationStep::MoveFile {
                 source: source.to_path_buf(),
                 destination: destination.to_path_buf(),
                 conflict,
-                copy_engine,
             }),
             FileOperationKind::Link | FileOperationKind::Compress | FileOperationKind::Extract => {}
         }
@@ -3982,13 +3967,11 @@ fn file_conflicts_for_job(job: &FileOperationJob) -> Vec<FileConflict> {
                 source,
                 destination,
                 conflict: true,
-                ..
             }
             | FileOperationStep::MoveFile {
                 source,
                 destination,
                 conflict: true,
-                ..
             }
             | FileOperationStep::CreateLink {
                 source,
@@ -4093,7 +4076,6 @@ fn execute_copy_move_operation_with_progress_impl(
                 source,
                 destination,
                 conflict,
-                engine,
             } => {
                 if *conflict && conflict_choice == ConflictChoice::Skip {
                     None
@@ -4101,7 +4083,6 @@ fn execute_copy_move_operation_with_progress_impl(
                     Some(ParallelFileTask::Copy {
                         source: source.clone(),
                         destination: destination.clone(),
-                        engine: *engine,
                     })
                 }
             }
@@ -4109,7 +4090,6 @@ fn execute_copy_move_operation_with_progress_impl(
                 source,
                 destination,
                 conflict,
-                copy_engine,
             } => {
                 if *conflict && conflict_choice == ConflictChoice::Skip {
                     None
@@ -4118,7 +4098,6 @@ fn execute_copy_move_operation_with_progress_impl(
                         source: source.clone(),
                         destination: destination.clone(),
                         conflict: *conflict,
-                        copy_engine: *copy_engine,
                     })
                 }
             }
@@ -4272,15 +4251,11 @@ fn resumable_copy_cleanup_targets(
                 source,
                 destination,
                 conflict,
-                engine: CopyEngine::ResumableDelta,
-            } if !*conflict || conflict_choice == ConflictChoice::Replace => {
-                Some((source.clone(), destination.clone()))
             }
-            FileOperationStep::MoveFile {
+            | FileOperationStep::MoveFile {
                 source,
                 destination,
                 conflict,
-                copy_engine: CopyEngine::ResumableDelta,
             } if !*conflict || conflict_choice == ConflictChoice::Replace => {
                 Some((source.clone(), destination.clone()))
             }
@@ -4311,7 +4286,6 @@ fn run_single_file_task(
         ParallelFileTask::Copy {
             source,
             destination,
-            engine,
         } => {
             progress.phase = FileOperationPhase::Copying;
             progress.current_item = Some(source.clone());
@@ -4322,7 +4296,6 @@ fn run_single_file_task(
                 &cancel,
                 progress,
                 on_progress,
-                *engine,
                 copy_options,
             )
             .map_err(|error| operation_error("copy", source, error))?;
@@ -4336,7 +4309,6 @@ fn run_single_file_task(
             source,
             destination,
             conflict,
-            copy_engine,
         } => {
             if *conflict {
                 progress.phase = FileOperationPhase::Copying;
@@ -4348,7 +4320,6 @@ fn run_single_file_task(
                     &cancel,
                     progress,
                     on_progress,
-                    *copy_engine,
                     copy_options,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
@@ -4367,7 +4338,6 @@ fn run_single_file_task(
                     &cancel,
                     progress,
                     on_progress,
-                    *copy_engine,
                     copy_options,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
@@ -4392,13 +4362,11 @@ fn run_parallel_file_task(
         ParallelFileTask::Copy {
             source,
             destination,
-            ..
         } => (source, destination, FileOperationPhase::Copying),
         ParallelFileTask::Move {
             source,
             destination,
             conflict,
-            ..
         } => (
             source,
             destination,
@@ -4471,7 +4439,6 @@ fn run_parallel_file_task(
         ParallelFileTask::Copy {
             source,
             destination,
-            engine,
         } => {
             let (copy_undo, backup_guard) = copy_source_file_with_progress_and_undo(
                 source,
@@ -4479,7 +4446,6 @@ fn run_parallel_file_task(
                 &cancel,
                 &mut task_progress,
                 &mut publish_worker_progress,
-                *engine,
                 copy_options,
             )
             .map_err(|error| operation_error("copy", source, error))?;
@@ -4490,7 +4456,6 @@ fn run_parallel_file_task(
             source,
             destination,
             conflict,
-            copy_engine,
         } => {
             if *conflict {
                 copy_source_file_with_progress(
@@ -4499,7 +4464,6 @@ fn run_parallel_file_task(
                     &cancel,
                     &mut task_progress,
                     &mut publish_worker_progress,
-                    *copy_engine,
                     copy_options,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
@@ -4511,7 +4475,6 @@ fn run_parallel_file_task(
                     &cancel,
                     &mut task_progress,
                     &mut publish_worker_progress,
-                    *copy_engine,
                     copy_options,
                 )
                 .map_err(|error| operation_error("move", source, error))?;
@@ -4915,7 +4878,6 @@ pub(super) fn execute_file_operation_with_progress(
                 source,
                 destination,
                 conflict,
-                engine,
             } => {
                 if *conflict && conflict_choice == ConflictChoice::Skip {
                     continue;
@@ -4929,7 +4891,6 @@ pub(super) fn execute_file_operation_with_progress(
                     &cancel,
                     &mut progress,
                     &mut on_progress,
-                    *engine,
                     copy_options,
                 )
                 .map_err(|error| operation_error("copy", source, error))?;
@@ -4939,7 +4900,6 @@ pub(super) fn execute_file_operation_with_progress(
                 source,
                 destination,
                 conflict,
-                copy_engine,
             } => {
                 if *conflict && conflict_choice == ConflictChoice::Skip {
                     continue;
@@ -4954,7 +4914,6 @@ pub(super) fn execute_file_operation_with_progress(
                         &cancel,
                         &mut progress,
                         &mut on_progress,
-                        *copy_engine,
                         copy_options,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
@@ -4970,7 +4929,6 @@ pub(super) fn execute_file_operation_with_progress(
                         &cancel,
                         &mut progress,
                         &mut on_progress,
-                        *copy_engine,
                         copy_options,
                     )
                     .map_err(|error| operation_error("move", source, error))?;
@@ -6110,7 +6068,6 @@ fn move_source_file_with_progress(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
-    copy_engine: CopyEngine,
     copy_options: CopyOptions,
 ) -> std::io::Result<()> {
     match fs::rename(source, destination) {
@@ -6132,7 +6089,6 @@ fn move_source_file_with_progress(
                 cancel,
                 progress,
                 on_progress,
-                copy_engine,
                 copy_options,
             )?;
             remove_source(source)
@@ -6147,31 +6103,16 @@ fn copy_source_file_with_progress(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
-    engine: CopyEngine,
     options: CopyOptions,
 ) -> std::io::Result<()> {
-    match engine {
-        CopyEngine::Standard => {
-            copy_source_file_standard_with_progress(
-                source,
-                destination,
-                cancel,
-                progress,
-                on_progress,
-                options,
-            )?;
-        }
-        CopyEngine::ResumableDelta => {
-            copy_with_delta_progress_with_options(
-                source,
-                destination,
-                cancel,
-                progress,
-                on_progress,
-                options,
-            )?;
-        }
-    }
+    copy_with_delta_progress_with_options(
+        source,
+        destination,
+        cancel,
+        progress,
+        on_progress,
+        options,
+    )?;
 
     progress.completed_files += 1;
     on_progress(progress.clone());
@@ -6184,7 +6125,6 @@ fn copy_source_file_with_progress_and_undo(
     cancel: &Arc<AtomicBool>,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
-    engine: CopyEngine,
     options: CopyOptions,
 ) -> std::io::Result<(FileOperationCopyUndo, CopyUndoBackupGuard)> {
     let destination_existed = destination.try_exists()?;
@@ -6197,151 +6137,13 @@ fn copy_source_file_with_progress_and_undo(
         copy_undo.replaced_files.push(replaced);
     }
 
-    copy_source_file_with_progress(
-        source,
-        destination,
-        cancel,
-        progress,
-        on_progress,
-        engine,
-        options,
-    )?;
+    copy_source_file_with_progress(source, destination, cancel, progress, on_progress, options)?;
 
     if !destination_existed {
         copy_undo.created_files.push(destination.to_path_buf());
     }
 
     Ok((copy_undo, backup_guard))
-}
-
-fn copy_source_file_standard_with_progress(
-    source: &Path,
-    destination: &Path,
-    cancel: &Arc<AtomicBool>,
-    progress: &mut FileOperationProgress,
-    on_progress: &mut impl FnMut(FileOperationProgress),
-    options: CopyOptions,
-) -> std::io::Result<()> {
-    let metadata = fs::metadata(source)?;
-    let verified_before_existing_check = progress.verified_bytes;
-    if destination.is_file()
-        && destination_quick_matches_source(&metadata, destination).unwrap_or(false)
-        && destination_content_matches_source_with_progress(
-            source,
-            destination,
-            metadata.len(),
-            COPY_BUFFER_SIZE,
-            cancel,
-            progress,
-            on_progress,
-        )?
-    {
-        preserve_file_metadata(&metadata, destination)?;
-        if options.should_sync() {
-            sync_file_best_effort(destination);
-            sync_parent_directory_best_effort(destination);
-        }
-        return Ok(());
-    }
-    let existing_check_verified = progress
-        .verified_bytes
-        .saturating_sub(verified_before_existing_check);
-    if existing_check_verified > 0 {
-        progress.reserve_work_bytes(existing_check_verified);
-    }
-
-    progress.phase = FileOperationPhase::Copying;
-    progress.current_item = Some(source.to_path_buf());
-    on_progress(progress.clone());
-
-    let temp_destination = temp_destination_for(destination)?;
-    let copy_result = copy_source_file_to_temp(
-        source,
-        &temp_destination,
-        metadata.len(),
-        cancel,
-        progress,
-        on_progress,
-        options,
-    );
-
-    match copy_result {
-        Ok(()) => {
-            preserve_file_metadata(&metadata, &temp_destination)?;
-            finalize_copied_file(
-                source,
-                &temp_destination,
-                destination,
-                &metadata,
-                cancel,
-                progress,
-                on_progress,
-                options,
-            )?;
-            if options.should_sync() {
-                sync_parent_directory_best_effort(destination);
-            }
-            Ok(())
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&temp_destination);
-            Err(error)
-        }
-    }
-}
-
-fn copy_source_file_to_temp(
-    source: &Path,
-    temp_destination: &Path,
-    source_len: u64,
-    cancel: &Arc<AtomicBool>,
-    progress: &mut FileOperationProgress,
-    on_progress: &mut impl FnMut(FileOperationProgress),
-    options: CopyOptions,
-) -> std::io::Result<()> {
-    let mut source_file = File::open(source)?;
-    let destination_file = File::create(temp_destination)?;
-    if source_len >= COPY_BUFFER_SIZE as u64 * 8 {
-        copy_file_contents_parallel_with_progress(
-            source,
-            &destination_file,
-            source_len,
-            cancel,
-            |bytes| {
-                progress.add_copied_bytes(bytes);
-                on_progress(progress.clone());
-            },
-        )?;
-        if options.should_sync() {
-            destination_file.sync_all()?;
-        }
-        return Ok(());
-    }
-
-    let mut destination_file = destination_file;
-    let mut buffer = vec![0; COPY_BUFFER_SIZE];
-
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "file operation cancelled",
-            ));
-        }
-
-        let read = source_file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        destination_file.write_all(&buffer[..read])?;
-        progress.add_copied_bytes(read as u64);
-        on_progress(progress.clone());
-    }
-
-    if options.should_sync() {
-        destination_file.sync_all()?;
-    }
-    Ok(())
 }
 
 fn backup_file_for_copy_undo(destination: &Path) -> std::io::Result<FileOperationReplacedFile> {
@@ -6755,10 +6557,6 @@ fn copy_file_name(file_name: &OsStr, copy_number: usize) -> OsString {
         Some(extension) => OsString::from(format!("{stem}{suffix}.{extension}")),
         None => OsString::from(format!("{stem}{suffix}")),
     }
-}
-
-fn copy_engine_for_paths(_source: &Path, _destination: &Path, _conflict: bool) -> CopyEngine {
-    CopyEngine::ResumableDelta
 }
 
 pub(super) fn paths_are_on_same_volume(source: &Path, destination: &Path) -> bool {
@@ -8476,50 +8274,6 @@ mod tests {
     #[test]
     fn drive_display_label_uses_path_label_on_non_windows() {
         assert_eq!(drive_display_label(Path::new("/")), "/");
-    }
-
-    #[test]
-    fn copy_engine_selection_defaults_to_delta_for_all_file_copies() {
-        let temp = TempDir::new();
-        let source_root = temp.path().join("source");
-        let destination_root = temp.path().join("destination");
-        fs::create_dir_all(&source_root).expect("create source root");
-        fs::create_dir_all(&destination_root).expect("create destination root");
-        let source = source_root.join("file.txt");
-        let destination = destination_root.join("file.txt");
-
-        let _source_volume = set_test_path_volume_key(&source_root, Some("source-volume"));
-        let destination_volume =
-            set_test_path_volume_key(&destination_root, Some("destination-volume"));
-        assert_eq!(
-            copy_engine_for_paths(&source, &destination, false),
-            CopyEngine::ResumableDelta
-        );
-        assert!(!paths_are_on_same_volume(&source, &destination));
-
-        drop(destination_volume);
-        let destination_volume = set_test_path_volume_key(&destination_root, Some("source-volume"));
-        assert_eq!(
-            copy_engine_for_paths(&source, &destination, false),
-            CopyEngine::ResumableDelta
-        );
-        assert!(paths_are_on_same_volume(&source, &destination));
-        assert_eq!(
-            copy_engine_for_paths(&source, &destination, true),
-            CopyEngine::ResumableDelta
-        );
-
-        drop(destination_volume);
-        let _destination_volume = set_test_path_volume_key(&destination_root, None);
-        assert_eq!(
-            copy_engine_for_paths(&source, &destination, false),
-            CopyEngine::ResumableDelta
-        );
-        assert!(paths_are_on_same_volume(&source, &destination));
-        assert_eq!(
-            copy_engine_for_paths(&source, &destination, true),
-            CopyEngine::ResumableDelta
-        );
     }
 
     fn finished_summary(result: Result<FileOperationOutcome, String>) -> FileOperationSummary {
