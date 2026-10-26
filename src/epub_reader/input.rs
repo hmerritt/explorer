@@ -1,4 +1,5 @@
 //! Single-line native input, using Explorer's UTF-8/UTF-16 editing and IME state.
+use super::theme::ReaderPalette;
 use crate::explorer::{
     RenameBackspace, RenameBackspaceWord, RenameCancel, RenameCommit, RenameCopy, RenameCut,
     RenameDelete, RenameEnd, RenameHome, RenameLeft, RenameNoop, RenamePaste, RenameRight,
@@ -46,6 +47,7 @@ impl ReaderInput {
 }
 impl Render for ReaderInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = ReaderPalette::new(self.light);
         let entity = cx.entity();
         let paint_entity = entity.clone();
         div()
@@ -58,10 +60,11 @@ impl Render for ReaderInput {
             .px(px(8.0))
             .py(px(5.0))
             .overflow_hidden()
-            .bg(rgb(if self.light { 0xffffff } else { 0x181818 }))
+            .bg(palette.control)
+            .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(0x808080))
-            .focus(|style| style.border_color(rgb(0x62a6ff)))
+            .border_color(palette.border)
+            .focus(|style| style.border_color(palette.accent))
             .cursor(gpui::CursorStyle::IBeam)
             .on_action(cx.listener(|input, _: &RenameBackspace, _, cx| {
                 input.text.delete_backward();

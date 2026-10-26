@@ -13,6 +13,7 @@ mod pagination;
 mod search;
 mod state;
 mod styling;
+mod theme;
 mod view;
 
 pub(crate) use view::open_epub_window;

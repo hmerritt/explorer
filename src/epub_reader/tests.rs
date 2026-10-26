@@ -233,12 +233,45 @@ fn passage_context_recovers_after_parser_changes_and_old_preferences_keep_defaul
     );
     let preferences: Preferences =
         serde_json::from_str(r#"{"font_size":22,"light":true}"#).unwrap();
-    assert_eq!(preferences.line_spacing, 15);
+    assert_eq!(preferences.line_spacing, 16);
     assert_eq!(preferences.reading_width, 900);
-    assert!(preferences.justify && preferences.publisher_styles);
+    assert!(preferences.justify && preferences.sans);
+    assert!(!preferences.publisher_styles);
     let old: Location =
         serde_json::from_str(r#"{"href":"c","point":{"block":1,"offset":4}}"#).unwrap();
     assert!(old.quote.is_empty());
+}
+
+#[test]
+fn reader_defaults_and_legacy_preferences_preserve_explicit_choices() {
+    let defaults = Preferences::default();
+    assert_eq!(defaults.font_size, 20);
+    assert!(defaults.sans && defaults.justify);
+    assert_eq!(defaults.line_spacing, 16);
+    assert_eq!(defaults.reading_width, 900);
+    assert!(!defaults.publisher_styles && !defaults.light);
+    assert_eq!(serde_json::from_str::<Preferences>("{}").unwrap(), defaults);
+
+    let saved = r#"{"font_size":24,"light":true,"sans":false,"line_spacing":18,"reading_width":700,"justify":false,"publisher_styles":true,"reduce_motion":true}"#;
+    let preferences: Preferences = serde_json::from_str(saved).unwrap();
+    assert_eq!(
+        preferences,
+        Preferences {
+            font_size: 24,
+            light: true,
+            sans: false,
+            line_spacing: 18,
+            reading_width: 700,
+            justify: false,
+            publisher_styles: true,
+        }
+    );
+    let persisted = serde_json::to_value(preferences).unwrap();
+    assert!(persisted.get("reduce_motion").is_none());
+    assert_eq!(
+        serde_json::from_value::<Preferences>(persisted).unwrap(),
+        preferences
+    );
 }
 
 fn all_text(chapter: &Chapter) -> String {
@@ -979,7 +1012,7 @@ fn publisher_indentation_and_page_breaks_preserve_every_byte(cx: &mut TestAppCon
         let mut next_page = false;
         let mut final_page = false;
         for _ in 0..100 {
-            let page = layout_page(
+            let page = layout_page_with_preferences(
                 &chapter,
                 cursor,
                 geometry,
@@ -988,6 +1021,10 @@ fn publisher_indentation_and_page_breaks_preserve_every_byte(cx: &mut TestAppCon
                 rgb(0x202020).into(),
                 rgb(0x0759b5).into(),
                 &HashMap::new(),
+                &Preferences {
+                    publisher_styles: true,
+                    ..Preferences::default()
+                },
                 window,
             )
             .unwrap();

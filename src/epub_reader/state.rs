@@ -95,7 +95,6 @@ pub(super) struct Preferences {
     pub reading_width: u16,
     pub justify: bool,
     pub publisher_styles: bool,
-    pub reduce_motion: bool,
 }
 
 impl Default for Preferences {
@@ -103,12 +102,11 @@ impl Default for Preferences {
         Self {
             font_size: 20,
             light: false,
-            sans: false,
-            line_spacing: 15,
+            sans: true,
+            line_spacing: 16,
             reading_width: 900,
             justify: true,
-            publisher_styles: true,
-            reduce_motion: false,
+            publisher_styles: false,
         }
     }
 }

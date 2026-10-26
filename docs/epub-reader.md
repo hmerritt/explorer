@@ -35,9 +35,11 @@ including identical copies at different paths, can be open in separate windows.
 
 Reading settings offer serif/sans-serif, 12–36px font size, 1.2–2.2 line
 spacing, 400–1000px maximum reading width, left/justified alignment, theme,
-publisher layout overrides, and reduced motion. Existing saved font size and
-theme remain intact; missing settings use the original defaults (20px serif,
-1.5 spacing, 900px maximum width, justified body text, dark theme).
+and publisher layout overrides. Explicitly saved preferences remain intact;
+fresh or missing settings use 20px sans serif, 1.6 line spacing, 900px maximum
+width, justified body text, reader-controlled layout, and the dark theme.
+Reduced motion is always off; its former setting is ignored in older saved
+state and is no longer shown or saved.
 
 Publisher layout controls alignment, indentation, paragraph spacing, and page
 breaks. Font family, font size, and line spacing always come from reader
@@ -51,6 +53,21 @@ Chapter page totals appear when measured pagination is complete. Covers and
 supplements do not count toward whole-book progress. Search/progress indexing
 runs in the background; progress is independent of typography. If sections
 cannot be parsed, the percentage reflects the successfully indexed text.
+
+The footer separates page navigation from reading tools. The local page count
+sits between Previous and Next, while the current heading and whole-book
+percentage sit above the controls. Contents, Aa, Search, Bookmark, and Fullscreen
+appear on the left in that order; page navigation stays on the right. Tools wrap
+in narrow windows while Previous, the page count, and Next stay together.
+Menus share a 12px left inset and gap above the toolbar, with 12px top clearance
+for tall menus. Their width is capped at 320px and constrained to the reading
+area. Open panels highlight their toolbar button; Contents also has an explicit
+close button above its scrollable chapter and bookmark list.
+
+Chapter totals update automatically when pagination finishes, including after
+resizing or changing typography. Both loading text and the animated loading bar
+are delayed by 200ms, disappear when the page is ready or fails, and do not
+appear for background chapter counting alone.
 
 Contents highlights the current heading, scrolls it into view, supports
 Up/Down/Home/End/Enter, and closes with Escape or an outside click. Back restores
@@ -76,9 +93,8 @@ Tab focus, visible focus states, Enter/Space activation, and shortcut tooltips.
   reveals controls; shortcuts open panels while fullscreen. Escape exits
   fullscreen after dismissing active overlays or selections.
 - Double-click an image to enlarge it; Close or Escape returns to the passage.
-- Reduced motion removes the animated loading indicator. Page changes and
-  panels are immediate. This explicit preference is persisted; automatic
-  operating-system reduced-motion detection is not available in this renderer.
+- Page changes and panels are immediate. Loading feedback uses the animated
+  indicator after the delay described above.
 
 ## Shortcuts
 

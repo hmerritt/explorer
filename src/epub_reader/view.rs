@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use gpui::{
@@ -41,6 +41,7 @@ use super::{
     },
     search::{BookIndex, SearchMatch},
     state::{self, Bookmark, Fingerprint, Location, Preferences},
+    theme::ReaderPalette,
 };
 
 const WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
@@ -49,6 +50,9 @@ const WINDOW_STATE_OPTIONS: WindowStateOptions = WindowStateOptions {
     include_fullscreen: true,
 };
 const PAGE_CACHE_SIZE: usize = 8;
+const PANEL_INSET: f32 = 12.0;
+const PANEL_WIDTH: f32 = 320.0;
+const LOADING_DELAY: Duration = Duration::from_millis(200);
 
 pub(crate) fn open_epub_window(path: PathBuf, cx: &mut App) -> Result<(), String> {
     let source_path = normalized_source_path(&path);
@@ -220,6 +224,10 @@ struct Reader {
     wheel: WheelPager,
     load_cancel: Arc<AtomicBool>,
     chapter_cancel: Arc<AtomicBool>,
+    loading_delay_task: Option<Task<()>>,
+    loading_visible: bool,
+    loading_generation: u64,
+    refresh_pending: bool,
     load_task: Option<Task<()>>,
     chapter_task: Option<Task<()>>,
     prefetch_task: Option<Task<()>>,
@@ -322,6 +330,10 @@ impl Reader {
             wheel: WheelPager::default(),
             load_cancel: Arc::new(AtomicBool::new(false)),
             chapter_cancel: Arc::new(AtomicBool::new(false)),
+            loading_delay_task: None,
+            loading_visible: false,
+            loading_generation: 0,
+            refresh_pending: false,
             load_task: None,
             chapter_task: None,
             prefetch_task: None,
@@ -417,19 +429,65 @@ impl Reader {
                     }
                     Err(error) => reader.error = Some(error),
                 }
+                reader.sync_loading_feedback(cx);
                 cx.notify();
             });
         }));
+        reader.sync_loading_feedback(cx);
         reader
     }
 
+    fn page_pending(&self) -> bool {
+        self.error.is_none()
+            && (self.load_task.is_some() || self.chapter_task.is_some() || self.request.is_some())
+    }
+
+    fn sync_loading_feedback(&mut self, cx: &mut Context<Self>) {
+        if !self.page_pending() {
+            if self.loading_delay_task.is_some() || self.loading_visible {
+                self.loading_generation = self.loading_generation.wrapping_add(1);
+                self.loading_delay_task = None;
+                self.loading_visible = false;
+            }
+        } else if self.loading_delay_task.is_none() {
+            self.loading_generation = self.loading_generation.wrapping_add(1);
+            let generation = self.loading_generation;
+            self.loading_delay_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(LOADING_DELAY).await;
+                let _ = this.update(cx, |reader, cx| {
+                    if reader.loading_generation != generation {
+                        return;
+                    }
+                    if reader.page_pending() {
+                        reader.loading_visible = true;
+                        cx.notify();
+                    } else {
+                        reader.sync_loading_feedback(cx);
+                    }
+                });
+            }));
+        }
+    }
+
+    fn refresh_after_frame(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.refresh_pending {
+            return;
+        }
+        self.refresh_pending = true;
+        // Pagination changes state during canvas prepaint. GPUI deliberately
+        // ignores redraw invalidation in that phase, so notify after drawing.
+        cx.defer_in(window, |reader, _, cx| {
+            reader.refresh_pending = false;
+            cx.notify();
+        });
+    }
+
     fn color(&self) -> Hsla {
-        rgb(if self.preferences.light {
-            0x202020
-        } else {
-            0xe8e6e3
-        })
-        .into()
+        self.palette().text
+    }
+
+    fn palette(&self) -> ReaderPalette {
+        ReaderPalette::new(self.preferences.light)
     }
     fn link_color(&self) -> Hsla {
         rgb(if self.preferences.light {
@@ -469,6 +527,7 @@ impl Reader {
         self.error = None;
         self.fragment = fragment;
         self.clear_selection();
+        self.sync_loading_feedback(cx);
         if self.empty_sections.contains(&href)
             && self.book.as_ref().is_some_and(|book| book.is_cover(&href))
         {
@@ -505,6 +564,7 @@ impl Reader {
                     }
                     Err(error) => reader.error = Some(error),
                 }
+                reader.sync_loading_feedback(cx);
                 cx.notify();
             });
         }));
@@ -681,6 +741,7 @@ impl Reader {
             _ => self.page_index as isize,
         };
         self.request = Some(PageRequest::Index(index.saturating_add(steps)));
+        self.sync_loading_feedback(cx);
         self.clear_selection();
         cx.notify();
     }
@@ -1065,6 +1126,7 @@ impl Reader {
         }
         state::set_preferences(cx, self.preferences);
         self.request = Some(PageRequest::Anchor(self.anchor));
+        self.sync_loading_feedback(cx);
         self.clear_selection();
         cx.notify();
     }
@@ -1198,15 +1260,36 @@ impl Reader {
                 self.preferences.publisher_styles = !self.preferences.publisher_styles;
                 self.apply_preferences(cx);
             }
-            Control::ReduceMotion => {
-                self.preferences.reduce_motion = !self.preferences.reduce_motion;
-                state::set_preferences(cx, self.preferences);
-                cx.notify();
-            }
         }
     }
 
     fn prepare_page(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Page> {
+        let before = (
+            self.page_label(),
+            self.current_page.is_some(),
+            self.page_pending(),
+            self.loading_visible,
+        );
+        let page = self.prepare_page_inner(bounds, window, cx);
+        self.sync_loading_feedback(cx);
+        let after = (
+            self.page_label(),
+            self.current_page.is_some(),
+            self.page_pending(),
+            self.loading_visible,
+        );
+        if before != after {
+            self.refresh_after_frame(window, cx);
+        }
+        page
+    }
+
+    fn prepare_page_inner(
         &mut self,
         bounds: Bounds<Pixels>,
         window: &mut Window,
@@ -1485,12 +1568,8 @@ impl Reader {
             }
         }
         let complete = layout.complete;
-        if complete != was_complete {
-            cx.notify();
-        }
-        if !complete && pending_images.is_empty() {
-            window.request_animation_frame();
-            cx.notify();
+        if complete != was_complete || (!complete && pending_images.is_empty()) {
+            self.refresh_after_frame(window, cx);
         }
         self.load_images(&pending_images, cx);
     }
@@ -1660,6 +1739,7 @@ impl Reader {
             (self.preferences.font_size as i16 + steps).clamp(12, 36) as u8;
         state::set_preferences(cx, self.preferences);
         self.request = Some(PageRequest::Anchor(self.anchor));
+        self.sync_loading_feedback(cx);
         self.clear_selection();
         cx.notify();
     }
@@ -2084,42 +2164,65 @@ impl Reader {
         action: Control,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let palette = self.palette();
+        let active = match action {
+            Control::Chapters => self.chapters_open,
+            Control::Settings => self.settings_open,
+            Control::Find => self.search_open,
+            Control::Bookmark => self.bookmark_open,
+            _ => false,
+        };
+        let setting = matches!(
+            action,
+            Control::Smaller
+                | Control::Larger
+                | Control::Sans
+                | Control::Spacing(_)
+                | Control::Width(_)
+                | Control::Alignment
+                | Control::Publisher
+                | Control::Theme
+        );
         div()
             .id(id)
             .debug_selector(move || id.to_owned())
             .key_context("EpubControl")
-            .h(px(26.0))
-            .px(px(8.0))
+            .h(px(32.0))
+            .min_w(px(32.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(gpui::transparent_black())
             .flex()
             .items_center()
+            .justify_center()
             .flex_shrink_0()
+            .when(
+                matches!(action, Control::Previous | Control::Next),
+                |button| button.text_size(px(22.0)),
+            )
+            .when(setting, |button| button.bg(palette.control))
+            .when(active, |button| button.bg(palette.selected))
             .cursor(if enabled {
                 CursorStyle::PointingHand
             } else {
                 CursorStyle::Arrow
             })
-            .text_color(if enabled {
-                self.color()
-            } else {
-                rgb(0x808080).into()
-            })
+            .text_color(if enabled { self.color() } else { palette.muted })
+            .when(!enabled, |button| button.opacity(0.5))
             .when(enabled, |button| {
                 button.hover(|style| {
-                    style.bg(rgb(if self.preferences.light {
-                        0xdadada
+                    style.bg(if active {
+                        palette.selected
                     } else {
-                        0x383838
-                    }))
+                        palette.hover
+                    })
                 })
             })
             .when(enabled, |button| {
-                button.tab_index(0).focus(|style| {
-                    style.bg(rgb(if self.preferences.light {
-                        0xdce9f5
-                    } else {
-                        0x335a80
-                    }))
-                })
+                button
+                    .tab_index(0)
+                    .focus(|style| style.bg(palette.selected).border_color(palette.accent))
             })
             .tooltip(reader_tooltip(control_tooltip(action)))
             .on_click(cx.listener(move |reader, _, window, cx| {
@@ -2150,74 +2253,96 @@ impl Reader {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette();
         let entity = cx.entity();
         let ready = self.current_page.is_some();
-        let previous = ready && !self.at_boundary(false);
-        let next = ready && !self.at_boundary(true);
-        let percentage = self
-            .index
-            .as_ref()
-            .and_then(|index| {
-                index.progress(
-                    &self.href,
-                    if self.at_boundary(true) {
-                        self.current_page
-                            .as_ref()
-                            .map_or(self.anchor, |page| page.end)
-                    } else {
-                        self.anchor
-                    },
-                )
-            })
-            .map(|value| format!("{value}%"));
         let cover = self
             .book
             .as_ref()
             .is_some_and(|book| book.is_cover(&self.href));
-        let separator = |id: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .px(px(8.0))
-                .flex_shrink_0()
-                .child("·")
+        let percentage = self.index.as_ref().and_then(|index| {
+            index.progress(
+                &self.href,
+                if self.at_boundary(true) {
+                    self.current_page
+                        .as_ref()
+                        .map_or(self.anchor, |page| page.end)
+                } else {
+                    self.anchor
+                },
+            )
+        });
+        let page_label = if cover {
+            "Cover".to_owned()
+        } else if ready {
+            self.page_label()
+        } else {
+            String::new()
         };
+        let label_selector = format!("epub-page-label: {page_label}");
         div()
             .id("epub-toolbar")
             .debug_selector(|| "epub-toolbar".to_owned())
             .w_full()
             .flex()
             .flex_col()
-            .px(px(4.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .gap(px(6.0))
             .flex_shrink_0()
+            .border_t_1()
+            .border_color(palette.border)
             .text_size(px(12.0))
-            .text_color(self.color())
-            .bg(rgb(if self.preferences.light {
-                0xeeeeee
-            } else {
-                0x252525
-            }))
+            .text_color(palette.text)
+            .bg(palette.surface)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(10.0))
+                    .min_h(px(20.0))
+                    .text_color(palette.muted)
+                    .child(
+                        div()
+                            .id("epub-progress-title")
+                            .debug_selector(|| "epub-progress-title".to_owned())
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_ellipsis()
+                            .child(if cover {
+                                "Cover".into()
+                            } else {
+                                self.heading()
+                            }),
+                    )
+                    .when(!cover, |row| {
+                        row.when_some(percentage, |row, percentage| {
+                            row.child(
+                                div()
+                                    .id("epub-progress-percentage")
+                                    .debug_selector(|| "epub-progress-percentage".to_owned())
+                                    .flex_shrink_0()
+                                    .child(format!("{percentage}% read")),
+                            )
+                        })
+                    }),
+            )
             .child(
                 div()
                     .on_children_prepainted(move |bounds, _, cx| {
                         entity.update(cx, |reader, _| {
-                            // Previous/Next precede the four panel triggers.
-                            reader.panel_trigger_bounds = bounds[2..6].to_vec();
+                            reader.panel_trigger_bounds = bounds.iter().take(4).copied().collect();
                         });
                     })
+                    .id("epub-reading-tools")
+                    .debug_selector(|| "epub-reading-tools".to_owned())
                     .w_full()
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .min_h(px(34.0))
-                    .child(self.button(
-                        "epub-previous",
-                        "‹".into(),
-                        previous,
-                        Control::Previous,
-                        cx,
-                    ))
-                    .child(self.button("epub-next", "›".into(), next, Control::Next, cx))
+                    .gap(px(4.0))
                     .child(self.button(
                         "epub-chapters",
                         "Contents".into(),
@@ -2265,48 +2390,52 @@ impl Reader {
                                 cx,
                             ))
                         },
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .px(px(8.0))
-                    .pb(px(4.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    )
                     .child(
                         div()
-                            .id("epub-progress-title")
-                            .debug_selector(|| "epub-progress-title".to_owned())
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .child(if cover {
-                                "Cover".into()
-                            } else {
-                                self.heading()
-                            }),
-                    )
-                    .when(!cover, |row| {
-                        row.child(separator("epub-page-separator"))
+                            .id("epub-page-controls")
+                            .debug_selector(|| "epub-page-controls".to_owned())
+                            .flex_1()
+                            .min_w(px(180.0))
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(4.0))
+                            .flex_shrink_0()
+                            .child(self.button(
+                                "epub-previous",
+                                "‹".into(),
+                                ready && !self.at_boundary(false),
+                                Control::Previous,
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .id("epub-progress-pages")
                                     .debug_selector(|| "epub-progress-pages".to_owned())
-                                    .flex_shrink_0()
-                                    .child(self.page_label()),
+                                    .min_w(px(100.0))
+                                    .text_center()
+                                    .text_color(palette.muted)
+                                    .child(
+                                        div()
+                                            .debug_selector(move || label_selector.clone())
+                                            .child(page_label),
+                                    ),
                             )
-                            .when_some(percentage, |row, percentage| {
-                                row.child(separator("epub-percentage-separator"))
-                                    .child(div().flex_shrink_0().child(percentage))
-                            })
-                    }),
+                            .child(self.button(
+                                "epub-next",
+                                "›".into(),
+                                ready && !self.at_boundary(true),
+                                Control::Next,
+                                cx,
+                            )),
+                    ),
             )
             .into_any_element()
     }
 
     fn render_chapters(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette();
         let mut rows = Vec::new();
         let bookmarks = state::bookmarks(cx, &self.key);
         if !bookmarks.is_empty() {
@@ -2410,7 +2539,7 @@ impl Reader {
                     .flex_shrink_0()
                     .mx(px(12.0))
                     .my(px(8.0))
-                    .bg(rgb(0x808080))
+                    .bg(palette.border)
                     .into_any_element(),
             );
         }
@@ -2438,7 +2567,7 @@ impl Reader {
                             }))
                         })
                         .when(self.contents_cursor == index, |row| {
-                            row.border_l_2().border_color(rgb(0x62a6ff))
+                            row.border_l_2().border_color(palette.accent)
                         })
                         .w_full()
                         .min_h(px(30.0))
@@ -2486,19 +2615,16 @@ impl Reader {
             .w_full()
             .min_h(px(0.0))
             .max_h_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.contents_scroll)
+            .flex()
+            .flex_col()
             .occlude()
-            .bg(rgb(if self.preferences.light {
-                0xf5f5f5
-            } else {
-                0x252525
-            }))
+            .bg(palette.surface)
             .text_color(self.color())
             .text_size(px(14.0))
             .border_1()
-            .border_color(rgb(0x808080))
-            .shadow_md()
+            .border_color(palette.border)
+            .rounded(px(8.0))
+            .overflow_hidden()
             .on_mouse_down_out(cx.listener(|reader, event, window, cx| {
                 if reader.is_panel_trigger(event) {
                     return;
@@ -2508,17 +2634,43 @@ impl Reader {
                 cx.notify();
             }))
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .children(rows)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(div().flex_1().child("Contents"))
+                    .child(self.button(
+                        "epub-contents-close",
+                        "×".into(),
+                        true,
+                        Control::Dismiss,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .id("epub-contents-list")
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.contents_scroll)
+                    .children(rows),
+            )
             .into_any_element()
     }
 
     fn panel_overlay(&self, panel: AnyElement) -> AnyElement {
         div()
             .absolute()
-            .top(px(8.0))
-            .bottom(px(8.0))
-            .left(px(12.0))
-            .w(px(320.0))
+            .top(px(PANEL_INSET))
+            .bottom(px(PANEL_INSET))
+            .left(px(PANEL_INSET))
+            .right(px(PANEL_INSET))
+            .max_w(px(PANEL_WIDTH))
             .flex()
             .flex_col()
             .justify_end()
@@ -2539,15 +2691,12 @@ impl Reader {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .bg(rgb(if self.preferences.light {
-                0xf5f5f5
-            } else {
-                0x252525
-            }))
+            .bg(self.palette().surface)
             .text_color(self.color())
             .text_size(px(14.0))
             .border_1()
-            .border_color(rgb(0x808080))
+            .border_color(self.palette().border)
+            .rounded(px(8.0))
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
     }
 
@@ -2693,20 +2842,6 @@ impl Reader {
                     cx,
                 ),
             )
-            .child(
-                self.button(
-                    "epub-reduce-motion",
-                    if self.preferences.reduce_motion {
-                        "Reduce motion: On"
-                    } else {
-                        "Reduce motion: Off"
-                    }
-                    .into(),
-                    true,
-                    Control::ReduceMotion,
-                    cx,
-                ),
-            )
             .on_mouse_down_out(cx.listener(|reader, event, _, cx| {
                 if reader.is_panel_trigger(event) {
                     return;
@@ -2847,7 +2982,6 @@ enum Control {
     Width(i16),
     Alignment,
     Publisher,
-    ReduceMotion,
 }
 
 fn control_tooltip(action: Control) -> &'static str {
@@ -2874,7 +3008,6 @@ fn control_tooltip(action: Control) -> &'static str {
         Control::SaveBookmark => "Save bookmark",
         Control::Copy => "Copy selected text (Ctrl/Cmd+C)",
         Control::Dismiss => "Close (Escape)",
-        Control::ReduceMotion => "Use a static loading indicator",
     }
 }
 
@@ -2901,8 +3034,8 @@ fn reader_tooltip(
 
 impl Render for Reader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let loading =
-            self.load_task.is_some() || self.chapter_task.is_some() || self.request.is_some();
+        self.sync_loading_feedback(cx);
+        let loading = self.loading_visible && self.page_pending();
         let body = div()
             .id("epub-body")
             .debug_selector(|| "epub-body".to_owned())
@@ -2912,39 +3045,22 @@ impl Render for Reader {
             .w_full()
             .overflow_hidden()
             .child(self.render_surface(cx))
-            .when(
-                loading && self.error.is_none() && !self.preferences.reduce_motion,
-                |body| {
-                    body.child(div().absolute().top(px(0.0)).left(px(0.0)).w_full().child(
-                        linear_indeterminate(
-                            "epub-loading",
-                            LinearProgressStyle {
-                                color: 0x62a6ff,
-                                track_color: if self.preferences.light {
-                                    0xdddddd
-                                } else {
-                                    0x333333
-                                },
-                                height: 3.0,
+            .when(loading, |body| {
+                body.child(div().absolute().top(px(0.0)).left(px(0.0)).w_full().child(
+                    linear_indeterminate(
+                        "epub-loading",
+                        LinearProgressStyle {
+                            color: 0x62a6ff,
+                            track_color: if self.preferences.light {
+                                0xdddddd
+                            } else {
+                                0x333333
                             },
-                        ),
-                    ))
-                },
-            )
-            .when(
-                loading && self.error.is_none() && self.preferences.reduce_motion,
-                |body| {
-                    body.child(
-                        div()
-                            .absolute()
-                            .top(px(0.0))
-                            .left(px(0.0))
-                            .w_full()
-                            .h(px(3.0))
-                            .bg(rgb(0x62a6ff)),
-                    )
-                },
-            )
+                            height: 3.0,
+                        },
+                    ),
+                ))
+            })
             .when(self.error.is_some(), |body| {
                 body.child(
                     div()
@@ -3014,6 +3130,8 @@ impl Render for Reader {
                     body.child(
                         div()
                             .absolute()
+                            .id("epub-loading-message")
+                            .debug_selector(|| "epub-loading-message".to_owned())
                             .top(px(32.0))
                             .left(px(48.0))
                             .child("Loading book…"),
@@ -3607,12 +3725,12 @@ mod tests {
             .read_with(cx, |reader, _| reader.error.clone())
             .unwrap();
         assert!(error.is_some());
-        cx.update(|cx| {
-            open_epub_window(dir.path().join("absent/../missing.epub"), cx).unwrap()
-        });
+        cx.update(|cx| open_epub_window(dir.path().join("absent/../missing.epub"), cx).unwrap());
         assert!(cx.windows() == vec![handle.into()]);
         assert_eq!(
-            handle.read_with(cx, |reader, _| reader.error.clone()).unwrap(),
+            handle
+                .read_with(cx, |reader, _| reader.error.clone())
+                .unwrap(),
             error
         );
         handle
@@ -3991,12 +4109,346 @@ mod tests {
                     && !reader.bookmark_open
             );
         });
-        let title = visual.debug_bounds("epub-progress-title").unwrap();
-        let separator = visual.debug_bounds("epub-page-separator").unwrap();
+        let previous = visual.debug_bounds("epub-previous").unwrap();
+        let next = visual.debug_bounds("epub-next").unwrap();
         let pages = visual.debug_bounds("epub-progress-pages").unwrap();
-        assert!(separator.size.width > px(16.0));
-        assert_eq!(title.right(), separator.left());
-        assert_eq!(separator.right(), pages.left());
+        assert!(previous.right() < pages.left());
+        assert!(pages.right() < next.left());
+        assert_eq!(previous.center().y, pages.center().y);
+        assert_eq!(pages.center().y, next.center().y);
+    }
+
+    #[gpui::test]
+    fn reading_controls_fit_narrow_windows_and_keep_panel_triggers_working(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("controls.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Controls".into(), window, cx));
+        settle(&reader, visual);
+        for (width, height, light, fullscreen) in [
+            (900.0, 820.0, false, false),
+            (360.0, 240.0, true, false),
+            (360.0, 600.0, false, true),
+        ] {
+            reader.update(visual, |reader, cx| {
+                reader.preferences.light = light;
+                reader.fullscreen = fullscreen;
+                reader.controls_revealed = true;
+                cx.notify();
+            });
+            visual.simulate_resize(size(px(width), px(height)));
+            settle(&reader, visual);
+            let toolbar = visual.debug_bounds("epub-toolbar").unwrap();
+            let body = visual.debug_bounds("epub-body").unwrap();
+            assert!(body.size.height > px(0.0));
+            for id in [
+                "epub-previous",
+                "epub-next",
+                "epub-chapters",
+                "epub-settings",
+                "epub-find",
+                "epub-bookmark",
+                "epub-fullscreen",
+            ] {
+                let bounds = visual.debug_bounds(id).unwrap();
+                assert!(
+                    bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right(),
+                    "{id}: {bounds:?} {toolbar:?}"
+                );
+                assert!(
+                    bounds.top() >= toolbar.top() && bounds.bottom() <= toolbar.bottom(),
+                    "{id}: {bounds:?} {toolbar:?}"
+                );
+                assert!(bounds.size.width >= px(32.0) && bounds.size.height >= px(32.0));
+            }
+            let position = visual.debug_bounds("epub-chapters").unwrap().center();
+            visual.simulate_click(position, Modifiers::default());
+            let close = visual.debug_bounds("epub-contents-close").unwrap().center();
+            visual.simulate_click(close, Modifiers::default());
+            reader.update(visual, |reader, _| assert!(!reader.chapters_open));
+            // The grouped tools must still prevent outside-click dismissal on
+            // mouse down, so a second click on the trigger closes the panel.
+            let position = visual.debug_bounds("epub-settings").unwrap().center();
+            visual.simulate_click(position, Modifiers::default());
+            visual.simulate_click(position, Modifiers::default());
+            reader.update(visual, |reader, _| assert!(!reader.settings_open));
+        }
+    }
+
+    #[gpui::test]
+    fn menus_share_insets_and_toolbar_keeps_tools_left_and_navigation_right(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(state::initialize);
+        cx.update(|cx| cx.bind_keys(crate::app::platform_key_bindings()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("menus.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Menus".into(), window, cx));
+        settle(&reader, visual);
+        for (width, height, fullscreen) in [
+            (900.0, 820.0, false),
+            (360.0, 240.0, false),
+            (360.0, 600.0, true),
+        ] {
+            reader.update(visual, |reader, cx| {
+                reader.fullscreen = fullscreen;
+                reader.controls_revealed = true;
+                cx.notify();
+            });
+            visual.simulate_resize(size(px(width), px(height)));
+            settle(&reader, visual);
+            let toolbar = visual.debug_bounds("epub-toolbar").unwrap();
+            let contents = visual.debug_bounds("epub-chapters").unwrap();
+            let next = visual.debug_bounds("epub-next").unwrap();
+            assert_eq!(contents.left(), toolbar.left() + px(PANEL_INSET));
+            assert_eq!(
+                next.right(),
+                toolbar.right() - px(PANEL_INSET),
+                "tools={:?} navigation={:?} next={next:?}",
+                visual.debug_bounds("epub-reading-tools"),
+                visual.debug_bounds("epub-page-controls")
+            );
+            let ids = [
+                "epub-chapters",
+                "epub-settings",
+                "epub-find",
+                "epub-bookmark",
+                "epub-fullscreen",
+            ];
+            let mut previous = None;
+            for id in ids {
+                let bounds = visual.debug_bounds(id).unwrap();
+                if let Some(previous) = previous {
+                    let previous: Bounds<Pixels> = previous;
+                    assert!(bounds.top() > previous.top() || bounds.left() > previous.left());
+                }
+                previous = Some(bounds);
+            }
+            let fullscreen_bounds = visual.debug_bounds("epub-fullscreen").unwrap();
+            reader.update(visual, |reader, _| {
+                assert_eq!(reader.panel_trigger_bounds.len(), 4);
+                assert!(
+                    !reader
+                        .panel_trigger_bounds
+                        .iter()
+                        .any(|bounds| bounds.contains(&fullscreen_bounds.center()))
+                );
+            });
+            for (action, selector) in [
+                (Control::Chapters, "epub-chapter-popup"),
+                (Control::Settings, "epub-reading-settings"),
+                (Control::Find, "epub-search-panel"),
+                (Control::Bookmark, "epub-bookmark-panel"),
+            ] {
+                visual.update(|window, cx| {
+                    reader.update(cx, |reader, cx| reader.control(action, window, cx))
+                });
+                let panel = visual.debug_bounds(selector).unwrap();
+                let body = visual.debug_bounds("epub-body").unwrap();
+                assert_eq!(panel.left() - body.left(), px(PANEL_INSET));
+                assert_eq!(body.bottom() - panel.bottom(), px(PANEL_INSET));
+                assert!(panel.top() >= body.top() + px(PANEL_INSET) - px(0.01));
+                assert!(panel.right() <= body.right() - px(PANEL_INSET));
+                assert!(panel.size.width <= px(PANEL_WIDTH));
+                visual.dispatch_action(EpubDismiss);
+            }
+        }
+        visual.simulate_keystrokes("tab enter");
+        reader.update(visual, |reader, _| assert!(reader.chapters_open));
+    }
+
+    #[gpui::test]
+    fn completed_pagination_notifies_and_updates_the_rendered_label_without_input(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(state::initialize);
+        // Exercise completion in both the visible page and background warming.
+        for long in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("total.epub");
+            if long {
+                fixture(&path);
+            } else {
+                super::super::tests::write_book(
+                    &path,
+                    "3.0",
+                    "",
+                    &[("c.xhtml", "<html><body><p>One page.</p></body></html>")],
+                    &[],
+                );
+            }
+            let (reader, visual) =
+                cx.add_window_view(|window, cx| Reader::new(path, "Total".into(), window, cx));
+            settle(&reader, visual);
+            let expected_total = reader.update(visual, |reader, _| {
+                let layout = &reader.layouts[&reader.href];
+                assert!(layout.complete);
+                assert_eq!(layout.starts.len() > 1, long);
+                layout.starts.len()
+            });
+            let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+            let observed = notifications.clone();
+            visual.update(|_, cx| {
+                cx.observe(&reader, move |_, _| observed.set(observed.get() + 1))
+                    .detach();
+            });
+            reader.update(visual, |reader, cx| {
+                let layout = reader.layouts.get_mut(&reader.href).unwrap();
+                layout.complete = false;
+                layout.starts.truncate(1);
+                layout.pages.clear();
+                // The long chapter's second-page label has never been drawn,
+                // so stale debug bounds cannot satisfy the rendered-label check.
+                reader.request = Some(PageRequest::Index(if long { 1 } else { 0 }));
+                cx.notify(); // Start one normal frame; completion must schedule its own follow-up.
+            });
+            visual.run_until_parked();
+            assert!(
+                notifications.get() >= 2,
+                "completion must notify after prepaint"
+            );
+            let selector = Box::leak(
+                format!(
+                    "epub-page-label: Page {} of {expected_total}",
+                    if long { 2 } else { 1 }
+                )
+                .into_boxed_str(),
+            );
+            assert!(visual.debug_bounds(selector).is_some());
+            reader.update(visual, |reader, _| {
+                assert!(!reader.loading_visible && reader.loading_delay_task.is_none())
+            });
+            let count = notifications.get();
+            visual.run_until_parked();
+            assert_eq!(
+                notifications.get(),
+                count,
+                "completed pagination must become idle"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn loading_feedback_waits_for_200ms_and_spans_book_and_chapter_loading(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("delayed.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Loading".into(), window, cx));
+        settle(&reader, visual);
+        reader.update(visual, |reader, cx| {
+            reader.chapters.clear();
+            reader.current_page = None;
+            reader.request = None;
+            reader.load_task = Some(cx.spawn(async |_, _| futures::future::pending::<()>().await));
+            reader.sync_loading_feedback(cx);
+            cx.notify();
+        });
+        visual.run_until_parked();
+        visual
+            .background_executor
+            .advance_clock(Duration::from_millis(100));
+        reader.update(visual, |reader, cx| {
+            let generation = reader.loading_generation;
+            reader.load_task = None;
+            reader.chapter_task =
+                Some(cx.spawn(async |_, _| futures::future::pending::<()>().await));
+            reader.sync_loading_feedback(cx);
+            assert_eq!(reader.loading_generation, generation);
+            cx.notify();
+        });
+        visual
+            .background_executor
+            .advance_clock(Duration::from_millis(99));
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| assert!(!reader.loading_visible));
+        assert!(visual.debug_bounds("epub-loading").is_none());
+        assert!(visual.debug_bounds("epub-loading-message").is_none());
+        visual
+            .background_executor
+            .advance_clock(Duration::from_millis(2));
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| assert!(reader.loading_visible));
+        assert!(visual.debug_bounds("epub-loading").is_some());
+        assert!(visual.debug_bounds("epub-loading-message").is_some());
+        reader.update(visual, |reader, cx| {
+            reader.error = Some("Loading failed".into());
+            reader.sync_loading_feedback(cx);
+            assert!(!reader.loading_visible && reader.loading_delay_task.is_none());
+            cx.notify();
+        });
+        // Debug selectors can retain old bounds after nodes disappear; the
+        // presentation gate and cancellation state verify feedback removal.
+        reader.update(visual, |reader, _| assert!(!reader.page_pending()));
+    }
+
+    #[gpui::test]
+    fn quick_loads_cancel_feedback_and_successive_requests_get_a_fresh_delay(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(state::initialize);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quick.epub");
+        fixture(&path);
+        let (reader, visual) =
+            cx.add_window_view(|window, cx| Reader::new(path, "Quick".into(), window, cx));
+        settle(&reader, visual);
+        reader.update(visual, |reader, cx| {
+            reader.chapters.clear();
+            reader.current_page = None;
+            reader.request = Some(PageRequest::Index(0));
+            reader.sync_loading_feedback(cx);
+            cx.notify();
+        });
+        visual.run_until_parked();
+        visual
+            .background_executor
+            .advance_clock(Duration::from_millis(100));
+        let old_generation = reader.update(visual, |reader, cx| {
+            let generation = reader.loading_generation;
+            reader.request = None;
+            reader.sync_loading_feedback(cx);
+            assert!(!reader.loading_visible && reader.loading_delay_task.is_none());
+            reader.request = Some(PageRequest::Index(1));
+            reader.sync_loading_feedback(cx);
+            assert_ne!(reader.loading_generation, generation);
+            cx.notify();
+            generation
+        });
+        visual.run_until_parked();
+        visual
+            .background_executor
+            .advance_clock(Duration::from_millis(101));
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| {
+            assert!(!reader.loading_visible);
+            assert_ne!(reader.loading_generation, old_generation);
+        });
+        visual
+            .background_executor
+            .advance_clock(Duration::from_millis(100));
+        visual.run_until_parked();
+        reader.update(visual, |reader, cx| {
+            assert!(reader.loading_visible);
+            reader.request = None;
+            reader.sync_loading_feedback(cx);
+            assert!(!reader.loading_visible && reader.loading_delay_task.is_none());
+            cx.notify();
+        });
+        visual
+            .background_executor
+            .advance_clock(Duration::from_secs(1));
+        visual.run_until_parked();
+        reader.update(visual, |reader, _| assert!(!reader.loading_visible));
     }
 
     #[gpui::test]
@@ -4116,10 +4568,15 @@ mod tests {
             let popup = visual.debug_bounds("epub-chapter-popup").unwrap();
             let body = visual.debug_bounds("epub-body").unwrap();
             let toolbar = visual.debug_bounds("epub-toolbar").unwrap();
-            assert!(popup.top() >= body.top() + px(7.0), "{popup:?} {body:?}");
-            assert!(popup.bottom() <= toolbar.top() - px(7.0));
             assert!(
-                (f32::from(popup.size.height) - f32::from(body.size.height) + 16.0).abs() < 1.0
+                popup.top() >= body.top() + px(PANEL_INSET - 1.0),
+                "{popup:?} {body:?}"
+            );
+            assert!(popup.bottom() <= toolbar.top() - px(PANEL_INSET - 1.0));
+            assert!(
+                (f32::from(popup.size.height) - f32::from(body.size.height) + PANEL_INSET * 2.0)
+                    .abs()
+                    < 1.0
             );
             if height == 820.0 {
                 assert!(popup.size.height > px(320.0));
@@ -4863,8 +5320,8 @@ mod tests {
         settle(&reader, visual);
         reader.update(visual, |reader, _| {
             assert_eq!(reader.anchor, original);
-            assert!(reader.preferences.sans);
-            assert_eq!(reader.preferences.line_spacing, 17);
+            assert!(!reader.preferences.sans);
+            assert_eq!(reader.preferences.line_spacing, 18);
             assert_eq!(reader.preferences.reading_width, 700);
             assert!(!reader.preferences.justify);
         });
@@ -5029,7 +5486,7 @@ mod tests {
         let (reader, visual) =
             cx.add_window_view(|window, cx| Reader::new(path, "Keyboard".into(), window, cx));
         settle(&reader, visual);
-        visual.simulate_keystrokes("tab enter");
+        visual.simulate_keystrokes("tab tab tab tab tab tab enter");
         settle(&reader, visual);
         reader.update(visual, |reader, _| assert_eq!(reader.page_index, 1));
         visual.simulate_keystrokes("space");
