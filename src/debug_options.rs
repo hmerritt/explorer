@@ -1,9 +1,10 @@
 use std::{
     cell::RefCell,
     ffi::OsString,
-    fmt,
+    fmt, io,
+    path::Path,
     sync::atomic::{AtomicU8, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui::{App, Global};
@@ -15,7 +16,9 @@ const DEBUG_ARCHIVE: u8 = 1 << 3;
 const DEBUG_ARCHIVE_VERBOSE: u8 = 1 << 4;
 const DEBUG_PROPERTIES: u8 = 1 << 5;
 const DEBUG_COPY_FAST: u8 = 1 << 6;
-const DEBUG_ALL: u8 = DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS | DEBUG_ARCHIVE | DEBUG_PROPERTIES;
+const DEBUG_COPY: u8 = 1 << 7;
+const DEBUG_ALL: u8 =
+    DEBUG_NAV | DEBUG_SEARCH | DEBUG_ICONS | DEBUG_ARCHIVE | DEBUG_PROPERTIES | DEBUG_COPY;
 
 static PROCESS_DEBUG_FLAGS: AtomicU8 = AtomicU8::new(0);
 
@@ -138,6 +141,10 @@ impl DebugOptions {
         self.flags & DEBUG_COPY_FAST != 0
     }
 
+    pub(crate) fn copy_timings(self) -> bool {
+        self.flags & DEBUG_COPY != 0
+    }
+
     fn enable_nav(&mut self) {
         self.flags |= DEBUG_NAV;
     }
@@ -164,6 +171,10 @@ impl DebugOptions {
 
     fn enable_copy_fast(&mut self) {
         self.flags |= DEBUG_COPY_FAST;
+    }
+
+    fn enable_copy(&mut self) {
+        self.flags |= DEBUG_COPY;
     }
 
     fn enable_all(&mut self) {
@@ -227,6 +238,35 @@ pub(crate) fn copy_fast_enabled() -> bool {
         flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
     }
     .copy_fast()
+}
+
+/// Log both ends of a blocking copy step so an outstanding wait is identifiable.
+pub(crate) fn time_copy_stage<T>(
+    stage: &'static str,
+    path: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let enabled = DebugOptions {
+        flags: PROCESS_DEBUG_FLAGS.load(Ordering::Relaxed),
+    }
+    .copy_timings();
+    if !enabled {
+        return operation();
+    }
+
+    eprintln!("[copy] begin stage={stage} path={}", path.display());
+    let started = Instant::now();
+    let result = operation();
+    let outcome = match &result {
+        Ok(_) => "ok".to_owned(),
+        Err(error) => format!("error: {error}"),
+    };
+    eprintln!(
+        "[copy] {} stage={stage} outcome={outcome} path={}",
+        format_timing_duration(started.elapsed()),
+        path.display()
+    );
+    result
 }
 
 #[cfg(feature = "benchmarks")]
@@ -355,9 +395,10 @@ fn parse_debug_value(value: &str, options: &mut DebugOptions, warnings: &mut Vec
             "archive-verbose" | "extract-verbose" => options.enable_archive_verbose(),
             "properties" | "property" | "props" => options.enable_properties(),
             "copy-fast" => options.enable_copy_fast(),
+            "copy" => options.enable_copy(),
             "all" | "*" => options.enable_all(),
             unknown => warnings.push(format!(
-                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, archive-verbose, extract, extract-verbose, properties, copy-fast, all, or *."
+                "Explorer ignoring unknown debug item {unknown:?}; expected nav, search, icons, archive, archive-verbose, extract, extract-verbose, properties, copy, copy-fast, all, or *."
             )),
         }
     }
@@ -461,6 +502,23 @@ mod tests {
         assert!(properties_warnings.is_empty());
         assert!(property_warnings.is_empty());
         assert!(props_warnings.is_empty());
+    }
+
+    #[test]
+    fn copy_timings_are_independent_of_fast_copy() {
+        for value in ["copy", "all", "*"] {
+            let (options, warnings) =
+                parse_debug_options(args(&["explorer", &format!("--debug={value}")]));
+            assert!(options.copy_timings());
+            assert!(!options.copy_fast());
+            assert!(warnings.is_empty());
+        }
+        let (options, warnings) =
+            parse_debug_options(args(&["explorer", "--debug=copy,copy-fast"]));
+        assert!(options.copy_timings());
+        assert!(options.copy_fast());
+        assert!(warnings.is_empty());
+        assert!(!DebugOptions::default().copy_timings());
     }
 
     #[test]

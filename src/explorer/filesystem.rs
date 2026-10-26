@@ -16,6 +16,8 @@ use filetime::FileTime;
 use rayon::prelude::*;
 use thousands::Separable;
 
+use crate::debug_options::time_copy_stage;
+
 use crate::explorer::archive_diagnostics::{ArchiveDiagnostics, ArchiveHandle, CountingReader};
 use crate::explorer::{
     entry::FileEntry,
@@ -2919,6 +2921,7 @@ pub(super) enum FileOperationPhase {
     Extracting,
     Moving,
     Removing,
+    Finalizing,
     Finished,
     Cancelled,
 }
@@ -2985,9 +2988,18 @@ impl RemoteDeleteError {
 
 impl FileOperationProgress {
     pub(super) fn percent(&self) -> Option<f32> {
+        if self.phase == FileOperationPhase::Finished {
+            return Some(1.0);
+        }
         (self.work_total_bytes > 0).then(|| {
-            (self.work_completed_bytes as f32 / self.work_total_bytes as f32).clamp(0.0, 1.0)
+            (self.work_completed_bytes as f64 / self.work_total_bytes as f64).clamp(0.0, 0.99)
+                as f32
         })
+    }
+
+    pub(super) fn begin_finalizing(&mut self, on_progress: &mut impl FnMut(Self)) {
+        self.phase = FileOperationPhase::Finalizing;
+        on_progress(self.clone());
     }
 
     pub(super) fn reserve_work_bytes(&mut self, bytes: u64) {
@@ -3260,6 +3272,7 @@ impl Drop for CopyUndoBackupGuard {
 #[derive(Clone, Debug)]
 enum ParallelFileTaskEvent {
     Phase {
+        task_id: usize,
         phase: FileOperationPhase,
         current_item: Option<PathBuf>,
     },
@@ -3267,7 +3280,49 @@ enum ParallelFileTaskEvent {
     VerifiedBytes(u64),
     WorkTotalBytes(u64),
     WorkCompletedBytes(u64),
-    Completed,
+    Completed(usize),
+}
+
+struct ParallelFileTaskProgress {
+    total_tasks: usize,
+    completed_tasks: usize,
+    active: HashMap<usize, (FileOperationPhase, Option<PathBuf>)>,
+}
+
+impl ParallelFileTaskProgress {
+    fn new(total_tasks: usize) -> Self {
+        Self {
+            total_tasks,
+            completed_tasks: 0,
+            active: HashMap::new(),
+        }
+    }
+
+    fn update_phase(&self, progress: &mut FileOperationProgress) {
+        // A worker finishing its flush must not hide another worker's transfer.
+        let active_transfer = self
+            .active
+            .values()
+            .filter(|(phase, _)| *phase != FileOperationPhase::Finalizing)
+            .max_by_key(|(phase, _)| match phase {
+                FileOperationPhase::Copying | FileOperationPhase::Moving => 3,
+                FileOperationPhase::Verifying => 2,
+                _ => 1,
+            });
+        if let Some((phase, item)) = active_transfer {
+            progress.phase = *phase;
+            progress.current_item = item.clone();
+        } else if self.completed_tasks + self.active.len() == self.total_tasks {
+            progress.phase = FileOperationPhase::Finalizing;
+            if let Some(item) = self.active.values().find_map(|(_, item)| item.clone()) {
+                progress.current_item = Some(item);
+            }
+        } else {
+            // Queued tasks still have work to do, even if every running task is flushing.
+            progress.phase = FileOperationPhase::Preparing;
+            progress.current_item = None;
+        }
+    }
 }
 
 fn prepare_file_operation(
@@ -4216,6 +4271,7 @@ fn run_parallel_file_tasks(
     let (event_tx, event_rx) = mpsc::channel::<ParallelFileTaskEvent>();
     let (result_tx, result_rx) =
         mpsc::channel::<Result<Vec<ParallelFileTaskResult>, FileOperationError>>();
+    let mut worker_progress = ParallelFileTaskProgress::new(tasks.len());
 
     std::thread::scope(|scope| {
         let tasks = tasks.to_vec();
@@ -4224,8 +4280,10 @@ fn run_parallel_file_tasks(
             let result = pool.install(|| {
                 tasks
                     .par_iter()
-                    .map(|task| {
+                    .enumerate()
+                    .map(|(task_id, task)| {
                         let result = run_parallel_file_task(
+                            task_id,
                             task,
                             kind,
                             copy_options,
@@ -4245,11 +4303,21 @@ fn run_parallel_file_tasks(
         loop {
             match result_rx.recv_timeout(Duration::from_millis(25)) {
                 Ok(result) => {
-                    drain_parallel_file_task_events(&event_rx, progress, on_progress);
+                    drain_parallel_file_task_events(
+                        &event_rx,
+                        &mut worker_progress,
+                        progress,
+                        on_progress,
+                    );
                     return result;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    drain_parallel_file_task_events(&event_rx, progress, on_progress);
+                    drain_parallel_file_task_events(
+                        &event_rx,
+                        &mut worker_progress,
+                        progress,
+                        on_progress,
+                    );
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(FileOperationError::Failed(
@@ -4378,6 +4446,7 @@ fn run_single_file_task(
 }
 
 fn run_parallel_file_task(
+    task_id: usize,
     task: &ParallelFileTask,
     kind: FileOperationKind,
     copy_options: CopyOptions,
@@ -4410,6 +4479,7 @@ fn run_parallel_file_task(
         ),
     };
     let _ = event_tx.send(ParallelFileTaskEvent::Phase {
+        task_id,
         phase,
         current_item: Some(source.clone()),
     });
@@ -4438,6 +4508,7 @@ fn run_parallel_file_task(
             last_phase = progress.phase;
             last_item = progress.current_item.clone();
             let _ = event_tx.send(ParallelFileTaskEvent::Phase {
+                task_id,
                 phase: progress.phase,
                 current_item: progress.current_item,
             });
@@ -4519,7 +4590,7 @@ fn run_parallel_file_task(
         }
     }
 
-    let _ = event_tx.send(ParallelFileTaskEvent::Completed);
+    let _ = event_tx.send(ParallelFileTaskEvent::Completed(task_id));
     Ok(ParallelFileTaskResult::with_copy_undo(
         destination.clone(),
         task_copy_undo,
@@ -4529,17 +4600,21 @@ fn run_parallel_file_task(
 
 fn drain_parallel_file_task_events(
     event_rx: &mpsc::Receiver<ParallelFileTaskEvent>,
+    worker_progress: &mut ParallelFileTaskProgress,
     progress: &mut FileOperationProgress,
     on_progress: &mut impl FnMut(FileOperationProgress),
 ) {
     while let Ok(event) = event_rx.try_recv() {
         match event {
             ParallelFileTaskEvent::Phase {
+                task_id,
                 phase,
                 current_item,
             } => {
-                progress.phase = phase;
-                progress.current_item = current_item;
+                worker_progress
+                    .active
+                    .insert(task_id, (phase, current_item));
+                worker_progress.update_phase(progress);
             }
             ParallelFileTaskEvent::CopiedBytes(bytes) => {
                 progress.copied_bytes = progress.copied_bytes.saturating_add(bytes);
@@ -4553,7 +4628,10 @@ fn drain_parallel_file_task_events(
             ParallelFileTaskEvent::WorkCompletedBytes(bytes) => {
                 progress.add_completed_work_bytes(bytes);
             }
-            ParallelFileTaskEvent::Completed => {
+            ParallelFileTaskEvent::Completed(task_id) => {
+                worker_progress.active.remove(&task_id);
+                worker_progress.completed_tasks += 1;
+                worker_progress.update_phase(progress);
                 progress.completed_files = progress.completed_files.saturating_add(1);
             }
         }
@@ -6150,32 +6228,34 @@ fn copy_source_file_with_progress(
     engine: CopyEngine,
     options: CopyOptions,
 ) -> std::io::Result<()> {
-    match engine {
-        CopyEngine::Standard => {
-            copy_source_file_standard_with_progress(
-                source,
-                destination,
-                cancel,
-                progress,
-                on_progress,
-                options,
-            )?;
+    time_copy_stage("total", destination, || {
+        match engine {
+            CopyEngine::Standard => {
+                copy_source_file_standard_with_progress(
+                    source,
+                    destination,
+                    cancel,
+                    progress,
+                    on_progress,
+                    options,
+                )?;
+            }
+            CopyEngine::ResumableDelta => {
+                copy_with_delta_progress_with_options(
+                    source,
+                    destination,
+                    cancel,
+                    progress,
+                    on_progress,
+                    options,
+                )?;
+            }
         }
-        CopyEngine::ResumableDelta => {
-            copy_with_delta_progress_with_options(
-                source,
-                destination,
-                cancel,
-                progress,
-                on_progress,
-                options,
-            )?;
-        }
-    }
 
-    progress.completed_files += 1;
-    on_progress(progress.clone());
-    Ok(())
+        progress.completed_files += 1;
+        on_progress(progress.clone());
+        Ok(())
+    })
 }
 
 fn copy_source_file_with_progress_and_undo(
@@ -6192,7 +6272,9 @@ fn copy_source_file_with_progress_and_undo(
     let mut backup_guard = CopyUndoBackupGuard::default();
 
     if destination_existed {
-        let replaced = backup_file_for_copy_undo(destination)?;
+        let replaced = time_copy_stage("undo_backup", destination, || {
+            backup_file_for_copy_undo(destination)
+        })?;
         backup_guard.track(&replaced.backup);
         copy_undo.replaced_files.push(replaced);
     }
@@ -6236,7 +6318,10 @@ fn copy_source_file_standard_with_progress(
             on_progress,
         )?
     {
-        preserve_file_metadata(&metadata, destination)?;
+        progress.begin_finalizing(on_progress);
+        time_copy_stage("metadata", destination, || {
+            preserve_file_metadata(&metadata, destination)
+        })?;
         if options.should_sync() {
             sync_file_best_effort(destination);
             sync_parent_directory_best_effort(destination);
@@ -6267,7 +6352,10 @@ fn copy_source_file_standard_with_progress(
 
     match copy_result {
         Ok(()) => {
-            preserve_file_metadata(&metadata, &temp_destination)?;
+            progress.begin_finalizing(on_progress);
+            time_copy_stage("metadata", &temp_destination, || {
+                preserve_file_metadata(&metadata, &temp_destination)
+            })?;
             finalize_copied_file(
                 source,
                 &temp_destination,
@@ -6279,12 +6367,16 @@ fn copy_source_file_standard_with_progress(
                 options,
             )?;
             if options.should_sync() {
+                progress.begin_finalizing(on_progress);
                 sync_parent_directory_best_effort(destination);
             }
             Ok(())
         }
         Err(error) => {
-            let _ = fs::remove_file(&temp_destination);
+            progress.begin_finalizing(on_progress);
+            let _ = time_copy_stage("cleanup", &temp_destination, || {
+                fs::remove_file(&temp_destination)
+            });
             Err(error)
         }
     }
@@ -6302,18 +6394,21 @@ fn copy_source_file_to_temp(
     let mut source_file = File::open(source)?;
     let destination_file = File::create(temp_destination)?;
     if source_len >= COPY_BUFFER_SIZE as u64 * 8 {
-        copy_file_contents_parallel_with_progress(
-            source,
-            &destination_file,
-            source_len,
-            cancel,
-            |bytes| {
-                progress.add_copied_bytes(bytes);
-                on_progress(progress.clone());
-            },
-        )?;
+        time_copy_stage("writing", temp_destination, || {
+            copy_file_contents_parallel_with_progress(
+                source,
+                &destination_file,
+                source_len,
+                cancel,
+                |bytes| {
+                    progress.add_copied_bytes(bytes);
+                    on_progress(progress.clone());
+                },
+            )
+        })?;
         if options.should_sync() {
-            destination_file.sync_all()?;
+            progress.begin_finalizing(on_progress);
+            time_copy_stage("flush", temp_destination, || destination_file.sync_all())?;
         }
         return Ok(());
     }
@@ -6321,25 +6416,29 @@ fn copy_source_file_to_temp(
     let mut destination_file = destination_file;
     let mut buffer = vec![0; COPY_BUFFER_SIZE];
 
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "file operation cancelled",
-            ));
-        }
+    time_copy_stage("writing", temp_destination, || {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "file operation cancelled",
+                ));
+            }
 
-        let read = source_file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+            let read = source_file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            destination_file.write_all(&buffer[..read])?;
+            progress.add_copied_bytes(read as u64);
+            on_progress(progress.clone());
         }
-        destination_file.write_all(&buffer[..read])?;
-        progress.add_copied_bytes(read as u64);
-        on_progress(progress.clone());
-    }
+        Ok(())
+    })?;
 
     if options.should_sync() {
-        destination_file.sync_all()?;
+        progress.begin_finalizing(on_progress);
+        time_copy_stage("flush", temp_destination, || destination_file.sync_all())?;
     }
     Ok(())
 }
@@ -6433,7 +6532,7 @@ pub(super) fn preserve_file_metadata(
 
 fn sync_file_best_effort(path: &Path) {
     if let Ok(file) = File::open(path) {
-        let _ = file.sync_all();
+        let _ = time_copy_stage("flush", path, || file.sync_all());
     }
 }
 
@@ -6442,7 +6541,7 @@ fn sync_parent_directory_best_effort(path: &Path) {
     if let Some(parent) = path.parent()
         && let Ok(directory) = File::open(parent)
     {
-        let _ = directory.sync_all();
+        let _ = time_copy_stage("directory_flush", parent, || directory.sync_all());
     }
 }
 
@@ -6495,7 +6594,10 @@ pub(super) fn finalize_copied_file(
     on_progress: &mut impl FnMut(FileOperationProgress),
     options: CopyOptions,
 ) -> std::io::Result<()> {
-    match replace_destination_with_temp(temp, destination) {
+    progress.begin_finalizing(on_progress);
+    match time_copy_stage("destination_replace", destination, || {
+        replace_destination_with_temp(temp, destination)
+    }) {
         Ok(()) => return Ok(()),
         Err(rename_error) => copy_verified_temp_to_destination(
             source,
@@ -6534,8 +6636,10 @@ fn copy_verified_temp_to_destination(
     }
 
     let destination_existed = destination.exists();
-    fs::copy(temp, destination)?;
-    preserve_file_metadata(source_metadata, destination)?;
+    time_copy_stage("fallback_copy", destination, || fs::copy(temp, destination))?;
+    time_copy_stage("metadata", destination, || {
+        preserve_file_metadata(source_metadata, destination)
+    })?;
 
     if options.should_sync() {
         sync_file_best_effort(destination);
@@ -6551,14 +6655,16 @@ fn copy_verified_temp_to_destination(
         on_progress,
     )? {
         if !destination_existed {
-            let _ = fs::remove_file(destination);
+            progress.begin_finalizing(on_progress);
+            let _ = time_copy_stage("cleanup", destination, || fs::remove_file(destination));
         }
         return Err(std::io::Error::other(
             "copied file verification failed after rename fallback",
         ));
     }
 
-    fs::remove_file(temp)?;
+    progress.begin_finalizing(on_progress);
+    time_copy_stage("cleanup", temp, || fs::remove_file(temp))?;
     Ok(())
 }
 
@@ -8604,6 +8710,200 @@ mod tests {
     }
 
     #[test]
+    fn copy_progress_reserves_full_completion_for_finished_operations() {
+        let temp = TempDir::new();
+        let source = temp.path().join("empty");
+        let destination = temp.path().join("destination");
+        fs::write(&source, []).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let job = ready_job(prepare_copy_paths_to_directory(&[source], &destination));
+        let mut progress = job.initial_progress();
+
+        for total in [0, 100, u64::MAX] {
+            progress.work_total_bytes = total;
+            progress.work_completed_bytes = total;
+            for phase in [
+                FileOperationPhase::Copying,
+                FileOperationPhase::Verifying,
+                FileOperationPhase::Finalizing,
+                FileOperationPhase::Cancelled,
+            ] {
+                progress.phase = phase;
+                assert_eq!(progress.percent(), (total > 0).then_some(0.99));
+            }
+            progress.phase = FileOperationPhase::Finished;
+            assert_eq!(progress.percent(), Some(1.0));
+        }
+    }
+
+    #[test]
+    fn parallel_copy_progress_tracks_transferring_finishing_and_queued_tasks() {
+        let temp = TempDir::new();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"data").unwrap();
+        fs::create_dir(&destination).unwrap();
+        let job = ready_job(prepare_copy_paths_to_directory(&[source], &destination));
+        let mut progress = job.initial_progress();
+        let mut workers = ParallelFileTaskProgress::new(3);
+        let (tx, rx) = mpsc::channel();
+        let mut publish = |event| {
+            tx.send(event).unwrap();
+            drain_parallel_file_task_events(&rx, &mut workers, &mut progress, &mut |_| {});
+            (progress.phase, progress.current_item.clone())
+        };
+        let phase = |task_id, phase| ParallelFileTaskEvent::Phase {
+            task_id,
+            phase,
+            current_item: Some(PathBuf::from(format!("item-{task_id}"))),
+        };
+
+        assert_eq!(
+            publish(phase(0, FileOperationPhase::Copying)).0,
+            FileOperationPhase::Copying
+        );
+        assert_eq!(
+            publish(phase(1, FileOperationPhase::Finalizing)).0,
+            FileOperationPhase::Copying
+        );
+        assert_eq!(
+            publish(phase(0, FileOperationPhase::Verifying)),
+            (FileOperationPhase::Verifying, Some(PathBuf::from("item-0")))
+        );
+        // A queued third task prevents the operation from claiming it is finishing.
+        assert_eq!(
+            publish(phase(0, FileOperationPhase::Finalizing)).0,
+            FileOperationPhase::Preparing
+        );
+        assert_eq!(
+            publish(phase(2, FileOperationPhase::Copying)).0,
+            FileOperationPhase::Copying
+        );
+        assert_eq!(
+            publish(phase(2, FileOperationPhase::Finalizing)).0,
+            FileOperationPhase::Finalizing
+        );
+        for task_id in 0..3 {
+            assert_eq!(
+                publish(ParallelFileTaskEvent::Completed(task_id)).0,
+                FileOperationPhase::Finalizing
+            );
+        }
+        assert_eq!(progress.completed_files, 3);
+        assert!(progress.percent().is_none_or(|percent| percent < 1.0));
+    }
+
+    #[test]
+    fn copy_finishing_progress_covers_new_replaced_resumed_fallback_and_empty_files() {
+        for verify in [false, true] {
+            for scenario in ["new", "replace", "resume", "fallback", "empty"] {
+                let temp = TempDir::new();
+                let source = temp.path().join("file.bin");
+                let directory = temp.path().join("destination");
+                fs::create_dir(&directory).unwrap();
+                let destination = directory.join("file.bin");
+                let partial = directory.join("file.bin.partial");
+                let data: &[u8] = if scenario == "empty" {
+                    b""
+                } else {
+                    b"copied file contents"
+                };
+                fs::write(&source, data).unwrap();
+                if scenario == "replace" {
+                    fs::write(&destination, b"old contents").unwrap();
+                }
+                if scenario == "resume" {
+                    fs::write(&partial, &data[..5]).unwrap();
+                }
+                let _rename_failure = (scenario == "fallback")
+                    .then(|| set_test_replace_destination_failure(&destination));
+                let mut job = match prepare_copy_paths_to_directory(&[source], &directory).unwrap()
+                {
+                    PreparedFileOperation::Ready(job) => job,
+                    PreparedFileOperation::Conflicts(conflicts) => conflicts.into_job(),
+                };
+                job.set_copy_verify(verify);
+                let mut events = Vec::new();
+                let mut finishing_before_destination = false;
+                let summary = execute_file_operation_with_progress(
+                    job,
+                    ConflictChoice::Replace,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicBool::new(false)),
+                    |progress| {
+                        if progress.phase == FileOperationPhase::Finalizing && !destination.exists()
+                        {
+                            finishing_before_destination = true;
+                        }
+                        events.push(progress);
+                    },
+                )
+                .unwrap();
+
+                assert_eq!(fs::read(&destination).unwrap(), data);
+                assert!(!partial.exists());
+                if scenario != "replace" {
+                    assert!(finishing_before_destination, "{scenario}, verify={verify}");
+                }
+                assert!(
+                    events
+                        .iter()
+                        .any(|progress| progress.phase == FileOperationPhase::Finalizing)
+                );
+                for progress in &events {
+                    assert_eq!(
+                        progress.percent() == Some(1.0),
+                        progress.phase == FileOperationPhase::Finished
+                    );
+                }
+                assert_eq!(events.last().unwrap().phase, FileOperationPhase::Finished);
+                cleanup_copy_undo_backups(&summary.copy_undo);
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_folder_copy_reaches_full_progress_only_after_finishing() {
+        let temp = TempDir::new();
+        let source = temp.path().join("folder");
+        let destination = temp.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        for index in 0..4 {
+            fs::write(source.join(format!("file-{index}")), vec![index; 64 * 1024]).unwrap();
+        }
+        let mut job = ready_job(prepare_copy_paths_to_directory(&[source], &destination));
+        job.set_copy_verify(false);
+        let mut events = Vec::new();
+        execute_file_operation_with_progress(
+            job,
+            ConflictChoice::Replace,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            |progress| events.push(progress),
+        )
+        .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|progress| progress.phase == FileOperationPhase::Finalizing)
+        );
+        assert_eq!(events.last().unwrap().completed_files, 4);
+        for progress in &events {
+            assert_eq!(
+                progress.percent() == Some(1.0),
+                progress.phase == FileOperationPhase::Finished
+            );
+        }
+        for index in 0..4 {
+            assert_eq!(
+                fs::read(destination.join("folder").join(format!("file-{index}"))).unwrap(),
+                vec![index; 64 * 1024]
+            );
+        }
+    }
+
+    #[test]
     fn progress_copy_uses_temp_file_and_reports_bytes() {
         let temp = TempDir::new();
         let source = temp.path().join("large.bin");
@@ -8797,6 +9097,7 @@ mod tests {
         );
         assert_eq!(fs::read(&partial).unwrap(), b"wrong data");
         assert!(!destination.exists());
+        assert_ne!(progress.percent(), Some(1.0));
     }
 
     #[test]
@@ -8819,6 +9120,7 @@ mod tests {
             cancel.clone(),
             Arc::new(AtomicBool::new(false)),
             |progress| {
+                assert_ne!(progress.percent(), Some(1.0));
                 if progress.copied_bytes > 0 && !requested_cancel {
                     requested_cancel = true;
                     cancel.store(true, Ordering::Relaxed);

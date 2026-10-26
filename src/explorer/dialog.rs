@@ -1713,6 +1713,7 @@ fn file_operation_transfer_bytes(progress: &FileOperationProgress) -> Option<u64
         | FileOperationPhase::Resuming
         | FileOperationPhase::Linking
         | FileOperationPhase::Removing
+        | FileOperationPhase::Finalizing
         | FileOperationPhase::Finished
         | FileOperationPhase::Cancelled => None,
     }
@@ -1745,6 +1746,7 @@ fn file_operation_item_label(progress: &FileOperationProgress) -> String {
         FileOperationPhase::Extracting => "Extracting",
         FileOperationPhase::Moving => "Moving",
         FileOperationPhase::Removing => "Removing",
+        FileOperationPhase::Finalizing => return "Finishing…".to_owned(),
         FileOperationPhase::Finished => "Finished",
         FileOperationPhase::Cancelled => "Cancelled",
     };
@@ -2737,6 +2739,40 @@ mod tests {
         progress.verified_bytes = 3072;
         assert_eq!(
             tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(2048.0)
+        );
+    }
+
+    #[test]
+    fn finalizing_status_clears_speed_and_resets_transfer_baseline() {
+        let started = Instant::now();
+        let mut tracker = FileOperationSpeedTracker::default();
+        let mut progress = test_progress();
+        tracker.record(Some(&progress), started);
+        progress.copied_bytes = 1024;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(1)),
+            Some(1024.0)
+        );
+
+        progress.phase = FileOperationPhase::Finalizing;
+        assert_eq!(file_operation_item_label(&progress), "Finishing…");
+        for seconds in [2, 60] {
+            assert_eq!(
+                tracker.record(Some(&progress), started + Duration::from_secs(seconds)),
+                None
+            );
+            assert_eq!(tracker.current_rate(), None);
+        }
+
+        progress.phase = FileOperationPhase::Copying;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(61)),
+            None
+        );
+        progress.copied_bytes += 2048;
+        assert_eq!(
+            tracker.record(Some(&progress), started + Duration::from_secs(62)),
             Some(2048.0)
         );
     }

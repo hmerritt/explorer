@@ -15,6 +15,8 @@ use filetime::FileTime;
 use rayon::prelude::*;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
+use crate::debug_options::time_copy_stage;
+
 use crate::explorer::filesystem::{
     FileOperationPhase, FileOperationProgress, finalize_copied_file, paths_are_on_same_volume,
     preserve_file_metadata,
@@ -469,7 +471,10 @@ fn copy_with_delta_progress_impl(
         };
 
         if same_data {
-            preserve_file_metadata(&metadata, destination)?;
+            progress.begin_finalizing(on_progress);
+            time_copy_stage("metadata", destination, || {
+                preserve_file_metadata(&metadata, destination)
+            })?;
             if options.should_sync() {
                 sync_file(destination);
                 sync_parent_directory(destination);
@@ -502,7 +507,9 @@ fn copy_with_delta_progress_impl(
         progress.current_item = Some(source.to_path_buf());
         on_progress(progress.clone());
 
-        let valid_prefix = validate_partial_prefix(source, &partial, source_len, cancel)?;
+        let valid_prefix = time_copy_stage("resume_validation", &partial, || {
+            validate_partial_prefix(source, &partial, source_len, cancel)
+        })?;
         seed_resume_progress(valid_prefix, progress, on_progress);
         progress.phase = FileOperationPhase::Copying;
         on_progress(progress.clone());
@@ -551,7 +558,10 @@ fn copy_with_delta_progress_impl(
         }
     }
 
-    preserve_file_metadata(&metadata, &partial)?;
+    progress.begin_finalizing(on_progress);
+    time_copy_stage("metadata", &partial, || {
+        preserve_file_metadata(&metadata, &partial)
+    })?;
     finalize_copied_file(
         source,
         &partial,
@@ -563,8 +573,10 @@ fn copy_with_delta_progress_impl(
         options,
     )?;
     if options.should_sync() {
+        progress.begin_finalizing(on_progress);
         sync_parent_directory(destination);
     }
+    progress.begin_finalizing(on_progress);
     remove_partial_file(&partial);
     Ok(())
 }
@@ -596,17 +608,19 @@ pub(super) fn destination_content_matches_source_with_progress(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    files_equal_with_progress(
-        source,
-        destination,
-        source_len,
-        block_size,
-        cancel,
-        |bytes| {
-            progress.add_verified_bytes(bytes);
-            on_progress(progress.clone());
-        },
-    )
+    time_copy_stage("verification", destination, || {
+        files_equal_with_progress(
+            source,
+            destination,
+            source_len,
+            block_size,
+            cancel,
+            |bytes| {
+                progress.add_verified_bytes(bytes);
+                on_progress(progress.clone());
+            },
+        )
+    })
 }
 
 fn partial_path_for(destination: &Path) -> PathBuf {
@@ -712,33 +726,38 @@ fn append_source_remainder_to_partial(
 
     let mut offset = start_offset;
     let mut buffer = vec![0; RSYNC_IO_BUFFER_SIZE];
-    while offset < source_len {
-        if cancel.load(Ordering::Relaxed) {
-            if options.should_sync() {
-                let _ = output.sync_all();
+    time_copy_stage("writing", partial, || {
+        while offset < source_len {
+            if cancel.load(Ordering::Relaxed) {
+                if options.should_sync() {
+                    progress.begin_finalizing(on_progress);
+                    let _ = time_copy_stage("flush", partial, || output.sync_all());
+                }
+                return Err(cancelled_error());
             }
-            return Err(cancelled_error());
+
+            let read_len = (source_len - offset).min(buffer.len() as u64) as usize;
+            let read = source_file.read(&mut buffer[..read_len])?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "source ended before resumable copy completed",
+                ));
+            }
+
+            output.write_all(&buffer[..read])?;
+            let written = read as u64;
+            offset = offset.saturating_add(written);
+            progress.add_copied_bytes(written);
+            on_progress(progress.clone());
         }
+        Ok(())
+    })?;
 
-        let read_len = (source_len - offset).min(buffer.len() as u64) as usize;
-        let read = source_file.read(&mut buffer[..read_len])?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "source ended before resumable copy completed",
-            ));
-        }
-
-        output.write_all(&buffer[..read])?;
-        let written = read as u64;
-        offset = offset.saturating_add(written);
-        progress.add_copied_bytes(written);
-        on_progress(progress.clone());
-    }
-
-    output.set_len(source_len)?;
+    progress.begin_finalizing(on_progress);
+    time_copy_stage("set_length", partial, || output.set_len(source_len))?;
     if options.should_sync() {
-        output.sync_all()?;
+        time_copy_stage("flush", partial, || output.sync_all())?;
     }
     Ok(())
 }
@@ -755,6 +774,7 @@ fn write_delta_scratch(
     options: CopyOptions,
 ) -> io::Result<DeltaCopyStats> {
     if scratch.exists() {
+        progress.begin_finalizing(on_progress);
         fs::remove_file(scratch)?;
     }
 
@@ -762,7 +782,9 @@ fn write_delta_scratch(
         progress.phase = FileOperationPhase::Indexing;
         progress.current_item = Some(basis.to_path_buf());
         on_progress(progress.clone());
-        build_basis_signatures(basis, block_size, cancel)?
+        time_copy_stage("indexing", basis, || {
+            build_basis_signatures(basis, block_size, cancel)
+        })?
     } else {
         SignatureTable::default()
     };
@@ -779,27 +801,31 @@ fn write_delta_scratch(
         None
     };
 
-    let scan_result = scan_source_to_output(
-        source,
-        &signatures,
-        basis_file.as_mut(),
-        &mut output,
-        block_size,
-        cancel,
-        progress,
-        on_progress,
-        &mut stats,
-    );
+    let scan_result = time_copy_stage("writing", scratch, || {
+        scan_source_to_output(
+            source,
+            &signatures,
+            basis_file.as_mut(),
+            &mut output,
+            block_size,
+            cancel,
+            progress,
+            on_progress,
+            &mut stats,
+        )
+    });
     if let Err(error) = scan_result {
         if options.should_sync() {
-            let _ = output.sync_all();
+            progress.begin_finalizing(on_progress);
+            let _ = time_copy_stage("flush", scratch, || output.sync_all());
         }
         return Err(error);
     }
 
-    output.set_len(source_len)?;
+    progress.begin_finalizing(on_progress);
+    time_copy_stage("set_length", scratch, || output.set_len(source_len))?;
     if options.should_sync() {
-        output.sync_all()?;
+        time_copy_stage("flush", scratch, || output.sync_all())?;
     }
     Ok(stats)
 }
@@ -1040,14 +1066,23 @@ fn verify_and_repair(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    let repaired = verify_repair_pass(source, scratch, source_len, block_size, cancel, |bytes| {
-        progress.add_verified_bytes(bytes);
-        on_progress(progress.clone());
+    let repaired = time_copy_stage("verification", scratch, || {
+        verify_repair_pass(source, scratch, source_len, block_size, cancel, |bytes| {
+            progress.add_verified_bytes(bytes);
+            on_progress(progress.clone());
+        })
     })?;
     if options.should_sync() {
+        progress.begin_finalizing(on_progress);
         sync_file(scratch);
     }
-    let verified = verify_offsets(source, scratch, &repaired, block_size, cancel)?;
+    if !repaired.is_empty() {
+        progress.phase = FileOperationPhase::Verifying;
+        on_progress(progress.clone());
+    }
+    let verified = time_copy_stage("verification_repaired", scratch, || {
+        verify_offsets(source, scratch, &repaired, block_size, cancel)
+    })?;
     if !verified {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1076,17 +1111,19 @@ fn destination_is_identical_to_source(
     progress.current_item = Some(source.to_path_buf());
     on_progress(progress.clone());
 
-    files_equal_with_progress(
-        source,
-        destination,
-        source_len,
-        block_size,
-        cancel,
-        |bytes| {
-            progress.add_verified_bytes(bytes);
-            on_progress(progress.clone());
-        },
-    )
+    time_copy_stage("verification", destination, || {
+        files_equal_with_progress(
+            source,
+            destination,
+            source_len,
+            block_size,
+            cancel,
+            |bytes| {
+                progress.add_verified_bytes(bytes);
+                on_progress(progress.clone());
+            },
+        )
+    })
 }
 
 fn verify_repair_pass(
@@ -1665,11 +1702,10 @@ fn strong_hash(bytes: &[u8]) -> u64 {
 }
 
 fn remove_partial_file(path: &Path) {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => {}
-    }
+    let _ = time_copy_stage("cleanup", path, || match fs::remove_file(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    });
 }
 
 fn cancelled_error() -> io::Error {
@@ -1678,7 +1714,7 @@ fn cancelled_error() -> io::Error {
 
 fn sync_file(path: &Path) {
     if let Ok(file) = File::open(path) {
-        let _ = file.sync_all();
+        let _ = time_copy_stage("flush", path, || file.sync_all());
     }
 }
 
@@ -1687,7 +1723,7 @@ fn sync_parent_directory(path: &Path) {
     if let Some(parent) = path.parent()
         && let Ok(directory) = File::open(parent)
     {
-        let _ = directory.sync_all();
+        let _ = time_copy_stage("directory_flush", parent, || directory.sync_all());
     }
 }
 
@@ -2002,7 +2038,7 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"same content");
         assert_eq!(progress.copied_bytes, 0);
         assert_eq!(progress.verified_bytes, 12);
-        assert_eq!(progress.percent(), Some(1.0));
+        assert_eq!(progress.percent(), Some(0.99));
         assert!(progress_events.iter().any(|progress| {
             progress.phase == FileOperationPhase::Verifying
                 && progress.copied_bytes == 0
@@ -2047,11 +2083,11 @@ mod tests {
         }));
         assert_eq!(progress.copied_bytes, 0);
         assert_eq!(progress.verified_bytes, data.len() as u64);
-        assert_eq!(progress.percent(), Some(1.0));
+        assert_eq!(progress.percent(), Some(0.99));
     }
 
     #[test]
-    fn copy_then_verify_progress_is_monotonic_and_finishes_after_verification() {
+    fn copy_then_verify_progress_is_monotonic_and_leaves_room_for_finalization() {
         let temp = TempDir::new();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
@@ -2093,7 +2129,8 @@ mod tests {
         );
         assert_eq!(progress.copied_bytes, 16);
         assert_eq!(progress.verified_bytes, 16);
-        assert_eq!(progress.percent(), Some(1.0));
+        assert_eq!(progress.phase, FileOperationPhase::Finalizing);
+        assert_eq!(progress.percent(), Some(0.99));
     }
 
     #[test]
