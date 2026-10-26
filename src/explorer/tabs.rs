@@ -2680,8 +2680,14 @@ impl Render for ExplorerTabs {
         self.cleanup_completed_background_operations(cx);
         for tab in &self.tabs {
             for pane in &tab.panes {
-                pane.view
-                    .update(cx, |view, _| view.pane_visible = tab.id == self.active_tab);
+                pane.view.update(cx, |view, cx| {
+                    view.pane_visible = tab.id == self.active_tab;
+                    let active = view.pane_visible && pane.id == tab.active_pane;
+                    if view.pane_active != active {
+                        view.pane_active = active;
+                        cx.notify();
+                    }
+                });
             }
         }
         let app_font = crate::settings::current_app_font(cx);
@@ -8197,6 +8203,152 @@ mod tests {
             assert_eq!(tab.active_pane, right_pane);
             assert_eq!(tab.layout, original_layout);
         });
+        assert_active_tab_focused(&tabs, cx);
+    }
+
+    #[gpui::test]
+    fn split_selection_follows_active_pane_without_losing_selected_items(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["a", "b", "c"]);
+        let (workspace, other_tab, left, right) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let workspace = tabs.tabs[0].id;
+                let left_pane = tabs.tabs[0].active_pane;
+                let left = tabs.tabs[0].active_view();
+                observe_tab_view(&left, window, cx);
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                let right = tabs.tabs[1].active_view();
+                let source = tabs.tabs[1].id;
+                assert!(tabs.split_tab_into_pane(
+                    source,
+                    workspace,
+                    left_pane,
+                    SplitDirection::Right,
+                    window,
+                    cx,
+                ));
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                let other_tab = tabs.tabs[1].id;
+                for (view, indices) in [(&left, vec![0, 1]), (&right, vec![2])] {
+                    view.update(cx, |view, cx| {
+                        view.reload();
+                        for index in indices {
+                            view.toggle_selection_index(index);
+                        }
+                        cx.notify();
+                    });
+                }
+                cx.notify();
+                (workspace, other_tab, left, right)
+            })
+        });
+        cx.run_until_parked();
+
+        let assert_selections = |cx: &gpui::VisualTestContext, left_active, right_active| {
+            cx.read_entity(&left, |view, _| {
+                assert_eq!(view.pane_active, left_active);
+                assert_eq!(selected_names(view), vec!["a", "b"]);
+            });
+            cx.read_entity(&right, |view, _| {
+                assert_eq!(view.pane_active, right_active);
+                assert_eq!(selected_names(view), vec!["c"]);
+            });
+        };
+        assert_selections(cx, false, true);
+
+        cx.dispatch_action(FocusPaneLeft);
+        cx.run_until_parked();
+        assert_selections(cx, true, false);
+        cx.dispatch_action(crate::explorer::actions::CopySelected);
+        cx.update(|_, app| {
+            assert_eq!(
+                app.read_from_clipboard()
+                    .as_ref()
+                    .and_then(file_clipboard_from_item),
+                Some(FileClipboard::new(
+                    FileClipboardOperation::Copy,
+                    vec![temp.path().join("a"), temp.path().join("b")],
+                ))
+            );
+        });
+
+        // The right pane is painted last, so its entry owns this debug selector.
+        let selected = cx
+            .debug_bounds("explorer-entry-name-hit-2")
+            .expect("right selected entry");
+        let pane = cx.debug_bounds("explorer-pane-2").expect("right pane");
+        assert!(pane.contains(&selected.center()));
+        cx.simulate_click(selected.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_selections(cx, false, true);
+        cx.dispatch_action(crate::explorer::actions::CopySelected);
+        cx.update(|_, app| {
+            assert_eq!(
+                app.read_from_clipboard()
+                    .as_ref()
+                    .and_then(file_clipboard_from_item),
+                Some(FileClipboard::new(
+                    FileClipboardOperation::Copy,
+                    vec![temp.path().join("c")],
+                ))
+            );
+        });
+
+        // Switching display modes must retain the same active selection state.
+        cx.update(|_, app| {
+            for view in [&left, &right] {
+                view.update(app, |view, cx| {
+                    view.view_mode = crate::settings::FileViewMode::LargeIcons;
+                    cx.notify();
+                });
+            }
+        });
+        cx.run_until_parked();
+        assert_selections(cx, false, true);
+        cx.dispatch_action(FocusPaneLeft);
+        cx.run_until_parked();
+        assert_selections(cx, true, false);
+        let selected = cx
+            .debug_bounds("explorer-large-icon-entry-2")
+            .expect("right selected tile");
+        cx.simulate_click(selected.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_selections(cx, false, true);
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.activate_tab(other_tab, window, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_selections(cx, false, false);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.activate_tab(workspace, window, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_selections(cx, false, true);
+
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                assert!(tabs.unsplit_tab(workspace, window, cx));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_selections(cx, false, true);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let left_tab = tabs.tabs[0].id;
+                tabs.activate_tab(left_tab, window, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_selections(cx, true, false);
         assert_active_tab_focused(&tabs, cx);
     }
 

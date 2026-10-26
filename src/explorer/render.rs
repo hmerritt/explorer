@@ -137,6 +137,8 @@ const NAME_TEXT_SIZE: f32 = 12.0;
 const CUT_ITEM_OPACITY: f32 = 0.7;
 const FILE_ENTRY_BG: u32 = 0xffffff;
 const FILE_ENTRY_SELECTED_BG: u32 = 0xcce8ff;
+const FILE_ENTRY_INACTIVE_SELECTED_BG: u32 = 0xe8e8e8;
+const FILE_ENTRY_INACTIVE_SELECTED_BORDER: u32 = 0xcccccc;
 const FILE_ENTRY_HOVER_BG: u32 = 0xe5f3ff;
 const TEXT_CELL_HORIZONTAL_PADDING: f32 = 8.0;
 const TEXT_CELL_TEXT_COLOR: u32 = 0x595959;
@@ -2776,6 +2778,7 @@ impl ExplorerView {
                 is_visually_selected,
                 is_visually_hovered,
                 context_menu_active,
+                self.pane_active,
             )))
             .border_1()
             .border_color(rgb(0xffffff))
@@ -3038,15 +3041,15 @@ impl ExplorerView {
             .max_h(px(large_icon_max_tile_height()))
             .flex_shrink_0()
             .border_1()
-            .border_color(if is_selected {
-                rgb(0x000000)
-            } else {
-                rgb(0xffffff)
-            })
+            .border_color(rgb(file_entry_tile_border_color(
+                is_selected,
+                self.pane_active,
+            )))
             .bg(rgb(file_entry_background_color(
                 is_selected,
                 is_hovered,
                 context_menu_active,
+                self.pane_active,
             )))
             .cursor_default()
             .when(is_cut, |this| this.opacity(CUT_ITEM_OPACITY));
@@ -3373,12 +3376,16 @@ impl ExplorerView {
             .h(px(LARGE_ICON_TILE_HEIGHT))
             .pt(px(4.0))
             .border_1()
-            .border_color(rgb(if selected { 0x000000 } else { 0xffffff }))
-            .bg(rgb(if selected {
-                FILE_ENTRY_SELECTED_BG
-            } else {
-                FILE_ENTRY_BG
-            }))
+            .border_color(rgb(file_entry_tile_border_color(
+                selected,
+                self.pane_active,
+            )))
+            .bg(rgb(file_entry_background_color(
+                selected,
+                false,
+                false,
+                self.pane_active,
+            )))
             .when(!selected, |this| {
                 this.hover(|style| style.bg(rgb(FILE_ENTRY_HOVER_BG)))
             })
@@ -3420,12 +3427,16 @@ impl ExplorerView {
             .h(px(SIDEBAR_GROUP_DRIVE_TILE_HEIGHT))
             .px(px(8.0))
             .border_1()
-            .border_color(rgb(if selected { 0x000000 } else { 0xffffff }))
-            .bg(rgb(if selected {
-                FILE_ENTRY_SELECTED_BG
-            } else {
-                FILE_ENTRY_BG
-            }))
+            .border_color(rgb(file_entry_tile_border_color(
+                selected,
+                self.pane_active,
+            )))
+            .bg(rgb(file_entry_background_color(
+                selected,
+                false,
+                false,
+                self.pane_active,
+            )))
             .when(!selected, |this| {
                 this.hover(|style| style.bg(rgb(FILE_ENTRY_HOVER_BG)))
             })
@@ -4635,13 +4646,28 @@ fn file_entry_background_color(
     is_selected: bool,
     is_hovered: bool,
     context_menu_active: bool,
+    pane_active: bool,
 ) -> u32 {
     if is_selected {
-        FILE_ENTRY_SELECTED_BG
+        if pane_active {
+            FILE_ENTRY_SELECTED_BG
+        } else {
+            FILE_ENTRY_INACTIVE_SELECTED_BG
+        }
     } else if is_hovered && entry_row_hover_enabled(is_selected, context_menu_active) {
         FILE_ENTRY_HOVER_BG
     } else {
         FILE_ENTRY_BG
+    }
+}
+
+fn file_entry_tile_border_color(is_selected: bool, pane_active: bool) -> u32 {
+    if !is_selected {
+        0xffffff
+    } else if pane_active {
+        0x000000
+    } else {
+        FILE_ENTRY_INACTIVE_SELECTED_BORDER
     }
 }
 
@@ -8461,7 +8487,8 @@ mod tests {
         CUT_ITEM_OPACITY, ClipboardStatusPopupLayout, CodebaseMakeupSegment,
         DETAILS_ROW_HORIZONTAL_BORDER_ALLOWANCE, DIRECTORY_BAR_HEIGHT,
         DROP_INDICATOR_TARGET_MAX_WIDTH, DetailsNameWidths, FILE_COLUMN_HEADER_HOVER_BG,
-        FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
+        FILE_ENTRY_BG, FILE_ENTRY_HOVER_BG, FILE_ENTRY_INACTIVE_SELECTED_BG,
+        FILE_ENTRY_INACTIVE_SELECTED_BORDER, FILE_ENTRY_SELECTED_BG, FILE_SORT_CHEVRON_ICON_SIZE,
         IMAGE_HOVER_PREVIEW_OFFSET_X, IMAGE_HOVER_PREVIEW_OFFSET_Y, ImageHoverPreview,
         NAME_CELL_LEFT_PADDING, NAME_ICON_TEXT_GAP, NAVBAR_HEIGHT, RECURSIVE_SEARCH_ROW_HEIGHT,
         ROW_HEIGHT, RecursiveSearchProgressSnapshot, SIDEBAR_COLLAPSED_GROUP_GAP,
@@ -8472,11 +8499,11 @@ mod tests {
         copied_directory_address, details_name_physical_text_width, details_name_width_policy,
         directory_open_mode_for_entry_click, drop_indicator_target_width,
         effective_sidebar_is_visible, effective_sidebar_layout_width, entry_row_hover_enabled,
-        file_entry_background_color, filename_text_width, folder_status_summary,
-        format_address_path, git_branch_tooltip, git_divergence_label, git_divergence_tooltip,
-        image_hover_preview_origin, image_hover_preview_render_size, is_alt_entry_double_click,
-        is_normal_entry_click, is_secondary_entry_double_click, lines_of_code_tooltip,
-        open_current_folder_context_menu_from_event, operation_notice_style,
+        file_entry_background_color, file_entry_tile_border_color, filename_text_width,
+        folder_status_summary, format_address_path, git_branch_tooltip, git_divergence_label,
+        git_divergence_tooltip, image_hover_preview_origin, image_hover_preview_render_size,
+        is_alt_entry_double_click, is_normal_entry_click, is_secondary_entry_double_click,
+        lines_of_code_tooltip, open_current_folder_context_menu_from_event, operation_notice_style,
         recursive_result_path_tooltip, recursive_result_text_width, search_working_detail,
         selection_modifiers_for_click, sidebar_auto_hide_is_active, sidebar_context_menu_is_active,
         sidebar_context_menu_target, sidebar_item_is_current, sidebar_item_is_dragging,
@@ -9707,6 +9734,7 @@ mod tests {
                     view.entry_is_visually_selected(1),
                     view.entry_is_visually_hovered(&view.entries[1]),
                     false,
+                    view.pane_active,
                 ),
                 FILE_ENTRY_HOVER_BG
             );
@@ -12175,21 +12203,49 @@ mod tests {
         assert!(!entry_row_hover_enabled(false, true));
         assert!(!entry_row_hover_enabled(true, true));
         assert_eq!(
-            file_entry_background_color(false, true, false),
+            file_entry_background_color(false, true, false, true),
             FILE_ENTRY_HOVER_BG
         );
         assert_eq!(
-            file_entry_background_color(true, true, false),
+            file_entry_background_color(true, true, false, true),
             FILE_ENTRY_SELECTED_BG
         );
         assert_eq!(
-            file_entry_background_color(false, true, true),
+            file_entry_background_color(false, true, true, true),
             FILE_ENTRY_BG
         );
         assert_eq!(
-            file_entry_background_color(false, false, false),
+            file_entry_background_color(false, false, false, true),
             FILE_ENTRY_BG
         );
+    }
+
+    #[test]
+    fn inactive_selection_colors_preserve_selection_over_hover_and_context_menus() {
+        for hovered in [false, true] {
+            for context_menu in [false, true] {
+                assert_eq!(
+                    file_entry_background_color(true, hovered, context_menu, false),
+                    FILE_ENTRY_INACTIVE_SELECTED_BG
+                );
+                assert_eq!(
+                    file_entry_background_color(true, hovered, context_menu, true),
+                    FILE_ENTRY_SELECTED_BG
+                );
+                assert_eq!(
+                    file_entry_background_color(false, hovered, context_menu, false),
+                    file_entry_background_color(false, hovered, context_menu, true)
+                );
+            }
+        }
+        assert_eq!(
+            file_entry_tile_border_color(true, false),
+            FILE_ENTRY_INACTIVE_SELECTED_BORDER
+        );
+        assert_eq!(file_entry_tile_border_color(true, true), 0x000000);
+        for active in [false, true] {
+            assert_eq!(file_entry_tile_border_color(false, active), 0xffffff);
+        }
     }
 
     #[test]

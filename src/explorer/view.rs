@@ -101,6 +101,7 @@ pub struct ExplorerView {
     pub(super) trash_preferences: Option<super::trash_ui::TrashPreferences>,
     pub(super) trash_dialog_serial: u64,
     pub(super) pane_visible: bool,
+    pub(super) pane_active: bool,
     pub(super) entries: Vec<FileEntry>,
     // GPUI's replayable scene does not own the decoded images it references.
     pub(super) rendered_image_leases: RefCell<HashMap<gpui::ImageId, Arc<gpui::RenderImage>>>,
@@ -584,6 +585,7 @@ impl ExplorerView {
             trash_preferences: None,
             trash_dialog_serial: 0,
             pane_visible: true,
+            pane_active: true,
             entries: Vec::new(),
             rendered_image_leases: RefCell::new(HashMap::new()),
             resource_image_leases: RefCell::new(HashMap::new()),
