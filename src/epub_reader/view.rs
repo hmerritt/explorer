@@ -4285,13 +4285,8 @@ mod tests {
             }
             let (reader, visual) =
                 cx.add_window_view(|window, cx| Reader::new(path, "Total".into(), window, cx));
-            settle(&reader, visual);
-            let expected_total = reader.update(visual, |reader, _| {
-                let layout = &reader.layouts[&reader.href];
-                assert!(layout.complete);
-                assert_eq!(layout.starts.len() > 1, long);
-                layout.starts.len()
-            });
+            let expected_total = finish_page_count(&reader, visual);
+            assert_eq!(expected_total > 1, long);
             let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
             let observed = notifications.clone();
             visual.update(|_, cx| {
@@ -4301,7 +4296,11 @@ mod tests {
             reader.update(visual, |reader, cx| {
                 let layout = reader.layouts.get_mut(&reader.href).unwrap();
                 layout.complete = false;
-                layout.starts.truncate(1);
+                // Keep the requested page boundary known. Discovering it can
+                // exceed the 4 ms budget and yield to a native frame callback,
+                // which the test platform does not provide. Background warming
+                // still has to discover the remaining boundaries and completion.
+                layout.starts.truncate(if long { 2 } else { 1 });
                 layout.pages.clear();
                 // The long chapter's second-page label has never been drawn,
                 // so stale debug bounds cannot satisfy the rendered-label check.
