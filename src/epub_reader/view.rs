@@ -4849,8 +4849,11 @@ mod tests {
         fixture(&path);
         let (reader, cx) =
             cx.add_window_view(|window, cx| Reader::new(path, "fixture".into(), window, cx));
+        // Incremental pagination can span native frames, which the test platform
+        // does not schedule. Finish each operation before inspecting its page.
+        settle(&reader, cx);
         cx.dispatch_action(EpubNext);
-        cx.run_until_parked();
+        settle(&reader, cx);
         let location = reader.update(cx, |reader, _| Location {
             href: reader.href.clone(),
             point: reader.anchor,
@@ -4859,29 +4862,34 @@ mod tests {
         reader.update(cx, |reader, cx| {
             reader.follow_link("/book/notes.xhtml#note".into(), cx)
         });
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| assert_eq!(reader.href, "/book/notes.xhtml"));
         cx.dispatch_action(EpubBack);
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| {
             assert_eq!(reader.href, location.href);
             assert_eq!(reader.anchor, location.point);
         });
         reader.update(cx, |reader, cx| reader.change_font(2, cx));
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| assert_eq!(reader.anchor, location.point));
         cx.simulate_resize(size(px(480.0), px(400.0)));
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| assert_eq!(reader.anchor, location.point));
         cx.simulate_resize(size(px(1200.0), px(900.0)));
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| assert_eq!(reader.anchor, location.point));
         let old_page = reader.update(cx, |reader, cx| {
+            assert!(reader.error.is_none(), "{:?}", reader.error);
+            assert!(reader.request.is_none());
             let page = reader.current_page.clone().unwrap();
+            let layout = &reader.layouts[&reader.href];
+            assert_eq!(layout.preferences, reader.preferences);
+            assert_eq!(layout.starts[reader.page_index], page.start);
             reader.toggle_theme(cx);
             page
         });
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| {
             assert_eq!(reader.current_page.as_ref().unwrap().start, old_page.start);
             assert_eq!(reader.current_page.as_ref().unwrap().end, old_page.end);
@@ -4890,7 +4898,7 @@ mod tests {
         // chapter parse is needed for cached content.
         std::fs::remove_file(dir.path().join("book.epub")).unwrap_or(());
         cx.dispatch_action(EpubNext);
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| {
             assert!(reader.error.is_none());
             assert_eq!(reader.current_page.as_ref().unwrap().start, old_page.end);
