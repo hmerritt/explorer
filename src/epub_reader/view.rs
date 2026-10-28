@@ -4754,6 +4754,9 @@ mod tests {
         fixture(&path);
         let (reader, cx) =
             cx.add_window_view(|window, cx| Reader::new(path, "fixture".into(), window, cx));
+        // Incremental navigation may need successive frames, which the test
+        // platform does not schedule through run_until_parked alone.
+        settle(&reader, cx);
         assert_eq!(
             cx.window_title().as_deref(),
             Some("Reader fixture — Explorer")
@@ -4768,6 +4771,7 @@ mod tests {
             delta: ScrollDelta::Lines(point(0.0, -ordinary_lines_per_notch())),
             ..Default::default()
         });
+        settle(&reader, cx);
         reader.update(cx, |reader, _| {
             assert_eq!(reader.page_index, 1);
             assert!(reader.anchor > start);
@@ -4787,19 +4791,21 @@ mod tests {
             delta: ScrollDelta::Lines(point(0.0, -ordinary_lines_per_notch())),
             ..Default::default()
         });
+        settle(&reader, cx);
         reader.update(cx, |reader, _| assert_eq!(reader.page_index, 1));
         cx.simulate_event(ScrollWheelEvent {
             position: body.origin + point(body.size.width - px(20.0), px(20.0)),
             delta: ScrollDelta::Lines(point(0.0, -ordinary_lines_per_notch())),
             ..Default::default()
         });
+        settle(&reader, cx);
         reader.update(cx, |reader, cx| {
             assert_eq!(reader.page_index, 2);
             reader.chapters_open = false;
             cx.notify();
         });
         cx.dispatch_action(EpubBeginning);
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| {
             assert_eq!(reader.page_index, 0);
             reader.selection = Some((
@@ -4811,13 +4817,13 @@ mod tests {
             ));
         });
         cx.dispatch_action(EpubPrevious);
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| {
             assert_eq!(reader.anchor, start);
             assert!(reader.selection.is_some(), "boundary must do nothing");
         });
         cx.dispatch_action(EpubEnd);
-        cx.run_until_parked();
+        settle(&reader, cx);
         let last = reader.update(cx, |reader, _| {
             assert_eq!(reader.href, "/book/second.xhtml");
             let page = reader.current_page.as_ref().unwrap();
@@ -4825,12 +4831,12 @@ mod tests {
             reader.anchor
         });
         cx.dispatch_action(EpubNext);
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, _| assert_eq!(reader.anchor, last));
         reader.update(cx, |reader, cx| {
             reader.open_section("/book/second.xhtml".into(), PageRequest::Index(0), None, cx)
         });
-        cx.run_until_parked();
+        settle(&reader, cx);
         reader.update(cx, |reader, cx| reader.turn(-3, cx));
         settle(&reader, cx);
         reader.update(cx, |reader, _| {
