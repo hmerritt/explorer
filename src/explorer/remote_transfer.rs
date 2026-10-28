@@ -625,6 +625,55 @@ fn set_state(job: &Job, state: State, message: impl Into<String>) {
     m.state = state;
     m.message = message.into();
 }
+fn partial_destination(destination: &Location) -> io::Result<Location> {
+    destination
+        .parent()?
+        .child(&format!("{}.filepart", destination.name()?))
+}
+
+fn valid_partial(partial: &Location, destination: &Location, id: u64, index: usize) -> bool {
+    let Ok(parent) = destination.parent() else {
+        return false;
+    };
+    if parent
+        .child(&format!(".explorer-{id}-{index}.filepart"))
+        .is_ok_and(|expected| expected == *partial)
+    {
+        return true;
+    }
+    let Ok(mut name) = destination.name() else {
+        return false;
+    };
+    loop {
+        if parent
+            .child(&format!("{name}.filepart"))
+            .is_ok_and(|expected| expected == *partial)
+        {
+            return true;
+        }
+        // Keep both can change the destination after a partial was saved.
+        // Accept its earlier name without moving or adopting another partial.
+        let (stem, extension) = name
+            .rsplit_once('.')
+            .filter(|(stem, _)| !stem.is_empty())
+            .map_or((name.as_str(), String::new()), |(stem, ext)| {
+                (stem, format!(".{ext}"))
+            });
+        let Some((previous, suffix)) = stem.strip_suffix(')').and_then(|s| s.rsplit_once(" ("))
+        else {
+            return false;
+        };
+        if previous.is_empty()
+            || !suffix
+                .parse::<u32>()
+                .is_ok_and(|n| (2..100_000).contains(&n) && n.to_string() == suffix)
+        {
+            return false;
+        }
+        name = format!("{previous}{extension}");
+    }
+}
+
 fn valid_manifest(m: &Manifest) -> bool {
     fn valid(l: &Location) -> bool {
         match l {
@@ -644,12 +693,9 @@ fn valid_manifest(m: &Manifest) -> bool {
         && m.items.iter().enumerate().all(|(index, i)| {
             valid(&i.source)
                 && valid(&i.destination)
-                && i.partial.as_ref().is_none_or(|partial| {
-                    i.destination
-                        .parent()
-                        .and_then(|p| p.child(&format!(".explorer-{}-{index}.filepart", m.id)))
-                        .is_ok_and(|expected| expected == *partial)
-                })
+                && i.partial
+                    .as_ref()
+                    .is_none_or(|partial| valid_partial(partial, &i.destination, m.id, index))
                 && i.resume_prefix
                     .is_none_or(|prefix| prefix <= i.metadata.size)
         })
@@ -1367,11 +1413,7 @@ async fn run(job: &Job, session: &Session) -> io::Result<()> {
                 save(job)?;
             }
             if item.partial.is_none() {
-                item.partial = Some(
-                    item.destination
-                        .parent()?
-                        .child(&format!(".explorer-{}-{}.filepart", data.id, data.current))?,
-                );
+                item.partial = Some(partial_destination(&item.destination)?);
                 if maybe_metadata(session, item.partial.as_ref().unwrap())
                     .await?
                     .is_some()
@@ -2231,6 +2273,60 @@ fn validate_local_name(name: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_validation_accepts_saved_names_but_rejects_unrelated_paths() {
+        let local = tempfile::tempdir().unwrap();
+        for parent in [
+            Location::Local(local.path().to_owned()),
+            Location::Remote(RemoteLocation::parse("sftp://server/folder").unwrap()),
+        ] {
+            let destination = parent.child("file (2) (3).txt").unwrap();
+            for name in [
+                "file (2) (3).txt.filepart",
+                "file (2).txt.filepart",
+                "file.txt.filepart",
+                ".explorer-42-0.filepart",
+            ] {
+                assert!(valid_partial(
+                    &parent.child(name).unwrap(),
+                    &destination,
+                    42,
+                    0
+                ));
+            }
+            for name in [
+                "unrelated.filepart",
+                "file.txt",
+                "file (4).txt.filepart",
+                ".explorer-43-0.filepart",
+                ".explorer-42-1.filepart",
+            ] {
+                assert!(!valid_partial(
+                    &parent.child(name).unwrap(),
+                    &destination,
+                    42,
+                    0
+                ));
+            }
+            let outside = parent.parent().unwrap().child("file.txt.filepart").unwrap();
+            assert!(!valid_partial(&outside, &destination, 42, 0));
+            for name in ["file (1).txt", "file (02).txt", "file (100000).txt"] {
+                assert!(!valid_partial(
+                    &parent.child("file.txt.filepart").unwrap(),
+                    &parent.child(name).unwrap(),
+                    42,
+                    0,
+                ));
+            }
+        }
+        let partial = Location::Remote(
+            RemoteLocation::parse("sftp://other/folder/file.txt.filepart").unwrap(),
+        );
+        let destination =
+            Location::Remote(RemoteLocation::parse("sftp://server/folder/file.txt").unwrap());
+        assert!(!valid_partial(&partial, &destination, 42, 0));
+    }
+
     fn test_job() -> Job {
         protocol_tests::job(
             Path::new("unused-test-state"),

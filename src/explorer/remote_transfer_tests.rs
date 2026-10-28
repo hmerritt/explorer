@@ -353,6 +353,153 @@ fn faults() -> Arc<Faults> {
 }
 
 #[test]
+fn named_partials_resume_and_finalize_in_both_directions() {
+    remote_fs::runtime().block_on(async {
+        for upload in [false, true] {
+            for name in [
+                "myVideo.mp4",
+                "archive.tar.gz",
+                "README",
+                "my video.mp4",
+                "résumé 日本語.txt",
+                "existing.filepart",
+                ".hidden",
+            ] {
+                let local = tempfile::tempdir().unwrap();
+                let remote_dir = tempfile::tempdir().unwrap();
+                let (source, destination, destination_dir) = if upload {
+                    fs::write(local.path().join(name), b"contents").unwrap();
+                    (
+                        Location::Local(local.path().join(name)),
+                        remote("/"),
+                        remote_dir.path(),
+                    )
+                } else {
+                    fs::write(remote_dir.path().join(name), b"contents").unwrap();
+                    (
+                        remote(&format!("/{name}")),
+                        Location::Local(local.path().into()),
+                        local.path(),
+                    )
+                };
+                let f = faults();
+                f.fail_close.store(true, Ordering::Relaxed);
+                let session = server(remote_dir.path(), f.clone()).await;
+                let job = job(local.path(), source, destination);
+                assert!(run(&job, &session).await.is_err());
+                let partial = destination_dir.join(format!("{name}.filepart"));
+                assert_eq!(fs::read(&partial).unwrap(), b"contents");
+                assert!(!destination_dir.join(name).exists());
+
+                let stored: Manifest =
+                    serde_json::from_slice(&fs::read(&job.store).unwrap()).unwrap();
+                assert!(valid_manifest(&stored));
+                *job.data.lock().unwrap() = stored;
+                f.fail_close.store(false, Ordering::Relaxed);
+                run(&job, &session).await.unwrap();
+                assert_eq!(fs::read(destination_dir.join(name)).unwrap(), b"contents");
+                assert!(!partial.exists());
+                assert!(valid_manifest(&job.data.lock().unwrap()));
+            }
+        }
+    });
+}
+
+#[test]
+fn initial_keep_both_uses_resolved_name_and_discard_removes_only_partial() {
+    remote_fs::runtime().block_on(async {
+        for upload in [false, true] {
+            let local = tempfile::tempdir().unwrap();
+            let remote_dir = tempfile::tempdir().unwrap();
+            let (source, destination, destination_dir) = if upload {
+                fs::write(local.path().join("myVideo.mp4"), b"new").unwrap();
+                (
+                    Location::Local(local.path().join("myVideo.mp4")),
+                    remote("/"),
+                    remote_dir.path(),
+                )
+            } else {
+                fs::write(remote_dir.path().join("myVideo.mp4"), b"new").unwrap();
+                (
+                    remote("/myVideo.mp4"),
+                    Location::Local(local.path().into()),
+                    local.path(),
+                )
+            };
+            fs::write(destination_dir.join("myVideo.mp4"), b"original").unwrap();
+            let f = faults();
+            f.fail_close.store(true, Ordering::Relaxed);
+            let session = server(remote_dir.path(), f).await;
+            let job = job(local.path(), source, destination);
+            job.data.lock().unwrap().conflict = Conflict::KeepBoth;
+            assert!(run(&job, &session).await.is_err());
+            let partial = destination_dir.join("myVideo (2).mp4.filepart");
+            assert_eq!(fs::read(&partial).unwrap(), b"new");
+            assert!(!destination_dir.join("myVideo.mp4.filepart").exists());
+            assert!(!destination_dir.join("myVideo (2).mp4").exists());
+            assert!(valid_manifest(&job.data.lock().unwrap()));
+            discard_partials(&job, &session).await.unwrap();
+            assert!(!partial.exists());
+            assert_eq!(
+                fs::read(destination_dir.join("myVideo.mp4")).unwrap(),
+                b"original"
+            );
+            assert!(job.data.lock().unwrap().items[0].partial.is_none());
+        }
+    });
+}
+
+#[test]
+fn legacy_partials_resume_from_reloaded_manifests_in_both_directions() {
+    remote_fs::runtime().block_on(async {
+        for upload in [false, true] {
+            let local = tempfile::tempdir().unwrap();
+            let remote_dir = tempfile::tempdir().unwrap();
+            let (source, destination, destination_dir) = if upload {
+                fs::write(local.path().join("file"), b"contents").unwrap();
+                (
+                    Location::Local(local.path().join("file")),
+                    remote("/"),
+                    remote_dir.path(),
+                )
+            } else {
+                fs::write(remote_dir.path().join("file"), b"contents").unwrap();
+                (
+                    remote("/file"),
+                    Location::Local(local.path().into()),
+                    local.path(),
+                )
+            };
+            let session = server(remote_dir.path(), faults()).await;
+            let job = job(local.path(), source, destination);
+            plan(&job, &session).await.unwrap();
+            let legacy = destination_dir.join(".explorer-42-0.filepart");
+            fs::write(&legacy, b"cont").unwrap();
+            {
+                let mut data = job.data.lock().unwrap();
+                let item = &mut data.items[0];
+                item.partial = Some(
+                    item.destination
+                        .parent()
+                        .unwrap()
+                        .child(".explorer-42-0.filepart")
+                        .unwrap(),
+                );
+                item.resume_prefix = Some(4);
+            }
+            save(&job).unwrap();
+            let stored: Manifest = serde_json::from_slice(&fs::read(&job.store).unwrap()).unwrap();
+            assert!(valid_manifest(&stored));
+            *job.data.lock().unwrap() = stored;
+            run(&job, &session).await.unwrap();
+            assert_eq!(fs::read(destination_dir.join("file")).unwrap(), b"contents");
+            assert!(!legacy.exists());
+            assert!(!destination_dir.join("file.filepart").exists());
+        }
+    });
+}
+
+#[test]
 fn recursive_upload_download_roundtrip_and_empty_files() {
     remote_fs::runtime().block_on(async {
         let local = tempfile::tempdir().unwrap();
@@ -440,7 +587,7 @@ fn interrupted_upload_resumes_from_saved_prefix_without_rereading() {
         );
         assert!(run(&job, &session).await.is_err());
         assert!(!destination.path().join("file").exists());
-        let partial = destination.path().join(".explorer-42-0.filepart");
+        let partial = destination.path().join("file.filepart");
         assert_eq!(fs::metadata(&partial).unwrap().len(), 2048);
         assert_eq!(job.data.lock().unwrap().items[0].resume_prefix, Some(2048));
         let sparse = OpenOptions::new().write(true).open(&partial).unwrap();
@@ -474,7 +621,7 @@ fn partial_shorter_than_saved_prefix_is_rejected_without_replacing_destination()
         );
         job.data.lock().unwrap().conflict = Conflict::Replace;
         assert!(run(&job, &session).await.is_err());
-        let partial = destination.path().join(".explorer-42-0.filepart");
+        let partial = destination.path().join("file.filepart");
         OpenOptions::new()
             .write(true)
             .open(&partial)
@@ -518,7 +665,7 @@ fn interrupted_download_resumes_at_saved_prefix_without_rereading() {
             .expect("download checkpoint");
         assert!(prefix > 0);
         assert_eq!(
-            fs::metadata(destination.path().join(".explorer-42-0.filepart"))
+            fs::metadata(destination.path().join("file.filepart"))
                 .unwrap()
                 .len(),
             prefix
@@ -574,7 +721,7 @@ fn unsupported_atomic_replace_preserves_original_and_completed_partial() {
             b"original"
         );
         assert_eq!(
-            fs::read(destination.path().join(".explorer-42-0.filepart")).unwrap(),
+            fs::read(destination.path().join("file.filepart")).unwrap(),
             b"new"
         );
     });
@@ -666,7 +813,7 @@ fn keep_both_recovers_when_atomic_replace_is_unsupported() {
         fs::write(destination.path().join("file.txt"), b"original").unwrap();
         let f = faults();
         f.atomic_rename.store(false, Ordering::Relaxed);
-        let session = server(destination.path(), f).await;
+        let session = server(destination.path(), f.clone()).await;
         let job = job(
             local.path(),
             Location::Local(local.path().join("file.txt")),
@@ -674,7 +821,26 @@ fn keep_both_recovers_when_atomic_replace_is_unsupported() {
         );
         job.data.lock().unwrap().conflict = Conflict::Replace;
         assert!(run(&job, &session).await.is_err());
+        let partial = destination.path().join("file.txt.filepart");
+        assert_eq!(fs::read(&partial).unwrap(), b"new");
         job.data.lock().unwrap().conflict = Conflict::KeepBoth;
+        f.fail_close.store(true, Ordering::Relaxed);
+        assert!(run(&job, &session).await.is_err());
+        let stored: Manifest = serde_json::from_slice(&fs::read(&job.store).unwrap()).unwrap();
+        assert!(valid_manifest(&stored));
+        assert_eq!(stored.items[0].destination.name().unwrap(), "file (2).txt");
+        assert_eq!(
+            stored.items[0].partial.as_ref().unwrap().name().unwrap(),
+            "file.txt.filepart"
+        );
+        *job.data.lock().unwrap() = stored;
+        assert_eq!(fs::read(&partial).unwrap(), b"new");
+        f.fail_close.store(false, Ordering::Relaxed);
+        f.lose_rename_reply.store(true, Ordering::Relaxed);
+        assert!(run(&job, &session).await.is_err());
+        let stored: Manifest = serde_json::from_slice(&fs::read(&job.store).unwrap()).unwrap();
+        assert!(valid_manifest(&stored));
+        *job.data.lock().unwrap() = stored;
         run(&job, &session).await.unwrap();
         assert_eq!(
             fs::read(destination.path().join("file.txt")).unwrap(),
@@ -685,40 +851,50 @@ fn keep_both_recovers_when_atomic_replace_is_unsupported() {
             b"new"
         );
         assert!(valid_manifest(&job.data.lock().unwrap()));
+        assert!(!partial.exists());
     });
 }
 
 #[test]
 fn unowned_partial_is_never_adopted_on_retry() {
     remote_fs::runtime().block_on(async {
-        let local = tempfile::tempdir().unwrap();
-        let destination = tempfile::tempdir().unwrap();
-        fs::write(local.path().join("file"), b"new").unwrap();
-        fs::write(
-            destination.path().join(".explorer-42-0.filepart"),
-            b"someone else's file",
-        )
-        .unwrap();
-        let session = server(destination.path(), faults()).await;
-        let job = job(
-            local.path(),
-            Location::Local(local.path().join("file")),
-            remote("/"),
-        );
-        for _ in 0..2 {
-            assert!(
-                run(&job, &session)
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("unowned")
-            );
+        for upload in [false, true] {
+            let local = tempfile::tempdir().unwrap();
+            let remote_dir = tempfile::tempdir().unwrap();
+            let (source, destination, destination_dir) = if upload {
+                fs::write(local.path().join("file"), b"new").unwrap();
+                (
+                    Location::Local(local.path().join("file")),
+                    remote("/"),
+                    remote_dir.path(),
+                )
+            } else {
+                fs::write(remote_dir.path().join("file"), b"new").unwrap();
+                (
+                    remote("/file"),
+                    Location::Local(local.path().into()),
+                    local.path(),
+                )
+            };
+            let partial = destination_dir.join("file.filepart");
+            fs::write(&partial, b"someone else's file").unwrap();
+            let session = server(remote_dir.path(), faults()).await;
+            let job = job(local.path(), source, destination);
+            for _ in 0..2 {
+                assert!(
+                    run(&job, &session)
+                        .await
+                        .unwrap_err()
+                        .to_string()
+                        .contains("unowned")
+                );
+            }
+            assert!(job.data.lock().unwrap().items[0].partial.is_none());
+            assert!(valid_manifest(&job.data.lock().unwrap()));
+            discard_partials(&job, &session).await.unwrap();
+            assert_eq!(fs::read(&partial).unwrap(), b"someone else's file");
+            assert!(!destination_dir.join("file").exists());
         }
-        assert!(job.data.lock().unwrap().items[0].partial.is_none());
-        assert_eq!(
-            fs::read(destination.path().join(".explorer-42-0.filepart")).unwrap(),
-            b"someone else's file"
-        );
     });
 }
 
