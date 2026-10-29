@@ -43,6 +43,7 @@ pub(super) struct AddressBarState {
     pub(super) focus_out: Option<Subscription>,
     pub(super) suggestions: Vec<AddressBarSuggestion>,
     pub(super) highlighted_suggestion: Option<usize>,
+    accepted_suggestion_path: Option<PathBuf>,
     pub(super) suggestions_scroll_top: f32,
     pub(super) suggestions_scrollbar_hovered: bool,
     pub(super) suggestions_scrollbar_drag: Option<ScrollbarDrag>,
@@ -62,6 +63,7 @@ impl AddressBarState {
             focus_out: None,
             suggestions: Vec::new(),
             highlighted_suggestion: None,
+            accepted_suggestion_path: None,
             suggestions_scroll_top: 0.0,
             suggestions_scrollbar_hovered: false,
             suggestions_scrollbar_drag: None,
@@ -664,8 +666,16 @@ impl ExplorerView {
             return Some(path);
         }
 
-        let input = self.active_address_bar.as_ref()?.content.clone();
-        match resolve_address_input(&input, &self.path) {
+        let address = self.active_address_bar.as_ref()?;
+        // Preserve a local completion's destination when editing from a remote location.
+        let result = if let Some(path) = address.accepted_suggestion_path.as_ref()
+            && self.address_text_for_path(path) == address.content
+        {
+            resolve_local_address_path(path.clone())
+        } else {
+            resolve_address_input(&address.content, &self.path)
+        };
+        match result {
             Ok(path) => {
                 self.clear_operation_notice();
                 Some(path)
@@ -706,6 +716,7 @@ impl ExplorerView {
         address.marked_range = None;
         address.reset_history();
         address.highlighted_suggestion = None;
+        address.accepted_suggestion_path = Some(path);
         self.refresh_address_suggestions();
         true
     }
@@ -927,9 +938,12 @@ pub(super) fn resolve_address_input(input: &str, current_path: &Path) -> Result<
 fn resolve_address_input_with_env(
     input: &str,
     current_path: &Path,
-    env_var: impl FnMut(&str) -> Option<OsString>,
+    mut env_var: impl FnMut(&str) -> Option<OsString>,
 ) -> Result<PathBuf, String> {
     let cleaned = cleaned_address_input(input);
+    if let Some(path) = expand_address_home_with(&cleaned, &mut env_var)? {
+        return resolve_local_address_path(path);
+    }
     if super::trash::is_root(Path::new(&cleaned))
         || cleaned.eq_ignore_ascii_case(super::trash::label())
     {
@@ -975,6 +989,10 @@ fn resolve_address_input_with_env(
         current_path.join(typed_path)
     };
 
+    resolve_local_address_path(candidate)
+}
+
+fn resolve_local_address_path(candidate: PathBuf) -> Result<PathBuf, String> {
     let candidate_exists = candidate.exists();
     if candidate.is_file() && crate::explorer::filesystem::archive_path_is_supported(&candidate) {
         return crate::explorer::archive_fs::mount(&candidate);
@@ -1086,20 +1104,27 @@ fn folder_suggestions_for_input_with_env(
     input: &str,
     current_path: &Path,
     visibility: impl Into<crate::explorer::filesystem::EntryVisibility>,
-    env_var: impl FnMut(&str) -> Option<OsString>,
+    mut env_var: impl FnMut(&str) -> Option<OsString>,
 ) -> Vec<AddressBarSuggestion> {
-    if input.starts_with("sftp://") || super::remote_fs::is_remote(current_path) {
-        return Vec::new();
-    }
-    if crate::explorer::portable_devices::is_portable_path(current_path) {
+    let cleaned = cleaned_address_input(input);
+    let home_path = match expand_address_home_with(&cleaned, &mut env_var) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+    if home_path.is_none()
+        && (cleaned.starts_with("sftp://")
+            || super::remote_fs::is_remote(current_path)
+            || crate::explorer::portable_devices::is_portable_path(current_path))
+    {
         return Vec::new();
     }
     let visibility = visibility.into();
-    let cleaned = cleaned_address_input(input);
-    let expanded = expand_address_environment_variables_with(&cleaned, env_var);
+    let expanded = home_path
+        .map(PathBuf::into_os_string)
+        .unwrap_or_else(|| expand_address_environment_variables_with(&cleaned, env_var));
     let (parent, prefix) = suggestion_parent_and_prefix(
         Path::new(&expanded),
-        has_trailing_separator(&cleaned),
+        cleaned == "~" || has_trailing_separator(&cleaned),
         current_path,
     );
 
@@ -1140,6 +1165,26 @@ fn folder_suggestions_for_input_with_env(
             .then_with(|| left.label.cmp(&right.label))
     });
     suggestions
+}
+
+fn expand_address_home_with(
+    input: &str,
+    mut env_var: impl FnMut(&str) -> Option<OsString>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(suffix) = input
+        .strip_prefix('~')
+        .filter(|suffix| suffix.is_empty() || suffix.starts_with(std::path::is_separator))
+    else {
+        return Ok(None);
+    };
+
+    let mut home = env_var("USERPROFILE")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_var("HOME").filter(|value| !value.is_empty()))
+        .ok_or_else(|| "Could not find your user profile folder.".to_owned())?;
+    // Append the suffix as native text so its leading separator cannot replace the home path.
+    home.push(expand_address_environment_variables_with(suffix, env_var));
+    Ok(Some(PathBuf::from(home)))
 }
 
 fn expand_address_environment_variables_with(
@@ -1657,6 +1702,198 @@ mod tests {
     }
 
     #[test]
+    fn resolve_address_expands_home_and_subfolders() {
+        let temp = TempDir::new();
+        let home = temp.path().join("Ada Profile");
+        let child = home.join("AppData").join("Roaming");
+        fs::create_dir_all(&child).expect("create profile subfolders");
+        // A literal local ~ folder must not take precedence over the home shortcut.
+        fs::create_dir(temp.path().join("~")).expect("create literal tilde folder");
+
+        for (input, expected) in [
+            ("~", &home),
+            ("~/", &home),
+            ("  \"~\"  ", &home),
+            ("'~/AppData/Roaming'", &child),
+            ("~/AppData/Roaming", &child),
+            ("~/AppData/../AppData/Roaming", &child),
+        ] {
+            assert_eq!(
+                resolve_address_input_with_env(input, temp.path(), env_path("USERPROFILE", &home))
+                    .unwrap(),
+                explorer_visible_address_path(fs::canonicalize(expected).unwrap()),
+                "input: {input}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_address_expands_home_with_windows_separators() {
+        let temp = TempDir::new();
+        let child = temp.path().join("AppData").join("Roaming");
+        fs::create_dir_all(&child).expect("create subfolders");
+
+        for input in [r"~\AppData\Roaming", r"~/AppData\Roaming"] {
+            assert_eq!(
+                resolve_address_input_with_env(
+                    input,
+                    Path::new("elsewhere"),
+                    env_path("HOME", temp.path())
+                )
+                .unwrap(),
+                explorer_visible_address_path(fs::canonicalize(&child).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn address_home_expansion_prefers_userprofile_and_falls_back_to_home() {
+        let profile = PathBuf::from("profile");
+        let home = PathBuf::from("home");
+        assert_eq!(
+            expand_address_home_with("~", |name| match name {
+                "USERPROFILE" => Some(profile.clone().into_os_string()),
+                "HOME" => Some(home.clone().into_os_string()),
+                _ => None,
+            })
+            .unwrap(),
+            Some(profile)
+        );
+        for profile_value in [None, Some(OsString::new())] {
+            assert_eq!(
+                expand_address_home_with("~", |name| match name {
+                    "USERPROFILE" => profile_value.clone(),
+                    "HOME" => Some(home.clone().into_os_string()),
+                    _ => None,
+                })
+                .unwrap(),
+                Some(home.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn address_home_expansion_reports_unavailable_profile() {
+        let temp = TempDir::new();
+        fs::create_dir(temp.path().join("~")).expect("create literal tilde folder");
+        for input in ["~", "~/AppData"] {
+            assert_eq!(
+                resolve_address_input_with_env(input, temp.path(), |_| None).unwrap_err(),
+                "Could not find your user profile folder."
+            );
+            assert!(
+                folder_suggestions_for_input_with_env(input, temp.path(), true, |_| None)
+                    .is_empty()
+            );
+        }
+        assert!(expand_address_home_with("~", |_| Some(OsString::new())).is_err());
+    }
+
+    #[test]
+    fn resolve_address_home_expansion_uses_existing_path_errors() {
+        let temp = TempDir::new();
+        fs::write(temp.path().join("file.txt"), b"data").expect("create file");
+        for (input, name, message) in [
+            ("~/missing", "missing", "Could not find"),
+            ("~/file.txt", "file.txt", "not a folder"),
+        ] {
+            let error = resolve_address_input_with_env(
+                input,
+                Path::new("elsewhere"),
+                env_path("HOME", temp.path()),
+            )
+            .unwrap_err();
+            assert!(error.contains(message), "{error}");
+            assert!(
+                error.replace('\\', "/").contains(
+                    &temp
+                        .path()
+                        .join(name)
+                        .display()
+                        .to_string()
+                        .replace('\\', "/")
+                ),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_address_preserves_other_tilde_names() {
+        let temp = TempDir::new();
+        for input in ["~otheruser", "child/~", "child/~name"] {
+            let directory = temp.path().join(input);
+            fs::create_dir_all(&directory).expect("create literal tilde path");
+            assert_eq!(
+                expand_address_home_with(input, |_| panic!("unexpected home lookup")).unwrap(),
+                None
+            );
+            assert_eq!(
+                resolve_address_input_with_env(input, temp.path(), |_| None).unwrap(),
+                explorer_visible_address_path(fs::canonicalize(directory).unwrap())
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn address_home_expansion_preserves_native_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let home = PathBuf::from(OsString::from_vec(b"/home/ada\xff".to_vec()));
+        assert_eq!(
+            expand_address_home_with(r"~/folder\name", env_path("HOME", &home)).unwrap(),
+            Some(home.join(r"folder\name"))
+        );
+        assert_eq!(
+            expand_address_home_with(r"~\folder", |_| None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_address_home_is_local_from_virtual_locations() {
+        let temp = TempDir::new();
+        let child = temp.path().join("AppData");
+        fs::create_dir(&child).expect("create subfolder");
+        let remote = super::super::remote_fs::RemoteLocation::parse("sftp://example.com/folder")
+            .unwrap()
+            .provider_path();
+
+        for current_path in [
+            remote.clone(),
+            super::super::portable_devices::virtual_root(),
+            super::super::trash::root(),
+        ] {
+            for (input, expected) in [("~", temp.path()), ("~/AppData", child.as_path())] {
+                assert_eq!(
+                    resolve_address_input_with_env(
+                        input,
+                        &current_path,
+                        env_path("HOME", temp.path())
+                    )
+                    .unwrap(),
+                    explorer_visible_address_path(fs::canonicalize(expected).unwrap())
+                );
+            }
+        }
+        let explicit_remote =
+            super::super::remote_fs::RemoteLocation::parse("sftp://example.com/~/AppData").unwrap();
+        assert_eq!(
+            resolve_address_input_with_env("sftp://example.com/~/AppData", &remote, |_| None)
+                .unwrap(),
+            explicit_remote.provider_path()
+        );
+        assert_eq!(
+            resolve_address_input_with_env("child", &remote, |_| None).unwrap(),
+            super::super::remote_fs::RemoteLocation::parse("sftp://example.com/folder/child")
+                .unwrap()
+                .provider_path()
+        );
+    }
+
+    #[test]
     fn resolve_address_expands_environment_variable_to_directory() {
         let temp = TempDir::new();
         let appdata = temp.path().join("AppData").join("Roaming");
@@ -1941,6 +2178,138 @@ mod tests {
                 .suggestions
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn folder_suggestions_expand_home_and_filter_subfolders() {
+        let temp = TempDir::new();
+        let home = temp.path().join("Ada Profile");
+        let appdata = home.join("AppData");
+        fs::create_dir_all(appdata.join("Roaming")).expect("create roaming");
+        fs::create_dir(appdata.join("Local")).expect("create local");
+        fs::create_dir(home.join("Documents")).expect("create documents");
+        fs::create_dir(home.join(".hidden")).expect("create hidden");
+        fs::write(home.join("file.txt"), b"data").expect("create file");
+        let remote = super::super::remote_fs::RemoteLocation::parse("sftp://example.com/folder")
+            .unwrap()
+            .provider_path();
+
+        for current_path in [
+            temp.path().to_path_buf(),
+            remote,
+            super::super::portable_devices::virtual_root(),
+        ] {
+            for (input, expected) in [
+                ("~", vec!["AppData", "Documents"]),
+                ("~/", vec!["AppData", "Documents"]),
+                ("  \"~/\"  ", vec!["AppData", "Documents"]),
+                ("~/App", vec!["AppData"]),
+                ("~/AppData/", vec!["Local", "Roaming"]),
+                ("~/AppData/R", vec!["Roaming"]),
+                ("~/missing/", vec![]),
+            ] {
+                let suggestions = folder_suggestions_for_input_with_env(
+                    input,
+                    &current_path,
+                    false,
+                    env_path("HOME", &home),
+                );
+                assert_eq!(
+                    suggestions
+                        .iter()
+                        .map(|suggestion| suggestion.label.as_str())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "input: {input}"
+                );
+                assert!(
+                    suggestions
+                        .iter()
+                        .all(|suggestion| suggestion.path.starts_with(&home))
+                );
+            }
+        }
+        let suggestions =
+            folder_suggestions_for_input_with_env("~/", temp.path(), true, env_path("HOME", &home));
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.label == ".hidden")
+        );
+        let suggestions = folder_suggestions_for_input_with_env(
+            "~/AppData/R",
+            temp.path(),
+            true,
+            env_path("HOME", &home),
+        );
+        assert_eq!(suggestions[0].path, appdata.join("Roaming"));
+    }
+
+    #[test]
+    fn accepted_home_suggestion_from_sftp_keeps_its_local_destination() {
+        let temp = TempDir::new();
+        let child = temp.path().join("AppData");
+        fs::create_dir(&child).expect("create subfolder");
+        let remote = super::super::remote_fs::RemoteLocation::parse("sftp://example.com/folder")
+            .unwrap()
+            .provider_path();
+        let mut view = ExplorerView::new(temp.path().to_path_buf());
+        view.path = remote.clone();
+        let mut address = AddressBarState::new("~/App".to_owned(), None);
+        address.suggestions = folder_suggestions_for_input_with_env(
+            &address.content,
+            &remote,
+            true,
+            env_path("HOME", temp.path()),
+        );
+        view.active_address_bar = Some(address);
+
+        assert!(view.accept_address_suggestion());
+        assert_eq!(
+            view.active_address_bar.as_ref().unwrap().content,
+            view.address_text_for_path(&child)
+        );
+        assert_eq!(
+            view.address_commit_target(),
+            Some(explorer_visible_address_path(
+                fs::canonicalize(&child).unwrap()
+            ))
+        );
+
+        // Subsequent edits must resolve normally instead of reusing the old completion.
+        view.active_address_bar.as_mut().unwrap().content = "other".to_owned();
+        assert_eq!(
+            view.address_commit_target(),
+            Some(
+                super::super::remote_fs::RemoteLocation::parse("sftp://example.com/folder/other")
+                    .unwrap()
+                    .provider_path()
+            )
+        );
+
+        view.active_address_bar.as_mut().unwrap().content = view.address_text_for_path(&child);
+        fs::remove_dir(&child).expect("remove completed folder");
+        assert_eq!(view.address_commit_target(), None);
+        assert!(view.operation_notice.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn folder_suggestions_expand_home_with_windows_separators() {
+        let temp = TempDir::new();
+        let child = temp.path().join("AppData");
+        fs::create_dir(&child).expect("create subfolder");
+
+        for input in [r"~\", r"~\App"] {
+            let suggestions = folder_suggestions_for_input_with_env(
+                input,
+                Path::new("elsewhere"),
+                true,
+                env_path("USERPROFILE", temp.path()),
+            );
+            assert_eq!(suggestions.len(), 1);
+            assert_eq!(suggestions[0].path, child);
+        }
     }
 
     #[test]
