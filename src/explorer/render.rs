@@ -9367,18 +9367,19 @@ mod tests {
             });
         });
         let start = run_until_debug_bounds(cx, "explorer-entry-name-hit-0").center();
-        let below_threshold = gpui::point(start.x + gpui::px(1.0), start.y);
-        let activated = gpui::point(start.x + gpui::px(18.0), start.y + gpui::px(6.0));
+        let at_threshold = gpui::point(start.x + gpui::px(2.0), start.y);
+        let activated = gpui::point(start.x + gpui::px(3.0), start.y);
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(view.test_drag_payload_build_count(), 0);
             assert_eq!(view.details_name_hit_measurement_count.get(), 0);
         });
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
-        cx.simulate_mouse_move(below_threshold, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(at_threshold, MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
-        cx.read_entity(&view, |view, _| {
+        cx.read_entity(&view, |view, app| {
             assert_eq!(view.test_drag_payload_build_count(), 0);
+            assert!(!app.has_active_drag());
         });
 
         cx.simulate_mouse_move(activated, MouseButton::Left, Modifiers::default());

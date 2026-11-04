@@ -51,6 +51,7 @@ const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
 const TAB_ICON_TEXT_SIZE: f32 = 11.0;
 const TAB_REORDER_VERTICAL_TOLERANCE: f32 = 100.0;
+const TAB_DRAG_THRESHOLD: f32 = 8.0;
 const PANE_MIN_WIDTH: f32 = 160.0;
 const PANE_MIN_HEIGHT: f32 = 120.0;
 const SPLIT_DIVIDER_SIZE: f32 = 1.0;
@@ -1965,6 +1966,7 @@ impl ExplorerTabs {
             let drag_label = label.clone();
             let drag_path = path.clone();
             rendered_tab = rendered_tab
+                .drag_threshold(px(TAB_DRAG_THRESHOLD))
                 .on_drag(
                     TabDrag {
                         id: tab_id,
@@ -8755,6 +8757,75 @@ mod tests {
             position.x += handle.offset().x;
             position
         })
+    }
+
+    #[gpui::test]
+    fn tab_click_tolerates_movement_through_drag_threshold_and_resets_on_release(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        for (dx, dy) in [
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (0.0, 7.0),
+            (6.0, 4.0),
+            (8.0, 0.0),
+            (0.0, 8.0),
+        ] {
+            let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
+            let (first, source) = cx.update(|window, app| {
+                tabs.update(app, |tabs, cx| {
+                    tabs.add_background_tab(temp.path().join("source"), window, cx);
+                    cx.notify();
+                    (tabs.tabs[0].id, tabs.tabs[1].id)
+                })
+            });
+            cx.run_until_parked();
+            let start = tab_drag_start_position(&tabs, cx, 1);
+            let end = gpui::point(start.x + px(dx), start.y + px(dy));
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+            cx.update(|_, app| assert!(!app.has_active_drag()));
+            cx.read_entity(&tabs, |tabs, _| {
+                assert_eq!(tabs.active_tab, first);
+                assert!(tabs.dragging_tab.is_none());
+                assert!(tabs.dock_target.is_none());
+                assert!(!tabs.should_move_window);
+            });
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+            cx.read_entity(&tabs, |tabs, _| assert_eq!(tabs.active_tab, source));
+
+            // A second gesture measures from its own press, even when the total
+            // displacement from the first press now exceeds the threshold.
+            let next_end = gpui::point(end.x + px(dx), end.y + px(dy));
+            cx.simulate_mouse_down(end, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(next_end, MouseButton::Left, Modifiers::default());
+            cx.update(|_, app| assert!(!app.has_active_drag()));
+            cx.read_entity(&tabs, |tabs, _| assert!(tabs.dragging_tab.is_none()));
+            cx.simulate_mouse_up(next_end, MouseButton::Left, Modifiers::default());
+        }
+    }
+
+    #[gpui::test]
+    fn tab_drag_starts_beyond_threshold_in_each_direction(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        for (dx, dy) in [(9.0, 0.0), (-9.0, 0.0), (0.0, 9.0), (0.0, -9.0), (6.0, 6.0)] {
+            let (_temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+            cx.run_until_parked();
+            let id = cx.read_entity(&tabs, |tabs, _| tabs.tabs[0].id);
+            let start = tab_drag_start_position(&tabs, cx, 0);
+            let end = gpui::point(start.x + px(dx), start.y + px(dy));
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+            cx.update(|_, app| assert!(app.has_active_drag()));
+            cx.read_entity(&tabs, |tabs, _| {
+                assert_eq!(tabs.dragging_tab, Some(id));
+                assert!(!tabs.should_move_window);
+            });
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+            cx.update(|_, app| assert!(!app.has_active_drag()));
+            cx.read_entity(&tabs, |tabs, _| assert!(tabs.dragging_tab.is_none()));
+        }
     }
 
     fn begin_test_tab_drag(
