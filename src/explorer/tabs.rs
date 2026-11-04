@@ -51,7 +51,7 @@ const TAB_HOVER_BG: u32 = 0xf3f3f3;
 const TAB_TEXT_COLOR: u32 = 0x1f1f1f;
 const TAB_ICON_TEXT_SIZE: f32 = 11.0;
 const TAB_REORDER_VERTICAL_TOLERANCE: f32 = 100.0;
-const TAB_DRAG_THRESHOLD: f32 = 8.0;
+const TAB_DRAG_THRESHOLD: f32 = 10.0;
 const PANE_MIN_WIDTH: f32 = 160.0;
 const PANE_MIN_HEIGHT: f32 = 120.0;
 const SPLIT_DIVIDER_SIZE: f32 = 1.0;
@@ -8767,10 +8767,11 @@ mod tests {
         for (dx, dy) in [
             (0.0, 0.0),
             (3.0, 0.0),
-            (0.0, 7.0),
-            (6.0, 4.0),
-            (8.0, 0.0),
-            (0.0, 8.0),
+            (0.0, 9.0),
+            (6.0, 6.0),
+            (6.0, 8.0),
+            (10.0, 0.0),
+            (0.0, 10.0),
         ] {
             let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
             let (first, source) = cx.update(|window, app| {
@@ -8809,7 +8810,13 @@ mod tests {
     #[gpui::test]
     fn tab_drag_starts_beyond_threshold_in_each_direction(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
-        for (dx, dy) in [(9.0, 0.0), (-9.0, 0.0), (0.0, 9.0), (0.0, -9.0), (6.0, 6.0)] {
+        for (dx, dy) in [
+            (11.0, 0.0),
+            (-11.0, 0.0),
+            (0.0, 11.0),
+            (0.0, -11.0),
+            (8.0, 8.0),
+        ] {
             let (_temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
             cx.run_until_parked();
             let id = cx.read_entity(&tabs, |tabs, _| tabs.tabs[0].id);
@@ -8838,7 +8845,7 @@ mod tests {
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
         cx.read_entity(tabs, |tabs, _| assert!(!tabs.should_move_window));
         cx.simulate_mouse_move(
-            gpui::point(start.x, start.y + px(10.0)),
+            gpui::point(start.x, start.y + px(TAB_DRAG_THRESHOLD + 2.0)),
             MouseButton::Left,
             Modifiers::default(),
         );
