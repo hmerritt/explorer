@@ -169,7 +169,10 @@ fn snapshot() -> &'static Mutex<BTreeMap<TrashItemId, TrashEntry>> {
     SNAPSHOT.get_or_init(Default::default)
 }
 pub(super) fn cached(path: &Path) -> Option<TrashEntry> {
-    snapshot().lock().unwrap().get(&item_id(path)?).cloned()
+    cached_by_id(&item_id(path)?)
+}
+pub(super) fn cached_by_id(id: &TrashItemId) -> Option<TrashEntry> {
+    snapshot().lock().unwrap().get(id).cloned()
 }
 pub(super) fn available(id: &TrashItemId) -> bool {
     snapshot().lock().unwrap().contains_key(id)

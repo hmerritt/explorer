@@ -23,7 +23,8 @@ use crate::explorer::{
     folder_size::{FolderSizeError, calculate_folder_size},
     formatting::{format_size, format_timestamp, format_transfer_rate},
     icons::{
-        DELETE_FILE_DIALOG_ICON, DELETE_FOLDER_DIALOG_ICON, DELETE_MIXED_DIALOG_ICON, image_icon,
+        DELETE_FILE_DIALOG_ICON, DELETE_FOLDER_DIALOG_ICON, DELETE_MIXED_DIALOG_ICON,
+        LARGE_GENERIC_FILE_ICON, image_icon,
     },
     tooltip::{explorer_tooltip, explorer_tooltip_element},
     view::{ExplorerView, PendingPermanentDelete, PendingTrash},
@@ -135,8 +136,9 @@ enum DialogActivation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DeleteDialogIconKind {
+pub(super) enum DeleteDialogIconKind {
     File,
+    MultipleFiles,
     Folder,
     Mixed,
 }
@@ -166,19 +168,19 @@ pub(super) enum PermanentDeleteItemKind {
     Folder,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PermanentDeleteDialogText {
     pub(super) message: String,
     pub(super) item_name: Option<String>,
     pub(super) item_kind: Option<PermanentDeleteItemKind>,
     pub(super) size_label: Option<String>,
-    pub(super) date_modified_label: Option<String>,
+    pub(super) date_label: Option<String>,
     pub(super) folder_size_path: Option<PathBuf>,
 }
 
 impl PermanentDeleteDialogText {
     fn has_file_details(&self) -> bool {
-        self.item_name.is_some() || self.size_label.is_some() || self.date_modified_label.is_some()
+        self.item_name.is_some() || self.size_label.is_some() || self.date_label.is_some()
     }
 }
 
@@ -681,19 +683,9 @@ impl ExplorerDialog {
 
 impl Render for ExplorerDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .font(self.font.clone())
+        shell_dialog_body(self.font.clone())
             .key_context("ExplorerDialog")
             .track_focus(&self.focus_handle)
-            .size_full()
-            .relative()
-            .bg(rgb(0xffffff))
-            .cursor_default()
-            .pt(px(SHELL_DIALOG_TOP_PADDING))
-            .px(px(SHELL_DIALOG_HORIZONTAL_PADDING))
-            .pb(px(SHELL_DIALOG_BOTTOM_PADDING))
-            .text_size(px(12.0))
-            .text_color(rgb(SHELL_DIALOG_TEXT_COLOR))
             .on_action(cx.listener(Self::handle_cancel))
             .on_action(cx.listener(Self::handle_confirm))
             .on_action(cx.listener(Self::handle_focus_primary))
@@ -743,71 +735,46 @@ impl ExplorerDialog {
         if let Some(path) = text.folder_size_path.as_deref() {
             text.size_label = Some(self.folder_size_label(path));
         }
-        let item_name = text
-            .item_name
-            .as_deref()
-            .map(|name| truncated_permanent_delete_file_name(name, &self.font, window));
-        let body = if text.has_file_details() {
-            render_permanent_delete_file_body(text, item_name, icon_kind)
-        } else {
-            render_permanent_delete_compact_body(text.message, icon_kind)
-        };
-
-        div()
-            .id("permanent-delete-confirmation")
-            .flex()
-            .flex_col()
-            .w_full()
-            .child(body)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(DELETE_DIALOG_BUTTON_GAP))
-                    .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
-                    .child(
-                        dialog_button(
-                            "permanent-delete-yes",
-                            "Yes",
-                            self.focused_choice == Some(DialogChoice::Primary),
-                            window.scale_factor(),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.focus_choice_from_pointer(DialogChoice::Primary, cx);
-                            }),
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.confirm_delete(window, cx);
-                                cx.stop_propagation();
-                            },
-                        )),
-                    )
-                    .child(
-                        dialog_button(
-                            "permanent-delete-no",
-                            "No",
-                            self.focused_choice == Some(DialogChoice::Secondary),
-                            window.scale_factor(),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.focus_choice_from_pointer(DialogChoice::Secondary, cx);
-                            }),
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.cancel(window, cx);
-                                cx.stop_propagation();
-                            },
-                        )),
-                    ),
+        delete_confirmation(
+            text,
+            icon_kind,
+            &self.font,
+            window,
+            dialog_button(
+                "permanent-delete-yes",
+                "Yes",
+                self.focused_choice == Some(DialogChoice::Primary),
+                window.scale_factor(),
             )
-            .into_any_element()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.focus_choice_from_pointer(DialogChoice::Primary, cx);
+                }),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.confirm_delete(window, cx);
+                cx.stop_propagation();
+            })),
+            dialog_button(
+                "permanent-delete-no",
+                "No",
+                self.focused_choice == Some(DialogChoice::Secondary),
+                window.scale_factor(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.focus_choice_from_pointer(DialogChoice::Secondary, cx);
+                }),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.cancel(window, cx);
+                cx.stop_propagation();
+            })),
+        )
+        .id("permanent-delete-confirmation")
+        .into_any_element()
     }
 
     fn render_trash(
@@ -818,71 +785,46 @@ impl ExplorerDialog {
     ) -> AnyElement {
         let icon_kind = delete_dialog_icon_kind(&pending.paths);
         let text = trash_dialog_text(&pending);
-        let item_name = text
-            .item_name
-            .as_deref()
-            .map(|name| truncated_permanent_delete_file_name(name, &self.font, window));
-        let body = if text.has_file_details() {
-            render_permanent_delete_file_body(text, item_name, icon_kind)
-        } else {
-            render_permanent_delete_compact_body(text.message, icon_kind)
-        };
-
-        div()
-            .id("trash-confirmation")
-            .flex()
-            .flex_col()
-            .w_full()
-            .child(body)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(DELETE_DIALOG_BUTTON_GAP))
-                    .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
-                    .child(
-                        dialog_button(
-                            "trash-yes",
-                            "Yes",
-                            self.focused_choice == Some(DialogChoice::Primary),
-                            window.scale_factor(),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.focus_choice_from_pointer(DialogChoice::Primary, cx);
-                            }),
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.confirm_trash(window, cx);
-                                cx.stop_propagation();
-                            },
-                        )),
-                    )
-                    .child(
-                        dialog_button(
-                            "trash-no",
-                            "No",
-                            self.focused_choice == Some(DialogChoice::Secondary),
-                            window.scale_factor(),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.focus_choice_from_pointer(DialogChoice::Secondary, cx);
-                            }),
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.cancel(window, cx);
-                                cx.stop_propagation();
-                            },
-                        )),
-                    ),
+        delete_confirmation(
+            text,
+            icon_kind,
+            &self.font,
+            window,
+            dialog_button(
+                "trash-yes",
+                "Yes",
+                self.focused_choice == Some(DialogChoice::Primary),
+                window.scale_factor(),
             )
-            .into_any_element()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.focus_choice_from_pointer(DialogChoice::Primary, cx);
+                }),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.confirm_trash(window, cx);
+                cx.stop_propagation();
+            })),
+            dialog_button(
+                "trash-no",
+                "No",
+                self.focused_choice == Some(DialogChoice::Secondary),
+                window.scale_factor(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.focus_choice_from_pointer(DialogChoice::Secondary, cx);
+                }),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.cancel(window, cx);
+                cx.stop_propagation();
+            })),
+        )
+        .id("trash-confirmation")
+        .into_any_element()
     }
 
     fn render_file_conflict(
@@ -1182,13 +1124,11 @@ fn dialog_window_size(
     match kind {
         ExplorerDialogKind::PermanentDelete(pending) => {
             let text = permanent_delete_dialog_text_with_format(pending, date_format);
-            let height = permanent_delete_dialog_height(&text, font, cx);
-            (DELETE_DIALOG_WIDTH, height)
+            delete_confirmation_size(&text, font, cx)
         }
         ExplorerDialogKind::Trash(pending) => {
             let text = trash_dialog_text(pending);
-            let height = permanent_delete_dialog_height(&text, font, cx);
-            (DELETE_DIALOG_WIDTH, height)
+            delete_confirmation_size(&text, font, cx)
         }
         ExplorerDialogKind::FileConflict(conflicts) => {
             let text = file_conflict_dialog_text(conflicts);
@@ -1323,7 +1263,7 @@ impl ExplorerDialogKind {
     }
 }
 
-fn dialog_button(
+pub(super) fn dialog_button(
     id: &'static str,
     label: &'static str,
     selected: bool,
@@ -1434,6 +1374,61 @@ fn dialog_activation(
     }
 }
 
+pub(super) fn shell_dialog_body(font: gpui::Font) -> gpui::Div {
+    div()
+        .font(font)
+        .size_full()
+        .relative()
+        .bg(rgb(0xffffff))
+        .cursor_default()
+        .pt(px(SHELL_DIALOG_TOP_PADDING))
+        .px(px(SHELL_DIALOG_HORIZONTAL_PADDING))
+        .pb(px(SHELL_DIALOG_BOTTOM_PADDING))
+        .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
+        .text_color(rgb(SHELL_DIALOG_TEXT_COLOR))
+}
+
+pub(super) fn delete_confirmation_size(
+    text: &PermanentDeleteDialogText,
+    font: &gpui::Font,
+    cx: &App,
+) -> (f32, f32) {
+    (
+        DELETE_DIALOG_WIDTH,
+        permanent_delete_dialog_height(text, font, cx),
+    )
+}
+
+pub(super) fn delete_confirmation(
+    text: PermanentDeleteDialogText,
+    icon_kind: DeleteDialogIconKind,
+    font: &gpui::Font,
+    window: &Window,
+    yes: impl IntoElement,
+    no: impl IntoElement,
+) -> gpui::Div {
+    let item_name = text
+        .item_name
+        .as_deref()
+        .map(|name| truncated_permanent_delete_file_name(name, font, window));
+    let body = if text.has_file_details() {
+        render_permanent_delete_file_body(text, item_name, icon_kind)
+    } else {
+        render_permanent_delete_compact_body(text.message, icon_kind)
+    };
+
+    div().flex().flex_col().w_full().child(body).child(
+        div()
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap(px(DELETE_DIALOG_BUTTON_GAP))
+            .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
+            .child(yes)
+            .child(no),
+    )
+}
+
 fn render_permanent_delete_file_body(
     text: PermanentDeleteDialogText,
     file_name: Option<SharedString>,
@@ -1455,21 +1450,26 @@ fn render_permanent_delete_file_body(
                 .min_w(px(0.0))
                 .w(px(permanent_delete_detail_text_width()))
                 .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
-                .child(SharedString::from(text.message))
+                .child(
+                    div()
+                        .debug_selector(|| "delete-confirmation-message".into())
+                        .child(SharedString::from(text.message)),
+                )
                 .when_some(file_name, |this, file_name| {
                     this.child(
                         div()
                             .mt(px(DELETE_DIALOG_DETAILS_TOP_MARGIN))
                             .min_w(px(0.0))
                             .w_full()
+                            .debug_selector(|| "delete-confirmation-name".into())
                             .child(file_name),
                     )
                 })
                 .when_some(text.size_label, |this, size_label| {
                     this.child(SharedString::from(size_label))
                 })
-                .when_some(text.date_modified_label, |this, date_modified_label| {
-                    this.child(SharedString::from(date_modified_label))
+                .when_some(text.date_label, |this, date_label| {
+                    this.child(SharedString::from(date_label))
                 }),
         )
         .into_any_element()
@@ -1493,27 +1493,49 @@ fn render_permanent_delete_compact_body(
                 .min_w(px(0.0))
                 .w(px(permanent_delete_detail_text_width()))
                 .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
-                .child(SharedString::from(message)),
+                .child(
+                    div()
+                        .debug_selector(|| "delete-confirmation-message".into())
+                        .child(SharedString::from(message)),
+                ),
         )
         .into_any_element()
 }
 
 fn render_delete_file_icon(icon_kind: DeleteDialogIconKind, slot_height: f32) -> gpui::Div {
+    let mut slot = div()
+        .debug_selector(|| "delete-confirmation-icon".into())
+        .w(px(DELETE_DIALOG_ICON_SLOT_WIDTH))
+        .h(px(slot_height))
+        .relative()
+        .flex_shrink_0();
+    if icon_kind == DeleteDialogIconKind::MultipleFiles {
+        // Two offset sheets fit the same slot as the single-item icon.
+        for (offset, image) in [
+            (0.0, LARGE_GENERIC_FILE_ICON.clone()),
+            (6.0, DELETE_FILE_DIALOG_ICON.clone()),
+        ] {
+            slot = slot.child(
+                div()
+                    .absolute()
+                    .top(px(offset))
+                    .left(px(offset))
+                    .child(image_icon(image, 34.0, 34.0)),
+            );
+        }
+        return slot;
+    }
     let image = match icon_kind {
         DeleteDialogIconKind::File => DELETE_FILE_DIALOG_ICON.clone(),
         DeleteDialogIconKind::Folder => DELETE_FOLDER_DIALOG_ICON.clone(),
         DeleteDialogIconKind::Mixed => DELETE_MIXED_DIALOG_ICON.clone(),
+        DeleteDialogIconKind::MultipleFiles => unreachable!(),
     };
-
-    div()
-        .w(px(DELETE_DIALOG_ICON_SLOT_WIDTH))
-        .h(px(slot_height))
-        .flex_shrink_0()
-        .child(image_icon(
-            image,
-            DELETE_DIALOG_ICON_SLOT_WIDTH,
-            DELETE_DIALOG_ICON_SLOT_WIDTH,
-        ))
+    slot.child(image_icon(
+        image,
+        DELETE_DIALOG_ICON_SLOT_WIDTH,
+        DELETE_DIALOG_ICON_SLOT_WIDTH,
+    ))
 }
 
 fn truncated_permanent_delete_file_name(
@@ -1839,14 +1861,14 @@ fn permanent_delete_dialog_text_with_format(
     pending: &PendingPermanentDelete,
     date_format: &str,
 ) -> PermanentDeleteDialogText {
-    let (item_name, item_kind, size_label, date_modified_label, folder_size_path) =
+    let (item_name, item_kind, size_label, date_label, folder_size_path) =
         if let [path] = pending.paths.as_slice() {
             let detail = permanent_delete_file_detail(path, date_format);
             (
                 Some(detail.item_name),
                 Some(detail.item_kind),
                 Some(detail.size_label),
-                Some(detail.date_modified_label),
+                Some(detail.date_label),
                 detail.folder_size_path,
             )
         } else {
@@ -1871,7 +1893,7 @@ fn permanent_delete_dialog_text_with_format(
         item_name,
         item_kind,
         size_label,
-        date_modified_label,
+        date_label,
         folder_size_path,
     }
 }
@@ -1902,7 +1924,7 @@ pub(super) fn trash_dialog_text(pending: &PendingTrash) -> PermanentDeleteDialog
         item_name,
         item_kind,
         size_label: None,
-        date_modified_label: None,
+        date_label: None,
         folder_size_path: None,
     }
 }
@@ -1922,7 +1944,7 @@ struct PermanentDeleteFileDetail {
     item_name: String,
     item_kind: PermanentDeleteItemKind,
     size_label: String,
-    date_modified_label: String,
+    date_label: String,
     folder_size_path: Option<PathBuf>,
 }
 
@@ -1941,7 +1963,7 @@ fn permanent_delete_file_detail(path: &Path, date_format: &str) -> PermanentDele
             } else {
                 format!("Size: {}", format_size(entry.size))
             },
-            date_modified_label: format!(
+            date_label: format!(
                 "Date Modified: {}",
                 format_timestamp(entry.modified, date_format)
             ),
@@ -1953,7 +1975,7 @@ fn permanent_delete_file_detail(path: &Path, date_format: &str) -> PermanentDele
         item_name: path_display_name(path),
         item_kind: PermanentDeleteItemKind::File,
         size_label: "Size: ".to_owned(),
-        date_modified_label: "Date Modified: ".to_owned(),
+        date_label: "Date Modified: ".to_owned(),
         folder_size_path: None,
     }
 }
@@ -2082,7 +2104,7 @@ mod tests {
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, Some("Size: 0 bytes".to_owned()));
         assert_eq!(
-            text.date_modified_label,
+            text.date_label,
             Some(format!(
                 "Date Modified: {}",
                 format_timestamp(modified, crate::settings::DEFAULT_DATE_FORMAT)
@@ -2107,7 +2129,7 @@ mod tests {
         );
 
         assert_eq!(
-            text.date_modified_label,
+            text.date_label,
             Some(format!(
                 "Date Modified: {}",
                 format_timestamp(modified, "%d %B %Y")
@@ -2137,7 +2159,7 @@ mod tests {
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::Folder));
         assert_eq!(text.size_label, Some("Size: calculating...".to_owned()));
         assert_eq!(
-            text.date_modified_label,
+            text.date_label,
             Some(format!(
                 "Date Modified: {}",
                 format_timestamp(modified, crate::settings::DEFAULT_DATE_FORMAT)
@@ -2155,7 +2177,7 @@ mod tests {
         assert_eq!(text.item_name, Some("missing.txt".to_owned()));
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, Some("Size: ".to_owned()));
-        assert_eq!(text.date_modified_label, Some("Date Modified: ".to_owned()));
+        assert_eq!(text.date_label, Some("Date Modified: ".to_owned()));
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -2193,7 +2215,7 @@ mod tests {
         assert_eq!(text.item_name, None);
         assert_eq!(text.item_kind, None);
         assert_eq!(text.size_label, None);
-        assert_eq!(text.date_modified_label, None);
+        assert_eq!(text.date_label, None);
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -2293,7 +2315,7 @@ mod tests {
         assert_eq!(text.item_name, Some("a.txt".to_owned()));
         assert_eq!(text.item_kind, Some(PermanentDeleteItemKind::File));
         assert_eq!(text.size_label, None);
-        assert_eq!(text.date_modified_label, None);
+        assert_eq!(text.date_label, None);
         assert_eq!(text.folder_size_path, None);
     }
 
@@ -2310,7 +2332,7 @@ mod tests {
         assert_eq!(text.item_name, None);
         assert_eq!(text.item_kind, None);
         assert_eq!(text.size_label, None);
-        assert_eq!(text.date_modified_label, None);
+        assert_eq!(text.date_label, None);
         assert_eq!(text.folder_size_path, None);
     }
 

@@ -1,12 +1,16 @@
 use super::{
+    dialog::{
+        DeleteDialogIconKind, PermanentDeleteDialogText, PermanentDeleteItemKind,
+        delete_confirmation, delete_confirmation_size, dialog_button, shell_dialog_body,
+    },
     trash::{self, BatchResult, RecoveryChoice, RecoveryRequest, RecoveryUndo, TrashItemId},
     view::ExplorerView,
 };
 use crate::settings::{FileColumnSettings, FileSortSettings, FileViewMode};
 use gpui::{
-    AppContext, Bounds, Context, FocusHandle, Focusable, IntoElement, Render, SharedString, Task,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb,
-    size,
+    AppContext, Bounds, Context, FocusHandle, Focusable, IntoElement, MouseButton, Render,
+    SharedString, Task, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
 };
 use std::{
     path::PathBuf,
@@ -60,10 +64,84 @@ struct Progress {
 
 #[derive(Clone)]
 enum DialogKind {
-    Purge(Vec<TrashItemId>),
+    Purge(PurgeConfirmation),
     Conflict(RecoveryRequest),
     Properties(Vec<trash::TrashEntry>),
     Progress(Arc<Mutex<Progress>>, Arc<AtomicBool>),
+}
+
+#[derive(Clone)]
+struct PurgeConfirmation {
+    ids: Vec<TrashItemId>,
+    text: PermanentDeleteDialogText,
+}
+
+impl PurgeConfirmation {
+    fn new(ids: Vec<TrashItemId>, date_format: &str) -> Self {
+        // Capture display metadata with the IDs; original paths may no longer exist.
+        let item = if let [id] = ids.as_slice() {
+            trash::cached_by_id(id)
+        } else {
+            None
+        };
+        Self::from_item(ids, item.as_ref(), date_format)
+    }
+
+    fn from_item(
+        ids: Vec<TrashItemId>,
+        item: Option<&trash::TrashEntry>,
+        date_format: &str,
+    ) -> Self {
+        let mut text = PermanentDeleteDialogText {
+            message: format!(
+                "Are you sure you want to permanently delete these {} items?",
+                ids.len()
+            ),
+            item_name: None,
+            item_kind: None,
+            size_label: None,
+            date_label: None,
+            folder_size_path: None,
+        };
+        if ids.len() == 1 {
+            let noun = match item {
+                Some(item) if item.directory => "folder",
+                Some(_) => "file",
+                None => "item",
+            };
+            text.message = format!("Are you sure you want to permanently delete this {noun}?");
+            text.item_name = Some(item.map_or_else(
+                || "Unknown".into(),
+                |item| item.name.to_string_lossy().into_owned(),
+            ));
+            text.item_kind = item.map(|item| {
+                if item.directory {
+                    PermanentDeleteItemKind::Folder
+                } else {
+                    PermanentDeleteItemKind::File
+                }
+            });
+            let size = item.and_then(|item| item.size).map_or_else(
+                || "Unknown".into(),
+                |size| super::formatting::format_size(Some(size)),
+            );
+            text.size_label = Some(format!("Size: {size}"));
+            let deleted = item.and_then(|item| item.deleted).map_or_else(
+                || "Unknown".into(),
+                |deleted| super::formatting::format_timestamp(Some(deleted), date_format),
+            );
+            text.date_label = Some(format!("Date deleted: {deleted}"));
+        }
+        Self { ids, text }
+    }
+
+    fn icon_kind(&self) -> DeleteDialogIconKind {
+        if self.ids.len() > 1 {
+            DeleteDialogIconKind::MultipleFiles
+        } else {
+            DeleteDialogIconKind::File
+        }
+    }
 }
 
 struct TrashDialog {
@@ -178,7 +256,10 @@ impl ExplorerView {
                     Ok(items) => {
                         let ids: Vec<_> = items.into_iter().map(|e| e.id).collect();
                         if !ids.is_empty() {
-                            view.show_bin_dialog(DialogKind::Purge(ids), cx);
+                            view.show_bin_dialog(
+                                DialogKind::Purge(PurgeConfirmation::new(ids, &view.date_format)),
+                                cx,
+                            );
                         }
                     }
                     Err(error) => view.set_error_notice(error),
@@ -248,7 +329,10 @@ impl ExplorerView {
     pub(super) fn request_bin_delete(&mut self, cx: &mut Context<Self>) {
         let ids = trash::ids(&self.selected_paths());
         if !ids.is_empty() && !self.has_background_operation() {
-            self.show_bin_dialog(DialogKind::Purge(ids), cx);
+            self.show_bin_dialog(
+                DialogKind::Purge(PurgeConfirmation::new(ids, &self.date_format)),
+                cx,
+            );
         }
     }
 
@@ -267,7 +351,6 @@ impl ExplorerView {
         self.trash_dialog_serial = self.trash_dialog_serial.wrapping_add(1);
         let serial = self.trash_dialog_serial;
         let focused_choice = match &kind {
-            DialogKind::Purge(_) => 1,
             DialogKind::Conflict(_) => 3,
             _ => 0,
         };
@@ -277,6 +360,7 @@ impl ExplorerView {
             DialogKind::Properties(_) => "Properties",
             DialogKind::Progress(_, _) => "File operation",
         };
+        let (width, height) = dialog_size(&kind, cx);
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some(format!("{} — {title}", trash::label()).into()),
@@ -284,7 +368,7 @@ impl ExplorerView {
             }),
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
-                size(px(DIALOG_WIDTH), px(dialog_height(&kind, cx))),
+                size(px(width), px(height)),
                 cx,
             ))),
             is_resizable: false,
@@ -569,7 +653,7 @@ impl TrashDialog {
         let kind = self.kind.clone();
         self.close(window, cx);
         let _ = self.explorer.update(cx, |view, cx| match kind {
-            DialogKind::Purge(ids) => view.start_bin_job(None, ids, cx),
+            DialogKind::Purge(pending) => view.start_bin_job(None, pending.ids, cx),
             DialogKind::Conflict(request) => view.start_bin_recovery(request, choice, cx),
             _ => {}
         });
@@ -581,96 +665,119 @@ impl Focusable for TrashDialog {
     }
 }
 impl Render for TrashDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = &self.poll;
-        let mut body = div()
-            .id("trash-dialog")
-            .debug_selector(|| "trash-dialog".into())
-            .key_context("ExplorerDialog")
-            .track_focus(&self.focus)
-            .size_full()
-            .p(px(DIALOG_PADDING))
-            .font(crate::settings::current_app_font(cx))
-            .text_size(px(DIALOG_TEXT_SIZE))
-            .line_height(px(DIALOG_LINE_HEIGHT))
-            .bg(rgb(0xffffff))
-            .flex()
-            .flex_col()
-            .gap(px(DIALOG_GAP))
-            .on_action(
-                cx.listener(|this, _: &super::dialog::DialogCancel, window, cx| {
-                    if let DialogKind::Progress(_, cancel) = &this.kind {
+        let font = crate::settings::current_app_font(cx);
+        let mut body = if matches!(self.kind, DialogKind::Purge(_)) {
+            shell_dialog_body(font.clone())
+        } else {
+            div()
+                .size_full()
+                .p(px(DIALOG_PADDING))
+                .font(font.clone())
+                .text_size(px(DIALOG_TEXT_SIZE))
+                .line_height(px(DIALOG_LINE_HEIGHT))
+                .bg(rgb(0xffffff))
+                .flex()
+                .flex_col()
+                .gap(px(DIALOG_GAP))
+        }
+        .id("trash-dialog")
+        .debug_selector(|| "trash-dialog".into())
+        .key_context("ExplorerDialog")
+        .track_focus(&self.focus)
+        .on_action(
+            cx.listener(|this, _: &super::dialog::DialogCancel, window, cx| {
+                if let DialogKind::Progress(_, cancel) = &this.kind {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                this.close(window, cx);
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &super::dialog::DialogConfirm, window, cx| {
+                match &this.kind {
+                    DialogKind::Purge(_) if this.focused_choice == 0 => {
+                        this.choose(RecoveryChoice::Replace, window, cx)
+                    }
+                    DialogKind::Conflict(_) if this.focused_choice < 3 => this.choose(
+                        [
+                            RecoveryChoice::Replace,
+                            RecoveryChoice::Skip,
+                            RecoveryChoice::KeepBoth,
+                        ][this.focused_choice],
+                        window,
+                        cx,
+                    ),
+                    DialogKind::Progress(_, cancel) => {
                         cancel.store(true, Ordering::Relaxed);
                     }
-                    this.close(window, cx);
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &super::dialog::DialogConfirm, window, cx| {
-                    match &this.kind {
-                        DialogKind::Purge(_) if this.focused_choice == 0 => {
-                            this.choose(RecoveryChoice::Replace, window, cx)
-                        }
-                        DialogKind::Conflict(_) if this.focused_choice < 3 => this.choose(
-                            [
-                                RecoveryChoice::Replace,
-                                RecoveryChoice::Skip,
-                                RecoveryChoice::KeepBoth,
-                            ][this.focused_choice],
-                            window,
-                            cx,
-                        ),
-                        DialogKind::Progress(_, cancel) => {
-                            cancel.store(true, Ordering::Relaxed);
-                        }
-                        _ => this.close(window, cx),
-                    }
-                    cx.stop_propagation();
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &super::dialog::DialogFocusPrimary, _, cx| {
-                    this.focused_choice = this.focused_choice.saturating_sub(1);
-                    cx.notify();
-                    cx.stop_propagation();
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &super::dialog::DialogFocusSecondary, _, cx| {
-                    let max = match this.kind {
-                        DialogKind::Purge(_) => 1,
-                        DialogKind::Conflict(_) => 3,
-                        _ => 0,
-                    };
-                    this.focused_choice = (this.focused_choice + 1).min(max);
-                    cx.notify();
-                    cx.stop_propagation();
-                }),
-            );
+                    _ => this.close(window, cx),
+                }
+                cx.stop_propagation();
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &super::dialog::DialogFocusPrimary, _, cx| {
+                this.focused_choice = this.focused_choice.saturating_sub(1);
+                cx.notify();
+                cx.stop_propagation();
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &super::dialog::DialogFocusSecondary, _, cx| {
+                let max = match this.kind {
+                    DialogKind::Purge(_) => 1,
+                    DialogKind::Conflict(_) => 3,
+                    _ => 0,
+                };
+                this.focused_choice = (this.focused_choice + 1).min(max);
+                cx.notify();
+                cx.stop_propagation();
+            }),
+        );
         match &self.kind {
-            DialogKind::Purge(ids) => {
-                body = body
-                    .child(dialog_text(purge_prompt(ids.len())))
-                    .child(dialog_text("These items cannot be restored or undone."))
-                    .child(button(
+            DialogKind::Purge(pending) => {
+                body = body.child(delete_confirmation(
+                    pending.text.clone(),
+                    pending.icon_kind(),
+                    &font,
+                    window,
+                    dialog_button(
                         "trash-confirm-delete",
-                        "Delete",
+                        "Yes",
                         self.focused_choice == 0,
-                        cx.listener(|this, _, window, cx| {
-                            this.choose(RecoveryChoice::Replace, window, cx)
+                        window.scale_factor(),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.focused_choice = 0;
+                            cx.notify();
                         }),
-                    ))
-                    .child(button(
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.choose(RecoveryChoice::Replace, window, cx);
+                        cx.stop_propagation();
+                    })),
+                    dialog_button(
                         "trash-cancel",
-                        "Cancel",
-                        self.focused_choice
-                            == if matches!(self.kind, DialogKind::Purge(_)) {
-                                1
-                            } else {
-                                3
-                            },
-                        cx.listener(|this, _, window, cx| this.close(window, cx)),
-                    ));
+                        "No",
+                        self.focused_choice == 1,
+                        window.scale_factor(),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.focused_choice = 1;
+                            cx.notify();
+                        }),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close(window, cx);
+                        cx.stop_propagation();
+                    })),
+                ));
             }
             DialogKind::Conflict(_) => {
                 body = body
@@ -708,12 +815,7 @@ impl Render for TrashDialog {
                 body = body.child(button(
                     "trash-cancel",
                     "Cancel",
-                    self.focused_choice
-                        == if matches!(self.kind, DialogKind::Purge(_)) {
-                            1
-                        } else {
-                            3
-                        },
+                    self.focused_choice == 3,
                     cx.listener(|this, _, window, cx| this.close(window, cx)),
                 ));
             }
@@ -797,14 +899,6 @@ fn dialog_text(text: impl Into<SharedString>) -> gpui::Div {
     div().w_full().flex_shrink_0().child(text.into())
 }
 
-fn purge_prompt(count: usize) -> String {
-    format!(
-        "Permanently delete {count} item{} from {}?",
-        if count == 1 { "" } else { "s" },
-        trash::label()
-    )
-}
-
 fn property_lines(item: &trash::TrashEntry) -> [String; 4] {
     [
         item.name.to_string_lossy().into_owned(),
@@ -837,15 +931,16 @@ fn dialog_text_height(text: &str, width: f32, cx: &gpui::App) -> f32 {
         .sum()
 }
 
-fn dialog_height(kind: &DialogKind, cx: &gpui::App) -> f32 {
+fn dialog_size(kind: &DialogKind, cx: &gpui::App) -> (f32, f32) {
     let width = DIALOG_WIDTH - DIALOG_PADDING * 2.0;
     let text_height = |text: &str| dialog_text_height(text, width, cx);
     let content = match kind {
-        DialogKind::Purge(ids) => {
-            text_height(&purge_prompt(ids.len()))
-                + text_height("These items cannot be restored or undone.")
-                + DIALOG_BUTTON_HEIGHT * 2.0
-                + DIALOG_GAP * 3.0
+        DialogKind::Purge(pending) => {
+            return delete_confirmation_size(
+                &pending.text,
+                &crate::settings::current_app_font(cx),
+                cx,
+            );
         }
         DialogKind::Conflict(_) => {
             text_height("The destination already contains items with the same names.")
@@ -869,11 +964,12 @@ fn dialog_height(kind: &DialogKind, cx: &gpui::App) -> f32 {
         }
     };
     let height = DIALOG_PADDING * 2.0 + content;
-    if matches!(kind, DialogKind::Properties(_)) {
+    let height = if matches!(kind, DialogKind::Properties(_)) {
         height.min(PROPERTIES_MAX_HEIGHT)
     } else {
         height
-    }
+    };
+    (DIALOG_WIDTH, height)
 }
 
 fn button(
@@ -927,6 +1023,193 @@ mod tests {
         view.restore_selection_from_paths(&[view.entries[0].path.clone()]);
         view
     }
+    #[test]
+    fn purge_confirmation_uses_bin_metadata_and_configured_date_format() {
+        let temp = TempDir::new();
+        let payload = temp.path().join("payload");
+        std::fs::write(&payload, b"deleted").unwrap();
+        // The original file can be absent or replaced without affecting the details.
+        let original = temp.path().join("original.txt");
+        std::fs::write(&original, b"a different file with a different size").unwrap();
+        let mut item = trash::fixture_entry("deleted.txt", &payload, Some(original));
+        item.deleted = Some(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        let pending = PurgeConfirmation::from_item(vec![item.id.clone()], Some(&item), "%Y");
+        assert_eq!(
+            pending.text.message,
+            "Are you sure you want to permanently delete this file?"
+        );
+        assert_eq!(pending.text.item_name.as_deref(), Some("deleted.txt"));
+        assert_eq!(pending.text.size_label.as_deref(), Some("Size: 7 bytes"));
+        assert_eq!(
+            pending.text.date_label.as_deref(),
+            Some("Date deleted: 2023")
+        );
+        assert!(pending.text.folder_size_path.is_none());
+        assert_eq!(pending.icon_kind(), DeleteDialogIconKind::File);
+    }
+
+    #[test]
+    fn purge_confirmation_uses_file_icon_for_folder_and_unknown_metadata() {
+        let temp = TempDir::new();
+        let mut item = trash::fixture_entry("deleted folder", temp.path(), None);
+        item.size = None;
+        let pending = PurgeConfirmation::from_item(
+            vec![item.id.clone()],
+            Some(&item),
+            crate::settings::DEFAULT_DATE_FORMAT,
+        );
+        assert_eq!(
+            pending.text.message,
+            "Are you sure you want to permanently delete this folder?"
+        );
+        assert_eq!(
+            pending.text.item_kind,
+            Some(PermanentDeleteItemKind::Folder)
+        );
+        assert_eq!(pending.text.size_label.as_deref(), Some("Size: Unknown"));
+        assert_eq!(
+            pending.text.date_label.as_deref(),
+            Some("Date deleted: Unknown")
+        );
+        assert_eq!(pending.icon_kind(), DeleteDialogIconKind::File);
+        let missing = PurgeConfirmation::from_item(vec![item.id], None, "%Y");
+        assert_eq!(
+            missing.text.message,
+            "Are you sure you want to permanently delete this item?"
+        );
+        assert_eq!(missing.text.item_name.as_deref(), Some("Unknown"));
+        assert_eq!(missing.text.size_label.as_deref(), Some("Size: Unknown"));
+        assert_eq!(
+            missing.text.date_label.as_deref(),
+            Some("Date deleted: Unknown")
+        );
+    }
+
+    #[test]
+    fn purge_confirmation_keeps_metadata_after_bin_snapshot_changes() {
+        let temp = TempDir::new();
+        let payload = temp.path().join("payload");
+        std::fs::write(&payload, b"deleted").unwrap();
+        let item = trash::fixture_entry("deleted.txt", &payload, None);
+        let pending = {
+            let _snapshot = trash::SnapshotFixture::new(vec![item.clone()]);
+            PurgeConfirmation::new(vec![item.id.clone()], "%Y")
+        };
+        assert_eq!(pending.ids, vec![item.id]);
+        assert_eq!(pending.text.item_name.as_deref(), Some("deleted.txt"));
+        assert_eq!(pending.text.size_label.as_deref(), Some("Size: 7 bytes"));
+    }
+
+    #[test]
+    fn purge_confirmation_multiple_items_uses_count_and_stacked_files_icon() {
+        for count in [2, 36] {
+            let ids = (0..count)
+                .map(|index| TrashItemId(format!("{index:064x}")))
+                .collect();
+            let pending = PurgeConfirmation::from_item(ids, None, "%Y");
+            assert_eq!(
+                pending.text.message,
+                format!("Are you sure you want to permanently delete these {count} items?")
+            );
+            assert!(pending.text.item_name.is_none());
+            assert!(pending.text.size_label.is_none());
+            assert!(pending.text.date_label.is_none());
+            assert_eq!(pending.icon_kind(), DeleteDialogIconKind::MultipleFiles);
+        }
+    }
+
+    #[gpui::test]
+    fn purge_confirmation_fits_long_names_and_wrapped_prompts(cx: &mut gpui::TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let explorer = cx.new(|cx| bin_view(Some(cx.focus_handle())));
+        let temp = TempDir::new();
+        let payload = temp.path().join("payload");
+        std::fs::write(&payload, b"deleted").unwrap();
+        let item = trash::fixture_entry(&"long filename ".repeat(100), &payload, None);
+        let single = PurgeConfirmation::from_item(vec![item.id.clone()], Some(&item), "%Y");
+        let multiple = PurgeConfirmation::from_item(vec![item.id.clone(); 36], None, "%Y");
+        let mut wrapped = multiple.clone();
+        wrapped.text.message =
+            "Are you sure you want to permanently delete these items? ".repeat(8);
+        let mut heights = Vec::new();
+        for (index, pending) in [single, multiple, wrapped].into_iter().enumerate() {
+            let has_name = pending.text.item_name.is_some();
+            let kind = DialogKind::Purge(pending);
+            let (width, height) = cx.update(|cx| dialog_size(&kind, cx));
+            heights.push(height);
+            let (dialog, window) = cx.add_window_view(|window, cx| {
+                let focus = cx.focus_handle();
+                focus.focus(window);
+                TrashDialog {
+                    kind,
+                    explorer: explorer.downgrade(),
+                    focus,
+                    completed: false,
+                    serial: 0,
+                    focused_choice: 0,
+                    poll: None,
+                }
+            });
+            window.simulate_resize(size(px(width), px(height)));
+            window.run_until_parked();
+            let icon = window.debug_bounds("delete-confirmation-icon").unwrap();
+            let message = window.debug_bounds("delete-confirmation-message").unwrap();
+            let yes = window.debug_bounds("trash-confirm-delete").unwrap();
+            let no = window.debug_bounds("trash-cancel").unwrap();
+            assert_eq!(icon.left(), px(20.0));
+            assert_eq!(icon.size.width, px(40.0));
+            assert_eq!(message.left() - icon.right(), px(16.0));
+            assert!(message.bottom() < yes.top());
+            assert_eq!(yes.size, size(px(84.0), px(28.0)));
+            assert_eq!(yes.top(), no.top());
+            assert_eq!(no.right(), px(width - 20.0));
+            assert!(no.bottom() <= px(height - 14.0));
+            let name = window.debug_bounds("delete-confirmation-name");
+            assert_eq!(name.is_some(), has_name);
+            if let Some(name) = name {
+                assert_eq!(name.left(), message.left());
+                assert!(name.right() <= px(width - 20.0));
+                assert!(
+                    name.size.height <= px(20.0),
+                    "filename should fit on one line"
+                );
+            }
+            window.dispatch_action(super::super::dialog::DialogFocusSecondary);
+            window.read_entity(&dialog, |dialog, _| assert_eq!(dialog.focused_choice, 1));
+            window.dispatch_action(super::super::dialog::DialogFocusPrimary);
+            window.read_entity(&dialog, |dialog, _| assert_eq!(dialog.focused_choice, 0));
+            match index {
+                0 => {
+                    let no_center = no.center();
+                    window.simulate_mouse_down(
+                        no_center,
+                        MouseButton::Left,
+                        gpui::Modifiers::default(),
+                    );
+                    window.read_entity(&dialog, |dialog, _| assert_eq!(dialog.focused_choice, 1));
+                    window.simulate_mouse_up(
+                        no_center,
+                        MouseButton::Left,
+                        gpui::Modifiers::default(),
+                    );
+                }
+                1 => {
+                    window.dispatch_action(super::super::dialog::DialogFocusSecondary);
+                    window.dispatch_action(super::super::dialog::DialogConfirm);
+                }
+                _ => window.dispatch_action(super::super::dialog::DialogCancel),
+            }
+            window.read_entity(&dialog, |dialog, _| assert!(dialog.completed));
+        }
+        assert!(
+            heights[0] > heights[1],
+            "single-item details require more height"
+        );
+        assert!(heights[2] > heights[1], "wrapped prompt expands the dialog");
+        assert_eq!(std::fs::read(payload).unwrap(), b"deleted");
+        cx.read_entity(&explorer, |view, _| assert!(view.trash_operation.is_none()));
+    }
+
     #[test]
     fn bin_defaults_and_preferences_preserve_ordinary_folder_settings() {
         let temp = TempDir::new();
@@ -1074,7 +1357,14 @@ mod tests {
         }));
         let cancel = Arc::new(AtomicBool::new(false));
         let kinds = [
-            (DialogKind::Purge(vec![item.id.clone()]), "trash-cancel"),
+            (
+                DialogKind::Purge(PurgeConfirmation::from_item(
+                    vec![item.id.clone()],
+                    Some(&item),
+                    crate::settings::DEFAULT_DATE_FORMAT,
+                )),
+                "trash-cancel",
+            ),
             (
                 DialogKind::Conflict(RecoveryRequest {
                     ids: vec![item.id.clone()],
@@ -1093,7 +1383,8 @@ mod tests {
             ),
         ];
         for (kind, action) in kinds {
-            let height = cx.update(|cx| dialog_height(&kind, cx));
+            let (width, height) = cx.update(|cx| dialog_size(&kind, cx));
+            let is_purge = matches!(kind, DialogKind::Purge(_));
             let is_properties = matches!(kind, DialogKind::Properties(_));
             let is_progress = matches!(kind, DialogKind::Progress(_, _));
             if is_properties {
@@ -1113,16 +1404,25 @@ mod tests {
                     poll: None,
                 }
             });
-            window.simulate_resize(size(px(DIALOG_WIDTH), px(height)));
+            window.simulate_resize(size(px(width), px(height)));
             window.run_until_parked();
             let bounds = window.debug_bounds(action).unwrap();
-            assert_eq!(bounds.size.height, px(DIALOG_BUTTON_HEIGHT));
-            assert!(
-                (bounds.bottom() - px(height - DIALOG_PADDING)).abs() <= px(1.0),
-                "{action}: button bottom {:?}, expected {}",
-                bounds.bottom(),
-                height - DIALOG_PADDING
-            );
+            if is_purge {
+                let yes = window.debug_bounds("trash-confirm-delete").unwrap();
+                assert_eq!(bounds.size, size(px(84.0), px(28.0)));
+                assert_eq!(yes.top(), bounds.top());
+                assert_eq!(bounds.left() - yes.right(), px(12.0));
+                assert_eq!(bounds.right(), px(width - 20.0));
+                assert!(bounds.bottom() <= px(height - 14.0));
+            } else {
+                assert_eq!(bounds.size.height, px(DIALOG_BUTTON_HEIGHT));
+                assert!(
+                    (bounds.bottom() - px(height - DIALOG_PADDING)).abs() <= px(1.0),
+                    "{action}: button bottom {:?}, expected {}",
+                    bounds.bottom(),
+                    height - DIALOG_PADDING
+                );
+            }
             if is_progress {
                 let track = window.debug_bounds("trash-progress-track").unwrap();
                 let fill = window.debug_bounds("trash-progress-fill").unwrap();
@@ -1184,7 +1484,7 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn bin_delete_confirmation_captures_ids_and_defaults_to_cancel(cx: &mut gpui::TestAppContext) {
+    fn bin_delete_confirmation_captures_ids_and_defaults_to_yes(cx: &mut gpui::TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (view, cx) = cx.add_window_view(|_, cx| bin_view(Some(cx.focus_handle())));
         cx.update(|_, app| {
@@ -1199,11 +1499,11 @@ mod tests {
             .update(cx, |entity, window, cx| {
                 let entity = entity.downcast::<TrashDialog>().unwrap();
                 entity.update(cx, |dialog, cx| {
-                    assert_eq!(dialog.focused_choice, 1);
-                    let DialogKind::Purge(ids) = &dialog.kind else {
+                    assert_eq!(dialog.focused_choice, 0);
+                    let DialogKind::Purge(pending) = &dialog.kind else {
                         panic!("expected confirmation")
                     };
-                    assert_eq!(ids.len(), 1);
+                    assert_eq!(pending.ids.len(), 1);
                     dialog.close(window, cx);
                 });
             })
@@ -1263,6 +1563,12 @@ mod tests {
                 )
             })
         });
+        // Changing selection after opening must not retarget the confirmation.
+        cx.update(|_, app| {
+            view.update(app, |view, _| {
+                view.selection.selected_indices.clear();
+            });
+        });
         let handle = cx.read_entity(&view, |view, _| view.active_dialog_window.unwrap());
         handle
             .update(cx, |entity, window, cx| {
@@ -1270,11 +1576,11 @@ mod tests {
                     .downcast::<TrashDialog>()
                     .unwrap()
                     .update(cx, |dialog, cx| {
-                        let DialogKind::Purge(ids) = &dialog.kind else {
+                        let DialogKind::Purge(pending) = &dialog.kind else {
                             panic!("expected permanent deletion confirmation")
                         };
-                        assert_eq!(ids, &vec![item.id.clone()]);
-                        assert_eq!(dialog.focused_choice, 1);
+                        assert_eq!(pending.ids, vec![item.id.clone()]);
+                        assert_eq!(dialog.focused_choice, 0);
                         dialog.close(window, cx);
                     });
             })
