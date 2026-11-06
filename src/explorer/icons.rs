@@ -559,7 +559,11 @@ pub(super) fn directory_kind_icon(kind: DirectoryKind) -> AnyElement {
 }
 
 pub(super) fn directory_kind_icon_sized(kind: DirectoryKind, size: f32) -> AnyElement {
-    let image = match kind {
+    image_icon(directory_kind_image(kind), size, size)
+}
+
+fn directory_kind_image(kind: DirectoryKind) -> Arc<Image> {
+    match kind {
         DirectoryKind::Home => FOLDER_ICON.clone(),
         DirectoryKind::Desktop => DESKTOP_SIDEBAR_ICON.clone(),
         DirectoryKind::Documents => DOCUMENTS_SIDEBAR_ICON.clone(),
@@ -572,8 +576,38 @@ pub(super) fn directory_kind_icon_sized(kind: DirectoryKind, size: f32) -> AnyEl
         DirectoryKind::Drive => DRIVE_ICON.clone(),
         DirectoryKind::DriveWindows => DRIVE_WINDOWS_ICON.clone(),
         DirectoryKind::DriveWsl => WSL_GENERIC_ICON.clone(),
+    }
+}
+
+/// Shared by tab elements and their native drag bitmap.
+pub(super) fn tab_directory_image(
+    path: Option<&Path>,
+    group: Option<crate::settings::SidebarGroupKind>,
+) -> Arc<Image> {
+    use crate::settings::SidebarGroupKind;
+    if let Some(group) = group {
+        return match group {
+            SidebarGroupKind::Pinned => PINNED_GROUP_ICON.clone(),
+            SidebarGroupKind::Drives => DRIVES_GROUP_ICON.clone(),
+            SidebarGroupKind::Network => NETWORK_GROUP_ICON.clone(),
+            SidebarGroupKind::Wsl => wsl_distro_image(WslDistroKind::Generic),
+        };
+    }
+    let Some(path) = path else {
+        return FOLDER_ICON.clone();
     };
-    image_icon(image, size, size)
+    match crate::explorer::resolve_directory_kind(path) {
+        Some(DirectoryKind::DriveWsl) => {
+            wsl_distro_image(wsl_distro_kind_for_path(path).unwrap_or(WslDistroKind::Generic))
+        }
+        Some(DirectoryKind::Drive)
+            if crate::explorer::filesystem::drive_root_is_ejectable(path) =>
+        {
+            drive_disc_image_for_path(path)
+        }
+        Some(kind) => directory_kind_image(kind),
+        None => FOLDER_ICON.clone(),
+    }
 }
 
 pub(super) fn image_icon(

@@ -579,6 +579,21 @@ pub enum ExternalPathsDragResult {
     },
 }
 
+/// The physical outcome of an opaque, application-local native drag.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NativeDragResult {
+    /// The initiating button was released. Screen coordinates may be unavailable
+    /// on compositors which control window placement.
+    Released {
+        /// Final pointer location in global logical screen coordinates, if known.
+        position: Option<Point<Pixels>>,
+    },
+    /// Escape, source destruction, or an ambiguous compositor cancellation.
+    Cancelled,
+    /// The platform could not start the drag.
+    Failed,
+}
+
 impl ExternalPathsDragResult {
     /// Construct a completed native copy result.
     pub fn copy() -> Self {
@@ -632,6 +647,9 @@ pub struct ExternalPaths {
     paths: SmallVec<[PathBuf; 2]>,
     operations: ExternalPathDragOperations,
     internal_token: Option<String>,
+    pub(crate) native_image: Option<std::sync::Arc<crate::NativeDragImage>>,
+    pub(crate) source_window: Option<crate::WindowId>,
+    native_completion: std::sync::Arc<parking_lot::Mutex<Option<NativeDragResult>>>,
 }
 
 impl ExternalPaths {
@@ -645,6 +663,9 @@ impl ExternalPaths {
                 .collect(),
             operations: ExternalPathDragOperations::default(),
             internal_token: None,
+            native_image: None,
+            source_window: None,
+            native_completion: Default::default(),
         }
     }
 
@@ -661,6 +682,9 @@ impl ExternalPaths {
                 .collect(),
             operations,
             internal_token: None,
+            native_image: None,
+            source_window: None,
+            native_completion: Default::default(),
         }
     }
 
@@ -674,14 +698,28 @@ impl ExternalPaths {
             paths: SmallVec::new(),
             operations: ExternalPathDragOperations::MOVE,
             internal_token: Some(token),
+            native_image: None,
+            source_window: None,
+            native_completion: Default::default(),
         }
     }
     pub(crate) fn internal_token(&self) -> Option<&str> {
         self.internal_token.as_deref()
     }
+
+    pub(crate) fn finish_native_drag(&self, result: NativeDragResult) {
+        *self.native_completion.lock() = Some(result);
+    }
+
+    pub(crate) fn take_native_drag_result(&self) -> NativeDragResult {
+        self.native_completion
+            .lock()
+            .take()
+            .unwrap_or(NativeDragResult::Cancelled)
+    }
     #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn from_internal_uri_list(value: &str) -> Option<Self> {
-        let token = value.trim().strip_prefix("# gpui-internal-drag:")?;
+    pub(crate) fn from_internal_token_payload(value: &str) -> Option<Self> {
+        let token = value.trim();
         uuid::Uuid::parse_str(token).ok()?;
         Some(Self::from_internal_token(token.to_owned()))
     }
@@ -699,10 +737,6 @@ impl ExternalPaths {
 
     /// Decode URI lists or plain URL text. Prose is never treated as file paths.
     pub fn from_uri_list(value: &str) -> Option<Self> {
-        #[cfg(any(target_os = "linux", test))]
-        if let Some(internal) = Self::from_internal_uri_list(value) {
-            return Some(internal);
-        }
         let mut paths = Vec::new();
         let mut urls = Vec::new();
         for line in value
@@ -766,8 +800,8 @@ impl ExternalPaths {
 
     /// Encode the paths and URLs as a freedesktop-compatible `text/uri-list` payload.
     pub fn to_uri_list(&self) -> String {
-        if let Some(token) = &self.internal_token {
-            return format!("# gpui-internal-drag:{token}\r\n");
+        if self.internal_token.is_some() {
+            return String::new();
         }
         let mut value = uri_list_for_paths(&self.paths);
         for url in &self.urls {
@@ -797,7 +831,9 @@ fn uri_list_for_paths(paths: &[PathBuf]) -> String {
 }
 
 fn file_uri_for_path(path: &Path) -> Option<String> {
-    http_client::Url::from_file_path(path).ok().map(|uri| uri.to_string())
+    http_client::Url::from_file_path(path)
+        .ok()
+        .map(|uri| uri.to_string())
 }
 
 /// A file drop event from the platform, generated when files are dragged and dropped onto the window.
@@ -968,11 +1004,42 @@ mod test {
     fn internal_drag_transport_offers_no_file_urls_or_paths() {
         let paths = ExternalPaths::internal();
         assert!(paths.paths().is_empty());
-        assert!(!paths.to_uri_list().contains("file:"));
-        let decoded = ExternalPaths::from_internal_uri_list(&paths.to_uri_list()).unwrap();
+        assert!(paths.to_uri_list().is_empty());
+        let decoded =
+            ExternalPaths::from_internal_token_payload(paths.internal_token().unwrap()).unwrap();
         assert_eq!(decoded.internal_token(), paths.internal_token());
         assert!(decoded.paths().is_empty());
-        assert!(ExternalPaths::from_internal_uri_list("# gpui-internal-drag:../../live").is_none());
+        assert!(ExternalPaths::from_internal_token_payload("../../live").is_none());
+    }
+
+    #[test]
+    fn native_drag_outcome_is_shared_with_platform_and_consumed_once() {
+        let paths = ExternalPaths::internal();
+        let platform = paths.clone();
+        assert_eq!(
+            paths.take_native_drag_result(),
+            super::NativeDragResult::Cancelled
+        );
+        platform.finish_native_drag(super::NativeDragResult::Released { position: None });
+        assert_eq!(
+            paths.take_native_drag_result(),
+            super::NativeDragResult::Released { position: None }
+        );
+        assert_eq!(
+            paths.take_native_drag_result(),
+            super::NativeDragResult::Cancelled
+        );
+        platform.finish_native_drag(super::NativeDragResult::Failed);
+        assert_eq!(
+            paths.take_native_drag_result(),
+            super::NativeDragResult::Failed
+        );
+    }
+
+    #[test]
+    fn ordinary_uri_drops_do_not_decode_private_drag_tokens() {
+        let paths = ExternalPaths::internal();
+        assert!(ExternalPaths::from_uri_list(&paths.to_uri_list()).is_none());
     }
     #[test]
     fn external_urls_decode_lists_and_browser_titles_without_becoming_paths() {

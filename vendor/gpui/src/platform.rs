@@ -40,9 +40,9 @@ use crate::{
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, ExternalPaths,
     ExternalPathsDragStartResult, Font, FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId,
     GpuSpecs, ImageSource, Keymap, LineLayout, Pixels, PlatformInput, Point, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
-    ShapedRun, SharedString, Size, SvgRenderer, SvgSize, SystemWindowTab, Task, TaskLabel, Window,
-    WindowControlArea, hash, point, px, size,
+    RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString,
+    Size, SvgRenderer, SvgSize, SystemWindowTab, Task, TaskLabel, Window, WindowControlArea, hash,
+    point, px, size,
 };
 use anyhow::Result;
 use async_task::Runnable;
@@ -290,6 +290,12 @@ pub trait PlatformDisplay: Send + Sync + Debug {
 
     /// Get the bounds for this display
     fn bounds(&self) -> Bounds<Pixels>;
+
+    /// Bounds in the screen coordinate system used by native drag completion.
+    /// macOS window placement uses display-local bounds instead.
+    fn global_bounds(&self) -> Bounds<Pixels> {
+        self.bounds()
+    }
 
     /// Get the default bounds for this display to place a window
     fn default_bounds(&self) -> Bounds<Pixels> {
@@ -565,6 +571,9 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn start_external_paths_drag(&self, _paths: ExternalPaths) -> ExternalPathsDragStartResult {
         ExternalPathsDragStartResult::Failed
     }
+
+    /// Cancel a native drag owned by this window, if any.
+    fn cancel_external_paths_drag(&self) {}
 
     #[cfg(any(test, feature = "test-support"))]
     fn as_test(&mut self) -> Option<&mut TestWindow> {
@@ -982,8 +991,7 @@ impl PlatformInputHandler {
     pub fn selected_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
         let selection = self.handler.selected_text_range(true, window, cx)?;
         let head = selection.head();
-        self.handler
-            .bounds_for_range(head..head, window, cx)
+        self.handler.bounds_for_range(head..head, window, cx)
     }
 
     #[allow(unused)]
@@ -1845,9 +1853,8 @@ mod clipboard_file_tests {
     fn uri_list_round_trips_local_paths() {
         let path = std::env::temp_dir().join("gpui clipboard file.txt");
         let files = ClipboardFiles::new(ClipboardFileOperation::Copy, vec![path.clone()]);
-        let parsed =
-            ClipboardFiles::from_uri_list(&files.uri_list(), ClipboardFileOperation::Copy)
-                .expect("local uri list");
+        let parsed = ClipboardFiles::from_uri_list(&files.uri_list(), ClipboardFileOperation::Copy)
+            .expect("local uri list");
 
         assert_eq!(parsed.operation, ClipboardFileOperation::Copy);
         assert_eq!(parsed.paths, vec![path]);
@@ -1861,7 +1868,10 @@ mod clipboard_file_tests {
             .to_string();
 
         assert_eq!(
-            ClipboardFiles::from_uri_list("https://example.com/file.txt", ClipboardFileOperation::Copy),
+            ClipboardFiles::from_uri_list(
+                "https://example.com/file.txt",
+                ClipboardFileOperation::Copy
+            ),
             None
         );
         assert_eq!(
@@ -2064,7 +2074,10 @@ impl Image {
             ImageFormat::Bmp => frames_for_image(&self.bytes, image::ImageFormat::Bmp)?,
             ImageFormat::Tiff => frames_for_image(&self.bytes, image::ImageFormat::Tiff)?,
             ImageFormat::Svg => {
-                let pixmap = svg_renderer.render_pixmap(&self.bytes, SvgSize::ScaleFactor(crate::SMOOTH_SVG_SCALE_FACTOR))?;
+                let pixmap = svg_renderer.render_pixmap(
+                    &self.bytes,
+                    SvgSize::ScaleFactor(crate::SMOOTH_SVG_SCALE_FACTOR),
+                )?;
 
                 let mut buffer =
                     image::ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.take())

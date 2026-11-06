@@ -10,7 +10,7 @@ use collections::VecDeque;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
@@ -23,6 +23,7 @@ use windows::Win32::{
 
 /// TestPlatform implements the Platform trait for use in tests.
 pub(crate) struct TestPlatform {
+    pub(crate) fail_next_window_open: Cell<bool>,
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
 
@@ -105,6 +106,7 @@ impl TestPlatform {
         let text_system = Arc::new(NoopTextSystem);
 
         Rc::new_cyclic(|weak| TestPlatform {
+            fail_next_window_open: Cell::new(false),
             background_executor: executor,
             foreground_executor,
             prompts: Default::default(),
@@ -310,6 +312,9 @@ impl Platform for TestPlatform {
         handle: AnyWindowHandle,
         params: WindowParams,
     ) -> anyhow::Result<Box<dyn crate::PlatformWindow>> {
+        if self.fail_next_window_open.replace(false) {
+            anyhow::bail!("simulated window creation failure");
+        }
         let window = TestWindow::new(
             handle,
             params,

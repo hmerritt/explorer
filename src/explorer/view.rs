@@ -195,6 +195,8 @@ pub struct ExplorerView {
     pub(super) active_remote_delete: Option<RemoteDeleteState>,
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
     pub(super) dialog_placement: super::dialog_placement::DialogPlacement,
+    pub(super) hosted_window: Option<AnyWindowHandle>,
+    pub(super) tab_bindings: Vec<Subscription>,
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
     pub(super) active_address_bar: Option<AddressBarState>,
@@ -462,6 +464,7 @@ impl ExplorerView {
         let mut view =
             Self::new_unloaded_inner_with_settings(initial_path, Some(focus_handle), &settings);
         if let Some(window) = parent_window {
+            view.hosted_window = Some(window.window_handle());
             view.dialog_placement =
                 super::dialog_placement::DialogPlacement::from_window(window, cx);
         }
@@ -679,6 +682,8 @@ impl ExplorerView {
             active_remote_delete: None,
             active_dialog_window: None,
             dialog_placement: Default::default(),
+            hosted_window: None,
+            tab_bindings: Vec::new(),
             active_rename: None,
             rename_focus_out: None,
             active_address_bar: None,
@@ -1369,7 +1374,8 @@ impl ExplorerView {
             format_args!("reload.async_start path={path:?} generation={generation}"),
         );
 
-        let task = cx.spawn_in(window, async move |this, cx| {
+        self.hosted_window = Some(window.window_handle());
+        let task = cx.spawn(async move |this, cx| {
             let load_started = Instant::now();
             let result = cx
                 .background_executor()
@@ -1393,12 +1399,26 @@ impl ExplorerView {
                 ),
             );
 
-            let _ = cx.update(|window, cx| {
-                let _ = this.update(cx, |explorer, cx| {
-                    if explorer.apply_directory_load_result(state, result, Some(window), cx) {
-                        cx.notify();
-                    }
-                });
+            let _ = cx.update(|cx| {
+                // Resolve ownership when the load completes: the live view may
+                // have moved to another window while the filesystem was loading.
+                let host = this.upgrade().and_then(|view| view.read(cx).hosted_window);
+                if let Some(host) = host {
+                    let _ = host.update(cx, |_, window, cx| {
+                        let _ = this.update(cx, |explorer, cx| {
+                            if explorer.apply_directory_load_result(state, result, Some(window), cx)
+                            {
+                                cx.notify();
+                            }
+                        });
+                    });
+                } else {
+                    let _ = this.update(cx, |explorer, cx| {
+                        if explorer.apply_directory_load_result(state, result, None, cx) {
+                            cx.notify();
+                        }
+                    });
+                }
             });
         });
         self.directory_load_task = Some(task);

@@ -1,8 +1,10 @@
+const INTERNAL_DRAG_MIME_TYPE: &str = "application/x-gpui-internal-drag";
+
 use std::{
     cell::{RefCell, RefMut},
     hash::Hash,
     io::Write,
-    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
     path::PathBuf,
     rc::{Rc, Weak},
     time::{Duration, Instant},
@@ -255,6 +257,81 @@ pub struct ExternalPathsSourceDrag {
     paths: ExternalPaths,
     drop_performed: bool,
     selected_action: Option<DndAction>,
+    _icon: Option<NativeDragIcon>,
+}
+
+struct NativeDragIcon {
+    surface: wl_surface::WlSurface,
+    buffer: wl_buffer::WlBuffer,
+}
+
+impl Drop for NativeDragIcon {
+    fn drop(&mut self) {
+        self.surface.destroy();
+        self.buffer.destroy();
+    }
+}
+
+impl NativeDragIcon {
+    fn new(image: &crate::NativeDragImage, globals: &Globals) -> anyhow::Result<Self> {
+        // Integer buffer scaling works without viewporter, including fractional
+        // source-window scales. The compositor owns positioning the drag icon.
+        let scale = image.scale_factor.ceil() as i32;
+        let width =
+            (image.pixels.width() as f32 / image.scale_factor * scale as f32).round() as u32;
+        let height =
+            (image.pixels.height() as f32 / image.scale_factor * scale as f32).round() as u32;
+        let pixels = image::imageops::resize(
+            &image.pixels,
+            width,
+            height,
+            image::imageops::FilterType::Lanczos3,
+        );
+        let scaled = crate::NativeDragImage::new(pixels, scale as f32, image.cursor_offset);
+        let bytes = scaled.premultiplied_bgra();
+        let name = std::ffi::CString::new(format!("/gpui-drag-{}", uuid::Uuid::new_v4()))?;
+        let fd = unsafe {
+            libc::shm_open(
+                name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        unsafe {
+            libc::shm_unlink(name.as_ptr());
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        file.write_all(&bytes)?;
+        let pool = globals
+            .shm
+            .create_pool(file.as_fd(), bytes.len() as i32, &globals.qh, ());
+        let buffer = pool.create_buffer(
+            0,
+            width as i32,
+            height as i32,
+            width as i32 * 4,
+            wl_shm::Format::Argb8888,
+            &globals.qh,
+            (),
+        );
+        pool.destroy();
+        let surface = globals.compositor.create_surface(&globals.qh, ());
+        surface.set_buffer_scale(scale);
+        let x = -image.cursor_offset.x.0.round() as i32;
+        let y = -image.cursor_offset.y.0.round() as i32;
+        // Since wl_surface v5 attachment offsets must be supplied separately.
+        if surface.version() >= 5 {
+            surface.offset(x, y);
+            surface.attach(Some(&buffer), 0, 0);
+        } else {
+            surface.attach(Some(&buffer), x, y);
+        }
+        surface.damage(0, 0, i32::MAX, i32::MAX);
+        Ok(Self { surface, buffer })
+    }
 }
 
 pub struct ClickState {
@@ -306,6 +383,44 @@ fn wayland_drag_result(
     }
 }
 
+fn wayland_native_drag_result(drop_performed: bool) -> crate::NativeDragResult {
+    if drop_performed {
+        crate::NativeDragResult::Released { position: None }
+    } else {
+        crate::NativeDragResult::Cancelled
+    }
+}
+
+#[cfg(test)]
+mod native_drag_tests {
+    use super::*;
+
+    #[test]
+    fn wayland_cancellation_requires_drop_performed_to_count_as_release() {
+        assert_eq!(
+            wayland_native_drag_result(false),
+            crate::NativeDragResult::Cancelled
+        );
+        assert_eq!(
+            wayland_native_drag_result(true),
+            crate::NativeDragResult::Released { position: None }
+        );
+        // File completion continues to depend on the negotiated action.
+        assert_eq!(
+            wayland_drag_result(false, Some(DndAction::Move)),
+            ExternalPathsDragResult::Cancelled
+        );
+        assert_eq!(
+            wayland_drag_result(true, Some(DndAction::Copy)),
+            ExternalPathsDragResult::copy()
+        );
+        assert_eq!(
+            wayland_drag_result(true, None),
+            ExternalPathsDragResult::Cancelled
+        );
+    }
+}
+
 fn send_external_paths_uri_list(uri_list: String, fd: OwnedFd) {
     let mut file = std::fs::File::from(fd);
     if let Err(error) = file.write_all(uri_list.as_bytes()) {
@@ -352,7 +467,27 @@ impl WaylandClientStatePtr {
         }
 
         let data_source = data_device_manager.create_data_source(&state.globals.qh, ());
-        data_source.offer(FILE_LIST_MIME_TYPE.to_string());
+        let icon = match paths
+            .native_image
+            .as_ref()
+            .map(|image| NativeDragIcon::new(image, &state.globals))
+            .transpose()
+        {
+            Ok(icon) => icon,
+            Err(error) => {
+                data_source.destroy();
+                log::error!("unable to create Wayland drag image: {error}");
+                return ExternalPathsDragStartResult::Failed;
+            }
+        };
+        data_source.offer(
+            if paths.internal_token().is_some() {
+                INTERNAL_DRAG_MIME_TYPE
+            } else {
+                FILE_LIST_MIME_TYPE
+            }
+            .to_string(),
+        );
         if data_source.version() >= 3 {
             let actions = wayland_dnd_actions(paths.operations());
             data_source.set_actions(actions);
@@ -361,15 +496,19 @@ impl WaylandClientStatePtr {
         data_device.start_drag(
             Some(&data_source),
             &window.surface(),
-            None::<&wl_surface::WlSurface>,
+            icon.as_ref().map(|icon| &icon.surface),
             serial,
         );
+        if let Some(icon) = &icon {
+            icon.surface.commit();
+        }
         state.drag.source = Some(ExternalPathsSourceDrag {
             data_source,
             window: window.clone(),
             paths,
             drop_performed: false,
             selected_action: None,
+            _icon: icon,
         });
         ExternalPathsDragStartResult::Pending
     }
@@ -377,6 +516,21 @@ impl WaylandClientStatePtr {
     pub fn set_pending_activation(&self, window: ObjectId) {
         self.0.upgrade().unwrap().borrow_mut().pending_activation =
             Some(PendingActivation::Window(window));
+    }
+
+    pub(crate) fn cancel_external_paths_drag(&self, surface: &wl_surface::WlSurface) {
+        let client = self.get_client();
+        let mut state = client.borrow_mut();
+        if state
+            .drag
+            .source
+            .as_ref()
+            .is_some_and(|source| source.window.surface().id() == surface.id())
+        {
+            if let Some(source) = state.drag.source.take() {
+                source.data_source.destroy();
+            }
+        }
     }
 
     pub fn enable_ime(&self) {
@@ -2019,6 +2173,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                         .find(|offer| offer.inner.id() == data_offer.id())
                         .and_then(|offer| {
                             [
+                                INTERNAL_DRAG_MIME_TYPE,
                                 "text/x-moz-url",
                                 FILE_LIST_MIME_TYPE,
                                 "text/plain;charset=utf-8",
@@ -2066,7 +2221,9 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 }
                             };
 
-                            let payload = if mime_type == "text/x-moz-url" {
+                            let payload = if mime_type == INTERNAL_DRAG_MIME_TYPE {
+                                crate::ExternalPaths::from_internal_token_payload(&file_list)
+                            } else if mime_type == "text/x-moz-url" {
                                 crate::ExternalPaths::from_browser_url_list(
                                     file_list.trim_end_matches('\0'),
                                 )
@@ -2165,7 +2322,7 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandClientStatePtr {
 
         if let wl_data_offer::Event::Offer { mime_type } = event {
             // Drag and drop
-            if mime_type == FILE_LIST_MIME_TYPE {
+            if mime_type == FILE_LIST_MIME_TYPE || mime_type == INTERNAL_DRAG_MIME_TYPE {
                 let serial = state.serial_tracker.get(SerialKind::DataDevice);
                 let mime_type = mime_type.clone();
                 data_offer.accept(serial, Some(mime_type));
@@ -2203,10 +2360,14 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandClientStatePtr {
                     .as_ref()
                     .is_some_and(|drag| drag.data_source.id() == data_source.id())
                 {
-                    if mime_type == FILE_LIST_MIME_TYPE
-                        && let Some(drag) = state.drag.source.as_ref()
-                    {
-                        send_external_paths_uri_list(drag.paths.to_uri_list(), fd);
+                    if let Some(drag) = state.drag.source.as_ref() {
+                        if let Some(token) = drag.paths.internal_token() {
+                            if mime_type == INTERNAL_DRAG_MIME_TYPE {
+                                send_external_paths_uri_list(token.to_owned(), fd);
+                            }
+                        } else if mime_type == FILE_LIST_MIME_TYPE {
+                            send_external_paths_uri_list(drag.paths.to_uri_list(), fd);
+                        }
                     }
                 } else {
                     state.clipboard.send(mime_type, fd);
@@ -2222,9 +2383,12 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandClientStatePtr {
                     let drag = state.drag.source.take();
                     drop(state);
                     if let Some(drag) = drag {
-                        drag.window.handle_input(PlatformInput::ExternalPathsDragFinished(
-                            ExternalPathsDragResult::Cancelled,
-                        ));
+                        drag.paths
+                            .finish_native_drag(wayland_native_drag_result(drag.drop_performed));
+                        drag.window
+                            .handle_input(PlatformInput::ExternalPathsDragFinished(
+                                ExternalPathsDragResult::Cancelled,
+                            ));
                     }
                 }
                 data_source.destroy();
@@ -2234,6 +2398,8 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandClientStatePtr {
                     && drag.data_source.id() == data_source.id()
                 {
                     drag.drop_performed = true;
+                    drag.paths
+                        .finish_native_drag(crate::NativeDragResult::Released { position: None });
                 }
             }
             wl_data_source::Event::DndFinished => {
@@ -2246,6 +2412,8 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandClientStatePtr {
                     let drag = state.drag.source.take();
                     drop(state);
                     if let Some(drag) = drag {
+                        drag.paths
+                            .finish_native_drag(wayland_native_drag_result(drag.drop_performed));
                         let result = wayland_drag_result(drag.drop_performed, drag.selected_action);
                         drag.window
                             .handle_input(PlatformInput::ExternalPathsDragFinished(result));

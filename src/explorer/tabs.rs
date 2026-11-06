@@ -19,9 +19,6 @@ use crate::explorer::{
     SelectPreviousTab, SelectTabByIndex, SplitPaneDown, SplitPaneLeft, SplitPaneRight, SplitPaneUp,
     constants::{NAV_BUTTON_ACTIVE_OPACITY, NAV_BUTTON_HOVER_BG},
     drag_drop::{DraggedEntries, DropDestination},
-    icons::{
-        drive_wsl_icon, drives_group_icon, folder_icon, network_group_icon, pinned_group_icon,
-    },
     remote_ui::{
         TransferControlHandler, TransferJobId, TransferPanelParts, TransferRevealHandler,
         TransferRevealSide, render_transfer_panel,
@@ -34,6 +31,12 @@ use crate::window_chrome::{
     MAC_TRAFFIC_LIGHT_PADDING, TITLEBAR_HEIGHT, WindowDragState, render_platform_window_frame,
     render_titlebar_drag_region, render_window_controls,
 };
+
+#[path = "tab_drag_image.rs"]
+mod native_preview;
+#[path = "tab_transfer.rs"]
+mod transfer;
+pub(crate) use transfer::TabTransfer;
 
 const TAB_BAR_HEIGHT: f32 = TITLEBAR_HEIGHT;
 const CLOSED_TAB_HISTORY_LIMIT: usize = 15;
@@ -502,6 +505,7 @@ struct ExplorerPane {
     view: Entity<ExplorerView>,
 }
 
+#[derive(Clone)]
 struct ClosedPane {
     id: PaneId,
     path: PathBuf,
@@ -519,6 +523,7 @@ impl ClosedPane {
     }
 }
 
+#[derive(Clone)]
 struct ClosedSplit {
     id: u64,
     axis: SplitAxis,
@@ -527,6 +532,7 @@ struct ClosedSplit {
     sibling: PaneNode,
 }
 
+#[derive(Clone)]
 enum ClosedTabEntry {
     Tab {
         id: TabId,
@@ -611,6 +617,8 @@ struct TabContextMenu {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TabDrag {
+    session: Rc<()>,
+    source: Option<gpui::WeakEntity<ExplorerTabs>>,
     id: TabId,
     label: SharedString,
     path: PathBuf,
@@ -641,6 +649,7 @@ pub struct ExplorerTabs {
     split_resize_drag: Option<SplitResizeDrag>,
     tab_context_menu: Option<TabContextMenu>,
     tab_scroll_handle: ScrollHandle,
+    tab_insert_target: Option<(TabId, bool)>,
     should_move_window: bool,
     transfer_panel_collapsed: bool,
 }
@@ -716,6 +725,7 @@ impl ExplorerTabs {
             split_resize_drag: None,
             tab_context_menu: None,
             tab_scroll_handle: ScrollHandle::new(),
+            tab_insert_target: None,
             should_move_window: false,
             transfer_panel_collapsed: false,
         }
@@ -749,6 +759,7 @@ impl ExplorerTabs {
             split_resize_drag: None,
             tab_context_menu: None,
             tab_scroll_handle: ScrollHandle::new(),
+            tab_insert_target: None,
             should_move_window: false,
             transfer_panel_collapsed: false,
         }
@@ -890,6 +901,9 @@ impl ExplorerTabs {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) -> bool {
+        if dragged_value.is::<TabDrag>() {
+            return true;
+        }
         let Some(view) = self.tab_view(id) else {
             return false;
         };
@@ -1229,6 +1243,16 @@ impl ExplorerTabs {
         let inserted_id = target.panes.last().expect("inserted pane").id;
         target.activate_pane(inserted_id);
         self.active_tab = target.id;
+        for entry in &mut self.closed_tabs {
+            if let ClosedTabEntry::Pane {
+                owner, tab_index, ..
+            } = entry
+                && *owner == source_tab
+            {
+                *owner = self.active_tab;
+                *tab_index = target_index;
+            }
+        }
         self.dock_target = None;
         self.clear_obsolete_layout_state();
         self.scroll_active_tab_into_view();
@@ -1761,9 +1785,39 @@ impl ExplorerTabs {
             })
             .collect::<Vec<_>>();
         tab_children.push(new_tab_button(cx));
+        tab_children.push(
+            render_titlebar_drag_region("explorer-tab-strip-space", decorations, cx)
+                .min_w(px(0.0))
+                .on_drop(cx.listener(|this, drag: &TabDrag, window, cx| {
+                    this.drop_tab_on_strip(drag, window, cx)
+                }))
+                .into_any_element(),
+        );
 
         div()
             .id("explorer-tab-bar")
+            .on_drag_move::<TabDrag>({
+                let entity = cx.entity();
+                move |event, _, cx| {
+                    let drag = event.drag(cx).clone();
+                    entity.update(cx, |tabs, cx| {
+                        let next = if event.bounds.contains(&event.event.position)
+                            && !tabs.owns_tab_drag(&drag, cx)
+                        {
+                            tabs.tabs.last().map(|tab| (tab.id, false))
+                        } else {
+                            None
+                        };
+                        if tabs.tab_insert_target != next {
+                            tabs.tab_insert_target = next;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .on_drop(cx.listener(|this, drag: &TabDrag, window, cx| {
+                this.drop_tab_on_strip(drag, window, cx)
+            }))
             .flex()
             .flex_row()
             .items_end()
@@ -1792,6 +1846,7 @@ impl ExplorerTabs {
                     .flex_row()
                     .items_end()
                     .w(px(tab_scroll_width))
+                    .flex_grow()
                     .flex_shrink()
                     .min_w(px(0.0))
                     .h_full()
@@ -1809,11 +1864,12 @@ impl ExplorerTabs {
                             .children(tab_children),
                     ),
             )
-            .child(render_titlebar_drag_region(
-                "explorer-titlebar-drag-region",
-                decorations,
-                cx,
-            ))
+            .child(
+                render_titlebar_drag_region("explorer-titlebar-drag-region", decorations, cx)
+                    .on_drop(cx.listener(|this, drag: &TabDrag, window, cx| {
+                        this.drop_tab_on_strip(drag, window, cx)
+                    })),
+            )
             .children(render_window_controls(window))
             .into_any_element()
     }
@@ -1903,6 +1959,22 @@ impl ExplorerTabs {
                     }
                 }),
             )
+            .when_some(
+                self.tab_insert_target
+                    .filter(|(target, _)| *target == tab_id),
+                |this, (_, before)| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(2.0))
+                            .bg(rgb(SPLIT_FOCUS_BLUE))
+                            .when(before, |this| this.left_0())
+                            .when(!before, |this| this.right_0()),
+                    )
+                },
+            )
             .child(tab_inner_contents(
                 label.clone(),
                 Some(&path),
@@ -1960,34 +2032,67 @@ impl ExplorerTabs {
                 this.drop_external_paths_on_tab(tab_id, paths, window, cx);
                 cx.stop_propagation();
                 cx.notify();
+            }))
+            .on_drop(cx.listener(|this, drag: &TabDrag, window, cx| {
+                this.drop_tab_on_strip(drag, window, cx);
             }));
 
         if can_drag {
             let drag_label = label.clone();
             let drag_path = path.clone();
+            let completion_entity = cx.weak_entity();
+            let session = Rc::new(());
+            let completion_session = session.clone();
             rendered_tab = rendered_tab
                 .drag_threshold(px(TAB_DRAG_THRESHOLD))
-                .on_drag(
+                .on_native_drag(
                     TabDrag {
+                        session,
+                        source: Some(cx.weak_entity()),
                         id: tab_id,
                         label: drag_label,
                         path: drag_path,
                         is_active,
                         dockable: pane_count == 1,
                     },
-                    move |drag, _, _, cx| {
+                    Box::new(move |result, cx| {
+                        // Native loops may invoke completion inside a window update.
+                        cx.defer(move |cx| {
+                            transfer::finish_drag(completion_entity, completion_session, result, cx)
+                        });
+                    }),
+                    move |drag, offset, window, cx| {
                         let font = crate::settings::current_app_font(cx);
+                        let image = native_preview::tab_drag_image(
+                            drag.label.clone(),
+                            &drag.path,
+                            sidebar_group,
+                            drag.is_active,
+                            pane_count,
+                            font.clone(),
+                            offset,
+                            window,
+                        );
                         let _ = entity.update(cx, |this, cx| {
-                            this.start_tab_drag(drag.id);
+                            this.begin_native_tab_drag(
+                                drag.id,
+                                drag.session.clone(),
+                                offset,
+                                window,
+                                cx,
+                            );
                             cx.notify();
                         });
-                        cx.new(|_| TabDragPreview {
-                            label: drag.label.clone(),
-                            path: drag.path.clone(),
-                            is_active: drag.is_active,
-                            pane_count,
-                            font,
-                        })
+                        (
+                            cx.new(|_| TabDragPreview {
+                                label: drag.label.clone(),
+                                path: drag.path.clone(),
+                                is_active: drag.is_active,
+                                pane_count,
+                                font,
+                            }),
+                            image,
+                        )
                     },
                 )
                 .on_drag_move::<TabDrag>({
@@ -2005,11 +2110,14 @@ impl ExplorerTabs {
                         }
 
                         let before = cursor_x < left + (width / 2.0);
-                        let dragged_id = event.drag(cx).id;
-
+                        let drag = event.drag(cx).clone();
                         let _ = entity.update(cx, |this, cx| {
-                            if this.reorder_dragged_tab(dragged_id, tab_id, before) {
-                                cx.notify();
+                            if this.owns_tab_drag(&drag, cx) {
+                                if this.reorder_dragged_tab(drag.id, tab_id, before) {
+                                    cx.notify();
+                                }
+                            } else if event.bounds.contains(&event.event.position) {
+                                this.update_tab_insertion(&drag, tab_id, before, cx);
                             }
                         });
                     }
@@ -2039,8 +2147,10 @@ impl ExplorerTabs {
         }
 
         let target = self.tabs.iter().find(|tab| tab.id == workspace_tab);
-        let ordinary_drop = dragged.id != workspace_tab && target.is_some();
-        let self_drop = dragged.id == workspace_tab
+        let cross_window = dragged.source.is_some() && self.dragging_tab.is_none();
+        let ordinary_drop = (cross_window || dragged.id != workspace_tab) && target.is_some();
+        let self_drop = !cross_window
+            && dragged.id == workspace_tab
             && self.active_tab == workspace_tab
             && target.is_some_and(|tab| {
                 !tab.is_split() && tab.active_pane == pane && tab.layout.contains(pane)
@@ -2265,12 +2375,9 @@ impl ExplorerTabs {
                     cx.try_global::<SettingsState>()
                         .is_some_and(|settings| settings.value.tabs.highlight_focused),
                 );
-                let dock_target = self
-                    .dock_target
-                    .filter(|_| self.dragging_tab.is_some())
-                    .filter(|target| {
-                        target.workspace_tab == workspace_tab && target.pane == pane_id
-                    });
+                let dock_target = self.dock_target.filter(|target| {
+                    target.workspace_tab == workspace_tab && target.pane == pane_id
+                });
                 let entity = cx.entity();
 
                 div()
@@ -2336,7 +2443,13 @@ impl ExplorerTabs {
                             })
                         {
                             let target = target.expect("checked dock target");
-                            if dragged.id == workspace_tab {
+                            let owns_drag = this.owns_tab_drag(dragged, cx);
+                            let source_id = if owns_drag {
+                                Some(dragged.id)
+                            } else {
+                                this.receive_tab_drag(dragged, this.tabs.len(), window, cx)
+                            };
+                            if owns_drag && dragged.id == workspace_tab {
                                 this.self_dock_active_tab(
                                     workspace_tab,
                                     pane_id,
@@ -2344,9 +2457,9 @@ impl ExplorerTabs {
                                     window,
                                     cx,
                                 );
-                            } else {
+                            } else if let Some(source_id) = source_id {
                                 this.split_tab_into_pane(
-                                    dragged.id,
+                                    source_id,
                                     workspace_tab,
                                     pane_id,
                                     target.direction,
@@ -2728,9 +2841,15 @@ impl Render for ExplorerTabs {
         let transfers = self.render_transfers(cx);
         let tab_context_menu = self.render_tab_context_menu(cx);
 
+        let tab_drag_exit_entity = cx.weak_entity();
         let mut content = div()
             .font(app_font.clone())
             .key_context(split_key_context)
+            .on_drag_move::<TabDrag>(|event, window, cx| {
+                if event.bounds.contains(&event.event.position) {
+                    transfer::hover_window(window, cx);
+                }
+            })
             // Shared chrome and sibling panes are outside a pane's keyboard focus path.
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 if let Some(tab) = this.active_tab() {
@@ -2769,8 +2888,15 @@ impl Render for ExplorerTabs {
                     window.prevent_default();
                 }
             })
-            .on_file_drop(move |event, _, cx| {
+            .on_file_drop(move |event, window, cx| {
+                transfer::track_window(event, window, cx);
                 if let FileDropEvent::Exited = event {
+                    let _ = tab_drag_exit_entity.update(cx, |this, cx| {
+                        let insertion = this.tab_insert_target.take().is_some();
+                        if this.dock_target.take().is_some() || insertion {
+                            cx.notify();
+                        }
+                    });
                     if let Some(active_view) = &drop_exit_view {
                         active_view.update(cx, |view, cx| {
                             if view.clear_drop_indicator() {
@@ -2926,33 +3052,10 @@ fn tab_inner_contents(
 }
 
 fn tab_icon(path: Option<&Path>, sidebar_group: Option<SidebarGroupKind>) -> AnyElement {
-    if let Some(group) = sidebar_group {
-        return match group {
-            SidebarGroupKind::Pinned => pinned_group_icon(),
-            SidebarGroupKind::Drives => drives_group_icon(),
-            SidebarGroupKind::Network => network_group_icon(),
-            SidebarGroupKind::Wsl => drive_wsl_icon(),
-        };
-    }
-
-    let Some(path) = path else {
-        return folder_icon().into_any_element();
-    };
-
-    if let Some(kind) = crate::explorer::resolve_directory_kind(path) {
-        if kind == crate::explorer::DirectoryKind::DriveWsl {
-            return crate::explorer::icons::drive_wsl_icon_for_path(path);
-        }
-        if kind == crate::explorer::DirectoryKind::Drive
-            && crate::explorer::filesystem::drive_root_is_ejectable(path)
-        {
-            return crate::explorer::icons::drive_disc_icon_for_path(path);
-        }
-
-        return crate::explorer::icons::directory_kind_icon(kind);
-    }
-
-    folder_icon().into_any_element()
+    crate::explorer::icons::image_sidebar_icon(crate::explorer::icons::tab_directory_image(
+        path,
+        sidebar_group,
+    ))
 }
 
 fn close_tab_glyph_visual() -> gpui::Div {
@@ -2975,21 +3078,47 @@ fn observe_tab_view(
     window: &mut Window,
     cx: &mut Context<ExplorerTabs>,
 ) {
-    view.update(cx, |view, cx| {
+    let bounds_binding = view.update(cx, |view, cx| {
+        view.tab_bindings.clear();
+        view.hosted_window = Some(window.window_handle());
+        // Editor subscriptions also belong to a window. Rebind existing handles
+        // without restarting an edit or changing its text/selection.
+        view.rename_focus_out = view
+            .active_rename
+            .as_ref()
+            .and_then(|rename| rename.focus_handle.clone())
+            .map(|focus| {
+                cx.on_focus_out(&focus, window, |view, _, _, cx| {
+                    view.finish_active_rename_on_focus_out(cx);
+                    cx.notify();
+                })
+            });
+        view.search.focus_out = view.search.focus_handle.clone().map(|focus| {
+            cx.on_focus_out(&focus, window, |view, _, _, cx| {
+                view.finish_search_edit();
+                cx.notify();
+            })
+        });
+        if let Some(address) = &mut view.active_address_bar {
+            address.focus_out = address.focus_handle.clone().map(|focus| {
+                cx.on_focus_out(&focus, window, |view, _, _, cx| {
+                    view.cancel_address_bar_edit();
+                    cx.notify();
+                })
+            });
+        }
         view.dialog_placement = super::dialog_placement::DialogPlacement::from_window(window, cx);
         cx.observe_window_bounds(window, |view, window, cx| {
             view.dialog_placement =
                 super::dialog_placement::DialogPlacement::from_window(window, cx);
         })
-        .detach();
     });
-    cx.observe(view, |this, _, cx| {
+    let observer = cx.observe(view, |this, _, cx| {
         this.cleanup_completed_background_operations(cx);
         cx.notify();
-    })
-    .detach();
+    });
 
-    cx.subscribe_in(
+    let events = cx.subscribe_in(
         view,
         window,
         |this, source_view, event, window, cx| match event {
@@ -3015,8 +3144,10 @@ fn observe_tab_view(
                 cx.notify();
             }
         },
-    )
-    .detach();
+    );
+    view.update(cx, |view, _| {
+        view.tab_bindings = vec![bounds_binding, observer, events]
+    });
 }
 
 fn observe_settings(cx: &mut Context<ExplorerTabs>) {
@@ -3100,6 +3231,11 @@ fn close_tab_button(tab_id: TabId, cx: &mut Context<ExplorerTabs>) -> AnyElement
 fn new_tab_button(cx: &mut Context<ExplorerTabs>) -> AnyElement {
     div()
         .id("explorer-new-tab")
+        .on_drop(
+            cx.listener(|this, drag: &TabDrag, window, cx| {
+                this.drop_tab_on_strip(drag, window, cx)
+            }),
+        )
         .flex()
         .items_center()
         .justify_center()
@@ -3171,8 +3307,8 @@ fn can_close_tab(tab_count: usize) -> bool {
     tab_count > 1
 }
 
-fn can_drag_tab(tab_count: usize, is_split: bool) -> bool {
-    tab_count > 1 || (tab_count == 1 && !is_split)
+fn can_drag_tab(tab_count: usize, _is_split: bool) -> bool {
+    tab_count > 0
 }
 
 fn tab_strip_width(tab_count: usize) -> f32 {
@@ -6899,6 +7035,8 @@ mod tests {
             })
         });
         let drag = TabDrag {
+            session: Rc::new(()),
+            source: None,
             id: dragged_tab,
             label: "Dragged".into(),
             path: dragged_path,
@@ -7081,6 +7219,8 @@ mod tests {
                 })
             });
         let drag = TabDrag {
+            session: Rc::new(()),
+            source: None,
             id: dragged_tab,
             label: "Dragged".into(),
             path: dragged_path,
@@ -7778,6 +7918,8 @@ mod tests {
         cx.update(|window, app| {
             tabs.update(app, |tabs, cx| {
                 let drag = TabDrag {
+                    session: Rc::new(()),
+                    source: None,
                     id: workspace_tab,
                     label: "Current".into(),
                     path: current_path.clone(),
@@ -8402,6 +8544,8 @@ mod tests {
                 for (index, source) in sources.iter().enumerate() {
                     if index == 3 {
                         let drag = TabDrag {
+                            session: Rc::new(()),
+                            source: None,
                             id: source.0,
                             label: "Fifth pane".into(),
                             path: source.2.clone(),
@@ -9008,6 +9152,224 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_tab_drag_survives_exit_reentry_and_outside_release(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
+        let (first, source) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("source"), window, cx);
+                cx.notify();
+                (tabs.tabs[0].id, tabs.tabs[1].id)
+            })
+        });
+        cx.run_until_parked();
+        begin_test_tab_drag(&tabs, cx, 1);
+        let payload = cx
+            .native_drag_payload()
+            .expect("native session starts at the threshold");
+        assert!(payload.paths().is_empty());
+        let target = tab_drag_start_position(&tabs, cx, 0);
+        cx.simulate_event(FileDropEvent::Exited);
+        cx.read_entity(&tabs, |tabs, _| assert_eq!(tabs.dragging_tab, Some(source)));
+        cx.simulate_event(FileDropEvent::Entered {
+            position: gpui::point(target.x - px(30.0), target.y),
+            paths: payload,
+        });
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(
+                tabs.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                vec![source, first]
+            );
+            assert_eq!(tabs.dragging_tab, Some(source));
+        });
+        cx.simulate_mouse_up(target, MouseButton::Right, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| assert_eq!(tabs.dragging_tab, Some(source)));
+        cx.simulate_event(FileDropEvent::Exited);
+        cx.simulate_native_drag_finished(gpui::ExternalPathsDragResult::Cancelled);
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(
+                tabs.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                vec![source, first]
+            );
+            assert!(tabs.dragging_tab.is_none());
+            assert!(tabs.dock_target.is_none());
+            assert!(!tabs.should_move_window);
+        });
+        cx.update(|_, app| assert!(!app.has_active_drag()));
+    }
+
+    #[gpui::test]
+    fn native_tab_drag_exit_clears_docking_and_can_dock_after_return(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().join("source"), window, cx);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let bounds = cx.read_entity(&tabs, |tabs, _| {
+            tabs.pane_bounds[&tabs.active_tab().unwrap().active_pane]
+        });
+        begin_test_tab_drag(&tabs, cx, 1);
+        let payload = cx.native_drag_payload().unwrap();
+        let edge = gpui::point(bounds.right() - px(10.0), bounds.center().y);
+        cx.simulate_mouse_move(edge, MouseButton::Left, Modifiers::default());
+        cx.read_entity(&tabs, |tabs, _| assert!(tabs.dock_target.is_some()));
+        cx.simulate_event(FileDropEvent::Exited);
+        cx.read_entity(&tabs, |tabs, _| {
+            assert!(tabs.dock_target.is_none());
+            assert!(tabs.dragging_tab.is_some());
+        });
+        cx.simulate_event(FileDropEvent::Entered {
+            position: edge,
+            paths: payload,
+        });
+        cx.run_until_parked();
+        cx.simulate_event(FileDropEvent::Submit { position: edge });
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 1);
+            assert_eq!(tabs.tabs[0].layout.pane_count(), 2);
+            assert!(tabs.dragging_tab.is_none());
+            assert!(tabs.dock_target.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn native_tab_drag_escape_clears_state(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (_temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        begin_test_tab_drag(&tabs, cx, 0);
+        cx.simulate_keystrokes("escape");
+        cx.update(|_, app| assert!(!app.has_active_drag()));
+        cx.read_entity(&tabs, |tabs, _| {
+            assert!(tabs.dragging_tab.is_none());
+            assert!(tabs.dock_target.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn native_tab_drag_moves_between_window_tab_bars(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let mut target_app = cx.clone();
+        let (_source_temp, source, source_cx) = test_tabs_with_directories(cx, &[]);
+        let (_target_temp, target, target_cx) = test_tabs_with_directories(&mut target_app, &[]);
+        source_cx.run_until_parked();
+        target_cx.run_until_parked();
+        let moved = source_cx.read_entity(&source, |tabs, _| tabs.tabs[0].view.clone());
+        begin_test_tab_drag(&source, source_cx, 0);
+        let payload = source_cx.native_drag_payload().unwrap();
+        source_cx.simulate_event(FileDropEvent::Exited);
+        let point = tab_drag_start_position(&target, target_cx, 0) - gpui::point(px(40.), px(0.));
+        target_cx.simulate_event(FileDropEvent::Entered {
+            position: point,
+            paths: payload,
+        });
+        target_cx.read_entity(&target, |tabs, _| {
+            assert_eq!(tabs.tab_insert_target, Some((tabs.tabs[0].id, true)))
+        });
+        target_cx.simulate_event(FileDropEvent::Submit { position: point });
+        target_cx.read_entity(&target, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 2);
+            assert_eq!(tabs.tabs[0].view, moved);
+            assert_eq!(tabs.active_tab, tabs.tabs[0].id);
+        });
+        source_cx
+            .simulate_native_tab_drag_finished(gpui::NativeDragResult::Released { position: None });
+        target_cx.read_entity(&target, |tabs, _| assert!(tabs.tab_insert_target.is_none()));
+        assert_eq!(target_cx.windows().len(), 1);
+    }
+
+    #[gpui::test]
+    fn native_tab_drag_accepts_empty_strip_and_foreign_pane_edge(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        for dock in [false, true] {
+            let mut target_app = cx.clone();
+            let (_source_temp, source, source_cx) = test_tabs_with_directories(cx, &[]);
+            let (_target_temp, target, target_cx) =
+                test_tabs_with_directories(&mut target_app, &[]);
+            source_cx.run_until_parked();
+            target_cx.run_until_parked();
+            let moved = source_cx.read_entity(&source, |tabs, _| tabs.tabs[0].view.clone());
+            let position = if dock {
+                target_cx.read_entity(&target, |tabs, _| {
+                    let bounds = tabs.pane_bounds[&tabs.active_tab().unwrap().active_pane];
+                    gpui::point(bounds.right() - px(10.), bounds.center().y)
+                })
+            } else {
+                target_cx
+                    .debug_bounds("explorer-tab-strip-space")
+                    .unwrap()
+                    .center()
+            };
+            begin_test_tab_drag(&source, source_cx, 0);
+            let payload = source_cx.native_drag_payload().unwrap();
+            source_cx.simulate_event(FileDropEvent::Exited);
+            target_cx.simulate_event(FileDropEvent::Entered {
+                position,
+                paths: payload,
+            });
+            if dock {
+                assert!(
+                    target_cx
+                        .debug_bounds("explorer-split-drop-preview")
+                        .is_some()
+                );
+            } else {
+                target_cx.read_entity(&target, |tabs, _| {
+                    assert_eq!(tabs.tab_insert_target, Some((tabs.tabs[0].id, false)))
+                });
+            }
+            target_cx.simulate_event(FileDropEvent::Submit { position });
+            target_cx.read_entity(&target, |tabs, _| {
+                if dock {
+                    assert_eq!(tabs.tabs.len(), 1);
+                    assert_eq!(tabs.tabs[0].layout.pane_count(), 2);
+                    assert!(tabs.tabs[0].panes.iter().any(|pane| pane.view == moved));
+                } else {
+                    assert_eq!(tabs.tabs.len(), 2);
+                    assert_eq!(tabs.tabs[1].view, moved);
+                }
+            });
+            source_cx.simulate_native_tab_drag_finished(gpui::NativeDragResult::Released {
+                position: None,
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn native_tab_drag_cancels_from_destination_window(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let mut target_app = cx.clone();
+        let (_source_temp, source, source_cx) = test_tabs_with_directories(cx, &[]);
+        let (_target_temp, target, target_cx) = test_tabs_with_directories(&mut target_app, &[]);
+        source_cx.run_until_parked();
+        target_cx.run_until_parked();
+        begin_test_tab_drag(&source, source_cx, 0);
+        let payload = source_cx.native_drag_payload().unwrap();
+        source_cx.simulate_event(FileDropEvent::Exited);
+        let point = tab_drag_start_position(&target, target_cx, 0);
+        target_cx.simulate_event(FileDropEvent::Entered {
+            position: point,
+            paths: payload,
+        });
+        target_cx.simulate_keystrokes("escape");
+        source_cx.read_entity(&source, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 1);
+            assert!(tabs.dragging_tab.is_none());
+        });
+        target_cx.read_entity(&target, |tabs, _| {
+            assert_eq!(tabs.tabs.len(), 1);
+            assert!(tabs.tab_insert_target.is_none());
+        });
+        assert_eq!(target_cx.windows().len(), 2);
+    }
+
+    #[gpui::test]
     fn tab_drag_invalid_drop_clears_preview_and_drag_state(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (temp, tabs, cx) = test_tabs_with_directories(cx, &["source"]);
@@ -9279,10 +9641,10 @@ mod tests {
     }
 
     #[test]
-    fn lone_standalone_tab_can_drag_but_lone_composite_cannot() {
+    fn standalone_and_composite_tabs_can_drag() {
         assert!(!can_drag_tab(0, false));
         assert!(can_drag_tab(1, false));
-        assert!(!can_drag_tab(1, true));
+        assert!(can_drag_tab(1, true));
         assert!(can_drag_tab(2, false));
         assert!(can_drag_tab(2, true));
     }

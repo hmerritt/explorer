@@ -53,6 +53,7 @@ x11rb::atom_manager! {
         XdndActionList,
         TARGETS,
         TextUriList: b"text/uri-list",
+        InternalDrag: b"application/x-gpui-internal-drag",
         MozUrl: b"text/x-moz-url",
         UTF8_STRING,
         TEXT,
@@ -262,7 +263,7 @@ pub struct X11WindowState {
     pub(crate) counter_id: sync::Counter,
     pub(crate) last_sync_counter: Option<sync::Int64>,
     bounds: Bounds<Pixels>,
-    scale_factor: f32,
+    pub(super) scale_factor: f32,
     renderer: BladeRenderer,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
@@ -1259,6 +1260,14 @@ impl PlatformWindow for X11Window {
             .borrow()
             .client
             .start_external_paths_drag(&self.0, paths)
+    }
+
+    fn cancel_external_paths_drag(&self) {
+        self.0
+            .state
+            .borrow()
+            .client
+            .cancel_external_paths_drag(self.0.x_window);
     }
 
     fn modifiers(&self) -> Modifiers {

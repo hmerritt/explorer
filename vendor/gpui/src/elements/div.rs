@@ -17,12 +17,12 @@
 
 use crate::{
     AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
-    DispatchPhase, Display, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId,
-    FileDropEvent, Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
-    KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
-    MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow,
-    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
-    ExternalPaths, ExternalPathsDragCallback, StyleRefinement, Styled, Task, TooltipId,
+    DispatchPhase, Display, Element, ElementId, Entity, ExternalPaths, ExternalPathsDragCallback,
+    FileDropEvent, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
+    InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton,
+    KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
     Visibility, Window, WindowControlArea, point, px, size,
 };
 use collections::HashMap;
@@ -585,11 +585,7 @@ impl Interactivity {
         self.set_drag_factory(
             move |window, cx| {
                 let (value, external_paths, external_paths_callback) = factory(window, cx)?;
-                Some((
-                    value,
-                    Some(external_paths),
-                    Some(external_paths_callback),
-                ))
+                Some((value, Some(external_paths), Some(external_paths_callback)))
             },
             constructor,
         );
@@ -600,11 +596,8 @@ impl Interactivity {
         factory: impl FnOnce(
             &mut Window,
             &mut App,
-        ) -> Option<(
-            T,
-            Option<ExternalPaths>,
-            Option<ExternalPathsDragCallback>,
-        )>
+        )
+            -> Option<(T, Option<ExternalPaths>, Option<ExternalPathsDragCallback>)>
         + 'static,
         constructor: impl Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W> + 'static,
     ) where
@@ -1317,6 +1310,51 @@ pub trait StatefulInteractiveElement: InteractiveElement {
             Some(external_paths_callback),
             constructor,
         );
+        self
+    }
+
+    /// Start an opaque, application-local native drag at the drag threshold.
+    /// The native image remains visible outside the source window. No file paths
+    /// are offered to other applications. Completion also runs on cancellation.
+    fn on_native_drag<T, W>(
+        mut self,
+        value: T,
+        completion: Box<dyn FnOnce(crate::NativeDragResult, &mut App)>,
+        constructor: impl Fn(
+            &T,
+            Point<Pixels>,
+            &mut Window,
+            &mut App,
+        ) -> (Entity<W>, crate::NativeDragImage)
+        + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+        T: 'static,
+        W: 'static + Render,
+    {
+        let interactivity = self.interactivity();
+        debug_assert!(interactivity.drag_listener.is_none());
+        let mut completion = Some(completion);
+        interactivity.drag_listener = Some(Box::new(move |offset, window, cx| {
+            let value = Arc::new(value);
+            let (view, image) = constructor(&value, offset, window, cx);
+            let mut paths = ExternalPaths::internal();
+            paths.native_image = Some(Arc::new(image));
+            paths.source_window = Some(window.window_handle().window_id());
+            let completion_paths = paths.clone();
+            let callback = completion.take().map(|completion| {
+                Box::new(move |_, cx: &mut App| {
+                    completion(completion_paths.take_native_drag_result(), cx);
+                }) as ExternalPathsDragCallback
+            });
+            Some(PreparedDrag {
+                value,
+                view: view.into(),
+                external_paths: Some(paths),
+                external_paths_callback: callback,
+            })
+        }));
         self
     }
 
@@ -2308,10 +2346,20 @@ impl Interactivity {
         if !drop_listeners.is_empty() {
             let hitbox = hitbox.clone();
             window.on_mouse_event({
-                move |_: &MouseUpEvent, phase, window, cx| {
+                move |event: &MouseUpEvent, phase, window, cx| {
                     if let Some(drag) = &cx.active_drag
                         && phase == DispatchPhase::Bubble
                         && hitbox.is_hovered(window)
+                        && (event.button == MouseButton::Left
+                            || !drag
+                                .external_paths
+                                .as_ref()
+                                .is_some_and(|paths| paths.native_image.is_some())
+                                && !cx.internal_native_drag.as_ref().is_some_and(|drag| {
+                                    drag.external_paths
+                                        .as_ref()
+                                        .is_some_and(|paths| paths.native_image.is_some())
+                                }))
                     {
                         let drag_state_type = drag.value.as_ref().type_id();
                         for (drop_state_type, listener) in &drop_listeners {
@@ -2381,9 +2429,9 @@ impl Interactivity {
                             *clicked_state.borrow_mut() = ElementClickedState::default();
                             let cursor_offset = event.position - hitbox.origin;
                             if let Some(drag) = drag_listener(cursor_offset, window, cx) {
-                                let external_paths = drag
-                                    .external_paths
-                                    .filter(|paths| !paths.paths().is_empty());
+                                let external_paths = drag.external_paths.filter(|paths| {
+                                    !paths.paths().is_empty() || paths.internal_token().is_some()
+                                });
                                 cx.active_drag = Some(AnyDrag {
                                     view: drag.view,
                                     value: drag.value,
@@ -2741,13 +2789,15 @@ impl Interactivity {
                         .drag_over_styles
                         .iter()
                         .any(|(state_type, _)| *state_type == drag_type);
-                let group_drag_over_hovered = self.group_drag_over_styles.iter().any(
-                    |(state_type, group_drag_style)| {
-                        *state_type == drag_type
-                            && GroupHitboxes::get(&group_drag_style.group, cx)
-                                .is_some_and(|group_hitbox_id| group_hitbox_id.is_hovered(window))
-                    },
-                );
+                let group_drag_over_hovered =
+                    self.group_drag_over_styles
+                        .iter()
+                        .any(|(state_type, group_drag_style)| {
+                            *state_type == drag_type
+                                && GroupHitboxes::get(&group_drag_style.group, cx).is_some_and(
+                                    |group_hitbox_id| group_hitbox_id.is_hovered(window),
+                                )
+                        });
 
                 if direct_drag_over_hovered || group_drag_over_hovered {
                     let can_drop = self

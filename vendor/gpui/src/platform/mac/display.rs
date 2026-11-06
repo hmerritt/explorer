@@ -1,4 +1,4 @@
-use crate::{Bounds, DisplayId, Pixels, PlatformDisplay, px, size};
+use crate::{Bounds, DisplayId, Pixels, PlatformDisplay, point, px, size};
 use anyhow::Result;
 use cocoa::{
     appkit::NSScreen,
@@ -113,5 +113,14 @@ impl PlatformDisplay for MacDisplay {
                 size: size(px(bounds.size.width as f32), px(bounds.size.height as f32)),
             }
         }
+    }
+
+    fn global_bounds(&self) -> Bounds<Pixels> {
+        // Core Graphics uses the primary display's top-left, in logical points.
+        let bounds = unsafe { CGDisplayBounds(self.0) };
+        Bounds::new(
+            point(px(bounds.origin.x as f32), px(bounds.origin.y as f32)),
+            size(px(bounds.size.width as f32), px(bounds.size.height as f32)),
+        )
     }
 }

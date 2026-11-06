@@ -120,6 +120,10 @@ impl AppContext for TestAppContext {
 }
 
 impl TestAppContext {
+    /// Make the next platform window creation return an error.
+    pub fn fail_next_window_open(&self) {
+        self.test_platform.fail_next_window_open.set(true);
+    }
     /// Creates a new `TestAppContext`. Usually you can rely on `#[gpui::test]` to do this for you.
     pub fn build(dispatcher: TestDispatcher, fn_name: Option<&'static str>) -> Self {
         let arc_dispatcher = Arc::new(dispatcher.clone());
@@ -842,6 +846,26 @@ impl VisualTestContext {
         self.test_window(self.window)
             .simulate_input(event.to_platform_input());
         self.background_executor.run_until_parked();
+    }
+
+    /// The payload offered by the last native drag started by this test window.
+    pub fn native_drag_payload(&self) -> Option<crate::ExternalPaths> {
+        self.test_window(self.window).0.lock().native_drag.clone()
+    }
+
+    /// Simulate the operating system completing a native drag outside GPUI.
+    pub fn simulate_native_drag_finished(&mut self, result: crate::ExternalPathsDragResult) {
+        self.test_window(self.window)
+            .simulate_input(crate::PlatformInput::ExternalPathsDragFinished(result));
+        self.background_executor.run_until_parked();
+    }
+
+    /// Finish an opaque native drag with an explicit physical outcome.
+    pub fn simulate_native_tab_drag_finished(&mut self, result: crate::NativeDragResult) {
+        if let Some(paths) = self.native_drag_payload() {
+            paths.finish_native_drag(result);
+        }
+        self.simulate_native_drag_finished(crate::ExternalPathsDragResult::Cancelled);
     }
 
     /// Simulates the user blurring the window.

@@ -38,11 +38,11 @@ use crate::{
     AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle, DispatchPhase, DisplayId,
     EventEmitter, ExternalPaths, ExternalPathsDragResult, FocusHandle, FocusMap,
     ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu,
-    MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PromptBuilder,
-    PromptButton, PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle,
-    Reservation, ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, Task,
-    TextSystem, Window, WindowAppearance, WindowHandle, WindowId, WindowInvalidator,
+    MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PromptBuilder, PromptButton,
+    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
+    ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, Task, TextSystem,
+    Window, WindowAppearance, WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     current_platform, hash, init_app_menus,
 };
@@ -1398,6 +1398,14 @@ impl App {
             cx.window_update_stack.pop();
 
             if window.removed {
+                if cx.internal_native_drag.as_ref().is_some_and(|drag| {
+                    drag.external_paths
+                        .as_ref()
+                        .is_some_and(|paths| paths.source_window == Some(id))
+                }) {
+                    window.platform_window.cancel_external_paths_drag();
+                    cx.complete_external_paths_drag(ExternalPathsDragResult::Cancelled);
+                }
                 cx.window_handles.remove(&id);
                 cx.windows.remove(id);
 
@@ -1973,6 +1981,29 @@ impl App {
 
     /// Stops active drag and clears any related effects.
     pub fn stop_active_drag(&mut self, window: &mut Window) -> bool {
+        if let Some(paths) = self
+            .internal_native_drag
+            .as_ref()
+            .and_then(|drag| drag.external_paths.clone())
+        {
+            paths.finish_native_drag(crate::NativeDragResult::Cancelled);
+            if paths.source_window == Some(window.handle.window_id()) {
+                window.platform_window.cancel_external_paths_drag();
+            } else if let Some(source) = self
+                .windows()
+                .into_iter()
+                .find(|handle| Some(handle.window_id()) == paths.source_window)
+            {
+                self.defer(move |cx| {
+                    let _ = source.update(cx, |_, window, _| {
+                        window.platform_window.cancel_external_paths_drag()
+                    });
+                });
+            }
+            self.complete_external_paths_drag(ExternalPathsDragResult::Cancelled);
+            window.refresh();
+            return true;
+        }
         if self.active_drag.is_some() {
             self.active_drag = None;
             self.external_paths_drag_callback = None;

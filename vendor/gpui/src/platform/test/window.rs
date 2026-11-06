@@ -13,6 +13,8 @@ use std::{
 };
 
 pub(crate) struct TestWindowState {
+    pub(crate) native_drag: Option<crate::ExternalPaths>,
+    pub(crate) fail_native_drag_start: bool,
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) handle: AnyWindowHandle,
     display: Rc<dyn PlatformDisplay>,
@@ -58,6 +60,8 @@ impl TestWindow {
         display: Rc<dyn PlatformDisplay>,
     ) -> Self {
         Self(Rc::new(Mutex::new(TestWindowState {
+            native_drag: None,
+            fail_native_drag_start: false,
             bounds: params.bounds,
             display,
             platform,
@@ -112,6 +116,25 @@ impl TestWindow {
 }
 
 impl PlatformWindow for TestWindow {
+    fn start_external_paths_drag(
+        &self,
+        paths: crate::ExternalPaths,
+    ) -> crate::ExternalPathsDragStartResult {
+        if self.0.lock().fail_native_drag_start {
+            return crate::ExternalPathsDragStartResult::Failed;
+        }
+        if paths.native_image.is_some() {
+            self.0.lock().native_drag = Some(paths);
+            crate::ExternalPathsDragStartResult::Pending
+        } else {
+            crate::ExternalPathsDragStartResult::Failed
+        }
+    }
+
+    fn cancel_external_paths_drag(&self) {
+        self.0.lock().native_drag = None;
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.lock().bounds
     }

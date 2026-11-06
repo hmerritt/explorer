@@ -84,8 +84,8 @@ const SEGOE_MDL2_ASSETS: &[u8] = include_bytes!("../assets/fonts/Segoe MDL2 Asse
 #[cfg(any(target_os = "linux", test))]
 const DEFAULT_WAYLAND_DISPLAY: &str = "wayland-0";
 
-struct Explorer {
-    explorer: gpui::Entity<ExplorerTabs>,
+pub(crate) struct Explorer {
+    pub(crate) explorer: gpui::Entity<ExplorerTabs>,
 }
 
 #[derive(Default)]
@@ -101,6 +101,9 @@ fn initialize_explorer_window_registry(cx: &mut App) {
 }
 
 fn mark_explorer_window_active(handle: WindowHandle<Explorer>, cx: &mut App) {
+    if !cx.has_global::<ExplorerWindowRegistry>() {
+        initialize_explorer_window_registry(cx);
+    }
     cx.update_global::<ExplorerWindowRegistry, _>(|registry, _| {
         registry.order.retain(|candidate| *candidate != handle);
         registry.order.insert(0, handle);
@@ -525,6 +528,17 @@ fn open_explorer_window_at(
     display_id: Option<DisplayId>,
     cx: &mut App,
 ) -> WindowHandle<Explorer> {
+    try_open_explorer_window_at(Some(initial_path), None, window_bounds, display_id, cx)
+        .expect("failed to open Explorer window")
+}
+
+fn try_open_explorer_window_at(
+    initial_path: Option<PathBuf>,
+    transfer: Option<crate::explorer::TabTransfer>,
+    window_bounds: WindowBounds,
+    display_id: Option<DisplayId>,
+    cx: &mut App,
+) -> Result<WindowHandle<Explorer>, String> {
     let _span = crate::startup_trace::Span::new("open_window");
     let handle = cx
         .open_window(
@@ -553,7 +567,16 @@ fn open_explorer_window_at(
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window);
                     let _span = crate::startup_trace::Span::new("explorer_tabs");
-                    ExplorerTabs::new(path, focus_handle, window, cx)
+                    if let Some(transfer) = transfer {
+                        ExplorerTabs::from_transfer(transfer, window, cx)
+                    } else {
+                        ExplorerTabs::new(
+                            path.expect("new window needs a path"),
+                            focus_handle,
+                            window,
+                            cx,
+                        )
+                    }
                 });
 
                 cx.new(|cx| {
@@ -575,9 +598,9 @@ fn open_explorer_window_at(
                 })
             },
         )
-        .expect("failed to open Explorer window");
+        .map_err(|error| error.to_string())?;
     mark_explorer_window_active(handle, cx);
-    handle
+    Ok(handle)
 }
 
 fn open_explorer_window(cx: &mut App) {
@@ -602,6 +625,64 @@ pub(crate) fn open_new_explorer_window(
         display_index.and_then(|index| displays.get(index).map(|display| display.id()));
 
     open_explorer_window_at(initial_path, window_bounds, display_id, cx);
+}
+
+pub(crate) fn open_transferred_explorer_window(
+    transfer: crate::explorer::TabTransfer,
+    source_bounds: WindowBounds,
+    position: Option<gpui::Point<Pixels>>,
+    offset: gpui::Point<Pixels>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let displays = cx.displays();
+    let display_bounds = displays
+        .iter()
+        .map(|display| display.bounds())
+        .collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    let offset = offset + gpui::point(px(crate::window_chrome::MAC_TRAFFIC_LIGHT_PADDING), px(0.));
+    let global_bounds = displays
+        .iter()
+        .map(|display| display.global_bounds())
+        .collect::<Vec<_>>();
+    let (bounds, display_index) = transferred_window_placement(
+        source_bounds,
+        position,
+        offset,
+        &display_bounds,
+        &global_bounds,
+    );
+    let display_id =
+        display_index.and_then(|index| displays.get(index).map(|display| display.id()));
+    try_open_explorer_window_at(None, Some(transfer), bounds, display_id, cx).map(|_| ())
+}
+
+fn transferred_window_placement(
+    source_bounds: WindowBounds,
+    position: Option<gpui::Point<Pixels>>,
+    offset: gpui::Point<Pixels>,
+    display_bounds: &[Bounds<Pixels>],
+    global_bounds: &[Bounds<Pixels>],
+) -> (WindowBounds, Option<usize>) {
+    let source = window_bounds_rect(source_bounds);
+    let (bounds, display_index) = if let Some(position) = position {
+        let index = global_bounds
+            .iter()
+            .position(|bounds| bounds.contains(&position));
+        let position = index.map_or(position, |index| {
+            position - global_bounds[index].origin + display_bounds[index].origin
+        });
+        let mut bounds = Bounds::new(position - offset, source.size);
+        if let Some(display) = index.and_then(|index| display_bounds.get(index)) {
+            bounds.size.width = bounds.size.width.min(display.size.width);
+            bounds.size.height = bounds.size.height.min(display.size.height);
+            bounds = clamp_window_bounds_to_display(bounds, *display);
+        }
+        (WindowBounds::Windowed(bounds), index)
+    } else {
+        new_window_placement_from_source(source_bounds, display_bounds)
+    };
+    (bounds, display_index)
 }
 
 impl LaunchRequest {
@@ -2626,6 +2707,45 @@ mod tests {
         assert_eq!(
             new_window_placement_from_source(WindowBounds::Windowed(source), &[first, second]),
             (WindowBounds::Windowed(expected), Some(1))
+        );
+    }
+
+    #[test]
+    fn transferred_placement_preserves_pointer_offset_and_clamps_to_release_display() {
+        let size = size(px(1200.), px(800.));
+        let local = Bounds::new(point(px(0.), px(0.)), size);
+        let left = Bounds::new(point(px(-1200.), px(-200.)), size);
+        let source = WindowBounds::Maximized(Bounds::new(point(px(10.), px(10.)), size));
+        // AppKit uses display-local window bounds and global drag coordinates.
+        assert_eq!(
+            transferred_window_placement(
+                source,
+                Some(point(px(-1000.), px(0.))),
+                point(px(30.), px(12.)),
+                &[local, local],
+                &[local, left]
+            ),
+            (WindowBounds::Windowed(local), Some(1))
+        );
+        let source = WindowBounds::Windowed(Bounds::new(
+            point(px(10.), px(10.)),
+            gpui::size(px(600.), px(400.)),
+        ));
+        assert_eq!(
+            transferred_window_placement(
+                source,
+                Some(point(px(-1000.), px(0.))),
+                point(px(30.), px(12.)),
+                &[local, local],
+                &[local, left]
+            ),
+            (
+                WindowBounds::Windowed(Bounds::new(
+                    point(px(170.), px(188.)),
+                    gpui::size(px(600.), px(400.))
+                )),
+                Some(1)
+            )
         );
     }
 

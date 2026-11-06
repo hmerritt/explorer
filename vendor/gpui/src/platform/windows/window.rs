@@ -23,11 +23,7 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         System::{
-            Com::*,
-            DataExchange::RegisterClipboardFormatW,
-            LibraryLoader::*,
-            Memory::*,
-            Ole::*,
+            Com::*, DataExchange::RegisterClipboardFormatW, LibraryLoader::*, Memory::*, Ole::*,
             SystemServices::*,
         },
         UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
@@ -35,8 +31,8 @@ use windows::{
     core::*,
 };
 
-use crate::*;
 use super::{WM_GPUI_START_EXTERNAL_PATHS_DRAG, text_services::TsfCaretContext};
+use crate::*;
 
 #[path = "window_move.rs"]
 mod window_move;
@@ -73,15 +69,7 @@ impl SystemCaretBitmap {
         // zeroed monochrome bitmap keeps that system caret visually transparent
         // while GPUI continues to render its own caret.
         let bits = 0_u32;
-        let bitmap = unsafe {
-            CreateBitmap(
-                2,
-                2,
-                1,
-                1,
-                Some(std::ptr::from_ref(&bits).cast()),
-            )
-        };
+        let bitmap = unsafe { CreateBitmap(2, 2, 1, 1, Some(std::ptr::from_ref(&bits).cast())) };
         if bitmap.is_invalid() {
             log::error!(
                 "failed to create transparent system caret bitmap: {}",
@@ -139,6 +127,7 @@ pub(crate) struct WindowsWindowInner {
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: RefCell<WindowsWindowState>,
     pending_external_paths_drag: RefCell<PendingExternalPathsDrag>,
+    native_drag_cancelled: Rc<Cell<bool>>,
     active_external_paths_drops: RefCell<Vec<Rc<ActiveWindowsExternalDrop>>>,
     pub(crate) system_settings: RefCell<WindowsSystemSettings>,
     pub(crate) handle: AnyWindowHandle,
@@ -294,11 +283,15 @@ impl WindowsWindowInner {
         // SHDoDragDrop runs a nested Windows message loop. The queued paths must
         // be taken before entering it so no RefCell borrow survives re-entrancy.
         let result = windows_external_drag_completion(start_windows_external_paths_drag(
-            self.hwnd, paths,
+            self.hwnd,
+            paths,
+            self.native_drag_cancelled.clone(),
         ));
 
         let Some(mut callback) = self.state.borrow_mut().callbacks.input.take() else {
-            log::error!("unable to report external paths drag completion without an input callback");
+            log::error!(
+                "unable to report external paths drag completion without an input callback"
+            );
             return Some(0);
         };
         let callback_result = catch_unwind(AssertUnwindSafe(|| {
@@ -316,12 +309,8 @@ impl WindowsWindowInner {
         if let Some(context) = self.tsf_caret_context.as_ref() {
             context.clear_caret();
         }
-        let had_system_caret = std::mem::take(
-            &mut self.state.borrow_mut().system_caret_created,
-        );
-        if had_system_caret
-            && let Err(error) = unsafe { DestroyCaret() }
-        {
+        let had_system_caret = std::mem::take(&mut self.state.borrow_mut().system_caret_created);
+        if had_system_caret && let Err(error) = unsafe { DestroyCaret() } {
             log::error!("failed to destroy system caret: {error}");
         }
     }
@@ -346,6 +335,7 @@ impl WindowsWindowInner {
             drop_target_helper: context.drop_target_helper.clone(),
             state,
             pending_external_paths_drag: RefCell::new(PendingExternalPathsDrag::default()),
+            native_drag_cancelled: Rc::new(Cell::new(false)),
             active_external_paths_drops: RefCell::new(Vec::new()),
             handle: context.handle,
             hide_title_bar: context.hide_title_bar,
@@ -1004,6 +994,7 @@ impl PlatformWindow for WindowsWindow {
             return ExternalPathsDragStartResult::Failed;
         }
 
+        self.0.native_drag_cancelled.set(false);
         let Ok(mut pending_drag) = self.0.pending_external_paths_drag.try_borrow_mut() else {
             log::error!("unable to queue external paths drag while the queue is borrowed");
             return ExternalPathsDragStartResult::Failed;
@@ -1027,6 +1018,14 @@ impl PlatformWindow for WindowsWindow {
         }
 
         ExternalPathsDragStartResult::Pending
+    }
+
+    fn cancel_external_paths_drag(&self) {
+        self.0.native_drag_cancelled.set(true);
+        self.0.pending_external_paths_drag.borrow_mut().cancel();
+        // Wake the OLE loop so QueryContinueDrag observes cancellation even if
+        // the user is holding the mouse still when the source window closes.
+        unsafe { PostMessageW(Some(self.0.hwnd), WM_MOUSEMOVE, WPARAM(0), LPARAM(0)) }.log_err();
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
@@ -1070,9 +1069,7 @@ impl PlatformWindow for WindowsWindow {
 
         // ShowCaret is cumulative, so call it exactly once for each successful
         // CreateCaret. The bitmap above makes the shown caret transparent.
-        if !caret_created
-            && let Err(error) = unsafe { ShowCaret(Some(self.0.hwnd)) }
-        {
+        if !caret_created && let Err(error) = unsafe { ShowCaret(Some(self.0.hwnd)) } {
             log::error!("failed to show transparent system caret: {error}");
             self.0.destroy_system_caret();
         }
@@ -1105,7 +1102,41 @@ fn register_shell_clipboard_format(format: PCWSTR) -> u16 {
 }
 
 #[implement(IDropSource)]
-struct WindowsFileDragSource;
+struct WindowsFileDragSource {
+    paths: ExternalPaths,
+    scale_factor: f32,
+    cancelled: Rc<Cell<bool>>,
+    preview: Option<WindowsNativeDragPreview>,
+}
+
+struct WindowsNativeDragPreview {
+    helper: IDropTargetHelper,
+    data: IDataObject,
+    hwnd: HWND,
+}
+
+impl WindowsNativeDragPreview {
+    fn update(&self, effect: DROPEFFECT) {
+        unsafe {
+            let mut position = POINT::default();
+            if GetCursorPos(&mut position).is_ok() {
+                // Some native targets do not implement IDropTargetHelper. Keep
+                // the source image visible there too, including the desktop.
+                self.helper
+                    .DragEnter(self.hwnd, &self.data, &position, effect)
+                    .log_err();
+                self.helper.DragOver(&position, effect).log_err();
+                self.helper.Show(true).log_err();
+            }
+        }
+    }
+}
+
+impl Drop for WindowsNativeDragPreview {
+    fn drop(&mut self) {
+        unsafe { self.helper.DragLeave() }.log_err();
+    }
+}
 
 #[allow(non_snake_case)]
 impl IDropSource_Impl for WindowsFileDragSource_Impl {
@@ -1114,19 +1145,64 @@ impl IDropSource_Impl for WindowsFileDragSource_Impl {
         fescapepressed: BOOL,
         grfkeystate: MODIFIERKEYS_FLAGS,
     ) -> windows::core::HRESULT {
-        if fescapepressed.as_bool() {
+        if fescapepressed.as_bool() || self.cancelled.get() {
+            self.paths.finish_native_drag(NativeDragResult::Cancelled);
             return DRAGDROP_S_CANCEL;
         }
 
         if !grfkeystate.contains(MK_LBUTTON) {
+            let mut cursor = POINT::default();
+            let position = unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| {
+                let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
+                let scale = super::display::get_scale_factor_for_monitor(monitor)
+                    .unwrap_or(self.scale_factor);
+                point(px(cursor.x as f32 / scale), px(cursor.y as f32 / scale))
+            });
+            self.paths
+                .finish_native_drag(NativeDragResult::Released { position });
             return DRAGDROP_S_DROP;
         }
 
         S_OK
     }
 
-    fn GiveFeedback(&self, _: DROPEFFECT) -> windows::core::HRESULT {
+    fn GiveFeedback(&self, effect: DROPEFFECT) -> windows::core::HRESULT {
+        if let Some(preview) = &self.preview {
+            preview.update(effect);
+        }
         DRAGDROP_S_USEDEFAULTCURSORS
+    }
+}
+
+// IDragSourceHelper uses both HGLOBAL and IStream private formats. Streams
+// must retain a COM reference; copying only global memory silently loses the
+// shell's drag image on current Windows versions.
+enum ShellDragData {
+    Global(Vec<u8>),
+    Stream(IStream),
+}
+
+impl ShellDragData {
+    fn tymed(&self) -> u32 {
+        match self {
+            Self::Global(_) => TYMED_HGLOBAL.0 as u32,
+            Self::Stream(_) => TYMED_ISTREAM.0 as u32,
+        }
+    }
+
+    fn medium(&self) -> windows::core::Result<STGMEDIUM> {
+        Ok(STGMEDIUM {
+            tymed: self.tymed(),
+            u: match self {
+                Self::Global(bytes) => STGMEDIUM_0 {
+                    hGlobal: allocate_global_payload(bytes)?,
+                },
+                Self::Stream(stream) => STGMEDIUM_0 {
+                    pstm: mem::ManuallyDrop::new(Some(stream.clone())),
+                },
+            },
+            pUnkForRelease: Default::default(),
+        })
     }
 }
 
@@ -1134,6 +1210,7 @@ impl IDropSource_Impl for WindowsFileDragSource_Impl {
 struct WindowsFileDataObject {
     paths: Vec<PathBuf>,
     internal_token: Option<String>,
+    shell_formats: RefCell<Vec<(u16, ShellDragData)>>,
     preferred_effect: DROPEFFECT,
     performed_effect: Rc<Cell<DROPEFFECT>>,
     logical_performed_effect: Rc<Cell<DROPEFFECT>>,
@@ -1157,6 +1234,10 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
         let format = unsafe { pformatetcin.as_ref() }
             .map(|format| format.cfFormat)
             .ok_or_else(|| windows::core::Error::from(DV_E_FORMATETC))?;
+        let shell_formats = self.shell_formats.borrow();
+        if let Some((_, data)) = shell_formats.iter().find(|(id, _)| *id == format) {
+            return data.medium();
+        }
         let hglobal = if format == *INTERNAL_DRAG_FORMAT {
             let token = self.internal_token.as_ref().ok_or(DV_E_FORMATETC)?;
             allocate_global_payload(token.as_bytes())?
@@ -1223,12 +1304,19 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
         #[cfg(not(test))]
         let url_supported = false;
 
-        if hdrop_supported
+        if self.shell_formats.borrow().iter().any(|(id, data)| {
+            unsafe { pformatetc.as_ref() }.is_some_and(|format| {
+                format.cfFormat == *id
+                    && format.dwAspect == DVASPECT_CONTENT.0
+                    && format.tymed & data.tymed() != 0
+            })
+        }) || hdrop_supported
             || url_supported
             || (self.internal_token.is_some()
                 && is_clipboard_hglobal_format(pformatetc, *INTERNAL_DRAG_FORMAT))
             || shell_id_list_supported
-            || is_dropeffect_format(pformatetc, *PREFERRED_DROPEFFECT_FORMAT)
+            || (self.internal_token.is_none()
+                && is_dropeffect_format(pformatetc, *PREFERRED_DROPEFFECT_FORMAT))
         {
             S_OK
         } else {
@@ -1260,6 +1348,34 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
             self.logical_performed_effect.set(effect);
         }
 
+        if let (Some(format), Some(medium)) =
+            (unsafe { pformatetc.as_ref() }, unsafe { pmedium.as_ref() })
+        {
+            let data = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+                let global = unsafe { medium.u.hGlobal };
+                let len = unsafe { GlobalSize(global) };
+                let data = unsafe { GlobalLock(global) };
+                if data.is_null() {
+                    return Err(DV_E_STGMEDIUM.into());
+                }
+                let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }.to_vec();
+                let _ = unsafe { GlobalUnlock(global) };
+                ShellDragData::Global(bytes)
+            } else if medium.tymed == TYMED_ISTREAM.0 as u32 {
+                ShellDragData::Stream(
+                    unsafe { medium.u.pstm.as_ref() }
+                        .cloned()
+                        .ok_or(DV_E_STGMEDIUM)?,
+                )
+            } else {
+                return Err(DV_E_TYMED.into());
+            };
+            let mut formats = self.shell_formats.borrow_mut();
+            formats.retain(|(id, _)| *id != format.cfFormat);
+            formats.push((format.cfFormat, data));
+        } else {
+            return Err(E_POINTER.into());
+        }
         if frelease.as_bool() && !pmedium.is_null() {
             let mut medium = unsafe { std::ptr::read(pmedium) };
             unsafe { ReleaseStgMedium(&mut medium) };
@@ -1273,6 +1389,7 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
             let mut formats = WindowsFormatEtcEnumerator::new();
             if self.internal_token.is_some() {
                 formats.first_format = *INTERNAL_DRAG_FORMAT;
+                formats.format_count = 1;
             }
             Ok(formats.into())
         } else {
@@ -1302,6 +1419,7 @@ impl IDataObject_Impl for WindowsFileDataObject_Impl {
 struct WindowsFormatEtcEnumerator {
     next_index: Cell<usize>,
     first_format: u16,
+    format_count: usize,
 }
 
 impl WindowsFormatEtcEnumerator {
@@ -1309,19 +1427,25 @@ impl WindowsFormatEtcEnumerator {
         Self {
             next_index: Cell::new(0),
             first_format: CF_HDROP.0,
+            format_count: 2,
         }
     }
 }
 
 #[allow(non_snake_case)]
 impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
-    fn Next(&self, celt: u32, rgelt: *mut FORMATETC, pceltfetched: *mut u32) -> windows::core::HRESULT {
+    fn Next(
+        &self,
+        celt: u32,
+        rgelt: *mut FORMATETC,
+        pceltfetched: *mut u32,
+    ) -> windows::core::HRESULT {
         if rgelt.is_null() || (celt > 1 && pceltfetched.is_null()) {
             return E_INVALIDARG;
         }
 
         let mut fetched = 0;
-        while fetched < celt && self.next_index.get() < 2 {
+        while fetched < celt && self.next_index.get() < self.format_count {
             let format = match self.next_index.get() {
                 0 => dropeffect_format_etc(self.first_format),
                 1 => dropeffect_format_etc(*PREFERRED_DROPEFFECT_FORMAT),
@@ -1342,9 +1466,9 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
     }
 
     fn Skip(&self, celt: u32) -> windows::core::Result<()> {
-        let remaining = 2usize.saturating_sub(self.next_index.get());
+        let remaining = self.format_count.saturating_sub(self.next_index.get());
         self.next_index
-            .set((self.next_index.get() + celt as usize).min(2));
+            .set((self.next_index.get() + celt as usize).min(self.format_count));
         if celt as usize <= remaining {
             Ok(())
         } else {
@@ -1361,6 +1485,7 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
         Ok(WindowsFormatEtcEnumerator {
             next_index: Cell::new(self.next_index.get()),
             first_format: self.first_format,
+            format_count: self.format_count,
         }
         .into())
     }
@@ -1369,7 +1494,10 @@ impl IEnumFORMATETC_Impl for WindowsFormatEtcEnumerator_Impl {
 fn start_windows_external_paths_drag(
     hwnd: HWND,
     paths: ExternalPaths,
+    cancelled: Rc<Cell<bool>>,
 ) -> ExternalPathsDragStartResult {
+    let completion_paths = paths.clone();
+    let native_image = paths.native_image.clone();
     let internal_token = paths.internal_token().map(str::to_owned);
     let operations = paths.operations();
     let preferred_effect = preferred_dropeffect_for_operations(operations);
@@ -1391,6 +1519,7 @@ fn start_windows_external_paths_drag(
         let data_object: IDataObject = WindowsFileDataObject {
             paths,
             internal_token,
+            shell_formats: RefCell::default(),
             preferred_effect,
             performed_effect: performed_effect.clone(),
             logical_performed_effect: logical_performed_effect.clone(),
@@ -1404,7 +1533,28 @@ fn start_windows_external_paths_drag(
             test_url_formats: Vec::new(),
         }
         .into();
-        let drop_source: IDropSource = WindowsFileDragSource.into();
+        let preview = if let Some(image) = &native_image {
+            match initialize_native_drag_image(image, &data_object) {
+                Ok(helper) => Some(WindowsNativeDragPreview {
+                    helper,
+                    data: data_object.clone(),
+                    hwnd,
+                }),
+                Err(error) => {
+                    log::error!("unable to create native drag image: {error}");
+                    return ExternalPathsDragStartResult::Failed;
+                }
+            }
+        } else {
+            None
+        };
+        let drop_source: IDropSource = WindowsFileDragSource {
+            paths: completion_paths,
+            scale_factor: GetDpiForWindow(hwnd) as f32 / 96.0,
+            cancelled,
+            preview,
+        }
+        .into();
         SHDoDragDrop(Some(hwnd), &data_object, &drop_source, allowed_effects)
     };
 
@@ -1415,6 +1565,60 @@ fn start_windows_external_paths_drag(
             logical_performed_effect.get(),
         )),
         None => ExternalPathsDragStartResult::Failed,
+    }
+}
+
+fn initialize_native_drag_image(
+    image: &NativeDragImage,
+    data: &IDataObject,
+) -> windows::core::Result<IDropTargetHelper> {
+    unsafe {
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: image.pixels.width() as i32,
+                biHeight: -(image.pixels.height() as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let bitmap = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        let bytes = image.premultiplied_bgra();
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), bits.cast::<u8>(), bytes.len());
+        let helper: IDragSourceHelper = match CoCreateInstance(
+            &GUID::from_u128(0x4657278a_411b_11d2_839a_00c04fd918d0),
+            None,
+            CLSCTX_INPROC_SERVER,
+        ) {
+            Ok(helper) => helper,
+            Err(error) => {
+                let _ = DeleteObject(bitmap.into());
+                return Err(error);
+            }
+        };
+        let drag_image = SHDRAGIMAGE {
+            sizeDragImage: SIZE {
+                cx: image.pixels.width() as i32,
+                cy: image.pixels.height() as i32,
+            },
+            ptOffset: POINT {
+                x: (image.cursor_offset.x.0 * image.scale_factor).round() as i32,
+                y: (image.cursor_offset.y.0 * image.scale_factor).round() as i32,
+            },
+            hbmpDragImage: bitmap,
+            crColorKey: COLORREF(0xffffffff),
+        };
+        // The helper takes ownership of the bitmap only on success.
+        let result = helper.InitializeFromBitmap(&drag_image, data);
+        if result.is_err() {
+            let _ = DeleteObject(bitmap.into());
+        }
+        result?;
+        helper.cast()
     }
 }
 
@@ -1670,9 +1874,7 @@ fn hdrop_paths_from_data_object(data_object: &IDataObject) -> HdropPaths {
     paths.map_or(HdropPaths::Invalid, HdropPaths::Paths)
 }
 
-fn shell_item_paths_from_data_object(
-    data_object: &IDataObject,
-) -> Option<SmallVec<[PathBuf; 2]>> {
+fn shell_item_paths_from_data_object(data_object: &IDataObject) -> Option<SmallVec<[PathBuf; 2]>> {
     let items: IShellItemArray =
         unsafe { SHCreateShellItemArrayFromDataObject(data_object) }.ok()?;
     let count = unsafe { items.GetCount() }.ok()?;
@@ -1891,12 +2093,7 @@ struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>, Cell<bool>);
 impl WindowsDragDropHandler {
     fn drop_effect(&self) -> DROPEFFECT {
         if self.1.get() {
-            let modifiers = current_modifiers();
-            if modifiers.control || modifiers.alt {
-                DROPEFFECT_NONE
-            } else {
-                DROPEFFECT_MOVE
-            }
+            DROPEFFECT_MOVE
         } else {
             DROPEFFECT_COPY
         }
@@ -2148,6 +2345,7 @@ mod external_paths_drag_tests {
         WindowsFileDataObject {
             paths: hdrop_paths.unwrap_or_default(),
             internal_token: None,
+            shell_formats: RefCell::default(),
             preferred_effect: DROPEFFECT_COPY,
             performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
@@ -2164,6 +2362,7 @@ mod external_paths_drag_tests {
         WindowsFileDataObject {
             paths: Vec::new(),
             internal_token: None,
+            shell_formats: RefCell::default(),
             preferred_effect: DROPEFFECT_COPY,
             performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
@@ -2173,6 +2372,169 @@ mod external_paths_drag_tests {
             test_url_formats: Vec::new(),
         }
         .into()
+    }
+
+    #[test]
+    fn native_tab_payload_offers_only_private_data() {
+        let _com = TestComApartment::new();
+        let object: IDataObject = WindowsFileDataObject {
+            paths: Vec::new(),
+            internal_token: Some(uuid::Uuid::new_v4().to_string()),
+            shell_formats: RefCell::default(),
+            preferred_effect: DROPEFFECT_MOVE,
+            performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
+            test_offer_hdrop: true,
+            test_shell_id_list: None,
+            test_fail_shell_get_data: false,
+            test_url_formats: Vec::new(),
+        }
+        .into();
+        for format in [
+            super::CF_HDROP.0,
+            *super::PREFERRED_DROPEFFECT_FORMAT,
+            super::CF_UNICODETEXT.0,
+        ] {
+            let format = super::dropeffect_format_etc(format);
+            assert_ne!(unsafe { object.QueryGetData(&format) }, super::S_OK);
+            assert!(unsafe { object.GetData(&format) }.is_err());
+        }
+        let enumerator = unsafe { object.EnumFormatEtc(super::DATADIR_GET.0 as u32) }.unwrap();
+        let mut formats = [super::FORMATETC::default(); 2];
+        let mut count = 0;
+        assert_eq!(
+            unsafe { enumerator.Next(&mut formats, Some(&mut count)) },
+            super::S_FALSE
+        );
+        assert_eq!(count, 1);
+        assert_eq!(formats[0].cfFormat, *super::INTERNAL_DRAG_FORMAT);
+    }
+
+    #[test]
+    fn native_tab_drag_distinguishes_release_and_cancellation() {
+        let paths = ExternalPaths::internal();
+        let cancelled = Rc::new(Cell::new(false));
+        let source: super::IDropSource = super::WindowsFileDragSource {
+            paths: paths.clone(),
+            cancelled: cancelled.clone(),
+            preview: None,
+            scale_factor: 1.,
+        }
+        .into();
+        assert_eq!(
+            unsafe { source.QueryContinueDrag(false, super::MK_LBUTTON) },
+            super::S_OK
+        );
+        assert_eq!(
+            unsafe { source.QueryContinueDrag(true, super::MK_LBUTTON) },
+            super::DRAGDROP_S_CANCEL
+        );
+        assert_eq!(
+            paths.take_native_drag_result(),
+            crate::NativeDragResult::Cancelled
+        );
+        cancelled.set(true);
+        assert_eq!(
+            unsafe { source.QueryContinueDrag(false, super::MODIFIERKEYS_FLAGS(0)) },
+            super::DRAGDROP_S_CANCEL
+        );
+        assert_eq!(
+            paths.take_native_drag_result(),
+            crate::NativeDragResult::Cancelled
+        );
+        cancelled.set(false);
+        assert_eq!(
+            unsafe { source.QueryContinueDrag(false, super::MODIFIERKEYS_FLAGS(0)) },
+            super::DRAGDROP_S_DROP
+        );
+        assert!(matches!(
+            paths.take_native_drag_result(),
+            crate::NativeDragResult::Released { .. }
+        ));
+    }
+
+    #[test]
+    fn native_drag_image_releases_gdi_bitmaps() {
+        use windows::Win32::System::Threading::{
+            GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources,
+        };
+        let _com = TestComApartment::new();
+        let image = crate::NativeDragImage::new(
+            image::RgbaImage::from_pixel(16, 16, image::Rgba([240, 240, 240, 255])),
+            1.0,
+            crate::Point::default(),
+        );
+        let initialize = || {
+            let object = test_data_object(None, None);
+            let helper = super::initialize_native_drag_image(&image, &object).unwrap();
+            unsafe { helper.DragLeave() }.unwrap();
+        };
+        initialize(); // Warm up the shell's shared resources.
+        let before = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        for _ in 0..16 {
+            initialize();
+        }
+        let after = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+        assert!(
+            after <= before + 2,
+            "native drag bitmap leak: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn shell_drag_image_private_data_round_trips_global_memory_and_streams() {
+        use windows::Win32::{
+            System::Com::*, System::Ole::ReleaseStgMedium, UI::Shell::SHCreateMemStream,
+        };
+        let _com = TestComApartment::new();
+        let object = test_data_object(None, None);
+        let bytes = b"native drag image";
+        for tymed in [TYMED_HGLOBAL, TYMED_ISTREAM] {
+            let format = FORMATETC {
+                cfFormat: 0xc123,
+                dwAspect: DVASPECT_CONTENT.0,
+                lindex: -1,
+                tymed: tymed.0 as u32,
+                ..Default::default()
+            };
+            let medium = STGMEDIUM {
+                tymed: tymed.0 as u32,
+                u: if tymed == TYMED_HGLOBAL {
+                    STGMEDIUM_0 {
+                        hGlobal: super::allocate_global_payload(bytes).unwrap(),
+                    }
+                } else {
+                    STGMEDIUM_0 {
+                        pstm: mem::ManuallyDrop::new(unsafe { SHCreateMemStream(Some(bytes)) }),
+                    }
+                },
+                pUnkForRelease: Default::default(),
+            };
+            // Transfer ownership and ensure GetData retains its own copy/reference.
+            unsafe { object.SetData(&format, &medium, true) }.unwrap();
+            assert_eq!(
+                unsafe { object.QueryGetData(&format) },
+                windows::Win32::Foundation::S_OK
+            );
+            let mut restored = unsafe { object.GetData(&format) }.unwrap();
+            if tymed == TYMED_HGLOBAL {
+                let global = unsafe { restored.u.hGlobal };
+                let data = unsafe { super::GlobalLock(global) };
+                assert_eq!(
+                    unsafe { std::slice::from_raw_parts(data.cast::<u8>(), bytes.len()) },
+                    bytes
+                );
+                let _ = unsafe { super::GlobalUnlock(global) };
+            } else {
+                let stream = unsafe { restored.u.pstm.as_ref() }.unwrap();
+                let mut output = [0u8; 17];
+                unsafe { stream.Read(output.as_mut_ptr().cast(), output.len() as u32, None) }
+                    .ok()
+                    .unwrap();
+                assert_eq!(&output, bytes);
+            }
+            unsafe { ReleaseStgMedium(&mut restored) };
+        }
     }
 
     fn hdrop_paths_from_payload(payload: &[u8]) -> Vec<String> {
@@ -2231,7 +2593,10 @@ mod external_paths_drag_tests {
 
         let pfiles = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
         assert_eq!(pfiles, mem::size_of::<DROPFILES>() as u32);
-        assert_eq!(hdrop_paths_from_payload(&payload), [r"C:\Users\test\file.txt"]);
+        assert_eq!(
+            hdrop_paths_from_payload(&payload),
+            [r"C:\Users\test\file.txt"]
+        );
         assert_eq!(&payload[payload.len() - 4..], &[0, 0, 0, 0]);
     }
 
@@ -2270,6 +2635,7 @@ mod external_paths_drag_tests {
         let data_object: IDataObject = WindowsFileDataObject {
             paths: Vec::new(),
             internal_token: None,
+            shell_formats: RefCell::default(),
             preferred_effect: DROPEFFECT_COPY,
             performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
             logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
@@ -2318,6 +2684,7 @@ mod external_paths_drag_tests {
             let data_object: IDataObject = WindowsFileDataObject {
                 paths: Vec::new(),
                 internal_token: None,
+                shell_formats: RefCell::default(),
                 preferred_effect: DROPEFFECT_COPY,
                 performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
                 logical_performed_effect: Rc::new(Cell::new(DROPEFFECT_NONE)),
@@ -2497,28 +2864,52 @@ mod external_paths_drag_tests {
     #[test]
     fn external_drop_completion_is_scoped_reentrant_and_defaults_to_copy() {
         let active = RefCell::new(Vec::new());
-        assert!(!complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
+        assert!(!complete_active_windows_external_drop(
+            &active,
+            DROPEFFECT_NONE.0
+        ));
 
         let outer = Rc::new(ActiveWindowsExternalDrop {
             completed_effect: Cell::new(None),
         });
         let outer_guard = push_active_windows_external_drop(&active, outer.clone());
-        assert_eq!(completed_external_drop_effect(&outer, DROPEFFECT_COPY), DROPEFFECT_COPY);
+        assert_eq!(
+            completed_external_drop_effect(&outer, DROPEFFECT_COPY),
+            DROPEFFECT_COPY
+        );
 
         let inner = Rc::new(ActiveWindowsExternalDrop {
             completed_effect: Cell::new(None),
         });
         {
             let _inner_guard = push_active_windows_external_drop(&active, inner.clone());
-            assert!(complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
-            assert_eq!(completed_external_drop_effect(&inner, DROPEFFECT_COPY), DROPEFFECT_NONE);
-            assert_eq!(completed_external_drop_effect(&outer, DROPEFFECT_COPY), DROPEFFECT_COPY);
+            assert!(complete_active_windows_external_drop(
+                &active,
+                DROPEFFECT_NONE.0
+            ));
+            assert_eq!(
+                completed_external_drop_effect(&inner, DROPEFFECT_COPY),
+                DROPEFFECT_NONE
+            );
+            assert_eq!(
+                completed_external_drop_effect(&outer, DROPEFFECT_COPY),
+                DROPEFFECT_COPY
+            );
         }
 
-        assert!(complete_active_windows_external_drop(&active, DROPEFFECT_MOVE.0));
-        assert_eq!(completed_external_drop_effect(&outer, DROPEFFECT_COPY), DROPEFFECT_MOVE);
+        assert!(complete_active_windows_external_drop(
+            &active,
+            DROPEFFECT_MOVE.0
+        ));
+        assert_eq!(
+            completed_external_drop_effect(&outer, DROPEFFECT_COPY),
+            DROPEFFECT_MOVE
+        );
         drop(outer_guard);
-        assert!(!complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
+        assert!(!complete_active_windows_external_drop(
+            &active,
+            DROPEFFECT_NONE.0
+        ));
     }
 
     #[test]
@@ -2534,7 +2925,10 @@ mod external_paths_drag_tests {
 
         assert!(result.is_err());
         assert!(active.borrow().is_empty());
-        assert!(!complete_active_windows_external_drop(&active, DROPEFFECT_NONE.0));
+        assert!(!complete_active_windows_external_drop(
+            &active,
+            DROPEFFECT_NONE.0
+        ));
     }
 }
 
@@ -2707,12 +3101,7 @@ unsafe extern "system" fn window_procedure(
     )
 }
 
-fn window_procedure_inner(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+fn window_procedure_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
         let window_params = lparam.0 as *const CREATESTRUCTW;
         let window_params = unsafe { &*window_params };

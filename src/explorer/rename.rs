@@ -976,15 +976,23 @@ impl ExplorerView {
         self.next_pending_click_rename_id = self.next_pending_click_rename_id.wrapping_add(1);
 
         let task_path = path.clone();
-        let task = cx.spawn_in(window, async move |this, cx| {
+        self.hosted_window = Some(window.window_handle());
+        let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CLICK_RENAME_DELAY).await;
 
-            let _ = cx.update(|window, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    if this.complete_pending_click_rename(&task_path, request_id, window, cx) {
-                        cx.notify();
-                    }
-                });
+            let _ = cx.update(|cx| {
+                let host = this.upgrade().and_then(|view| view.read(cx).hosted_window);
+                if let Some(host) = host {
+                    let _ = host.update(cx, |_, window, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            if this
+                                .complete_pending_click_rename(&task_path, request_id, window, cx)
+                            {
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
             });
         });
 
@@ -1239,7 +1247,7 @@ impl ExplorerView {
         committed
     }
 
-    fn finish_active_rename_on_focus_out(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn finish_active_rename_on_focus_out(&mut self, cx: &mut Context<Self>) {
         let will_change_filesystem = self
             .active_rename
             .as_ref()

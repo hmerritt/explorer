@@ -1,14 +1,14 @@
 use super::{BoolExt, MacDisplay, NSRange, NSStringExt, ns_string, renderer};
 use crate::{
-    AnyWindowHandle, Bounds, Capslock, DisplayLink, ExternalPathDragOperations,
-    ExternalPathDragOperation, ExternalPaths, ExternalPathsDragResult, ExternalPathsDragStartResult,
-    FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel,
-    RequestFrameOptions, SharedString, Size, SystemWindowTab, Timer, WindowAppearance,
+    AnyWindowHandle, Bounds, Capslock, DisplayLink, ExternalPathDragOperation,
+    ExternalPathDragOperations, ExternalPaths, ExternalPathsDragResult,
+    ExternalPathsDragStartResult, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, Timer, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams,
-    dispatch_get_main_queue, dispatch_sys::dispatch_async_f, platform::PlatformInputHandler,
-    point, px, size,
+    dispatch_get_main_queue, dispatch_sys::dispatch_async_f, platform::PlatformInputHandler, point,
+    px, size,
 };
 use block::ConcreteBlock;
 use cocoa::{
@@ -271,6 +271,10 @@ unsafe fn build_classes() {
                     dragging_session_ended_at_point_operation
                         as extern "C" fn(&Object, Sel, id, NSPoint, NSDragOperation),
                 );
+                decl.add_method(
+                    sel!(ignoreModifierKeysForDraggingSession:),
+                    ignore_drag_modifier_keys as extern "C" fn(&Object, Sel, id) -> BOOL,
+                );
 
                 decl.add_method(
                     sel!(characterIndexForPoint:),
@@ -438,6 +442,7 @@ struct MacWindowState {
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
     external_files_dragged: bool,
+    native_drag_paths: Option<ExternalPaths>,
     external_paths_drag_operations: ExternalPathDragOperations,
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
@@ -755,6 +760,7 @@ impl MacWindow {
                 keystroke_for_do_command: None,
                 do_command_handled: None,
                 external_files_dragged: false,
+                native_drag_paths: None,
                 external_paths_drag_operations: ExternalPathDragOperations::COPY,
                 first_mouse: false,
                 fullscreen_restore_bounds: Bounds::default(),
@@ -2468,17 +2474,53 @@ extern "C" fn dragging_session_source_operation_mask(
     macos_drag_operation_mask(window_state.lock().external_paths_drag_operations)
 }
 
+extern "C" fn ignore_drag_modifier_keys(this: &Object, _: Sel, _: id) -> BOOL {
+    let state = unsafe { get_window_state(this) };
+    state
+        .lock()
+        .native_drag_paths
+        .as_ref()
+        .is_some_and(|paths| paths.internal_token().is_some()) as BOOL
+}
+
 extern "C" fn dragging_session_ended_at_point_operation(
     this: &Object,
     _: Sel,
     _: id,
-    _: NSPoint,
+    position: NSPoint,
     operation: NSDragOperation,
 ) {
     let window_state = unsafe { get_window_state(this) };
     {
         let mut lock = window_state.lock();
         lock.external_paths_drag_operations = ExternalPathDragOperations::COPY;
+    }
+    if let Some(paths) = window_state.lock().native_drag_paths.take() {
+        let buttons: NSUInteger = unsafe { msg_send![class!(NSEvent), pressedMouseButtons] };
+        let app = unsafe { NSApplication::sharedApplication(nil) };
+        let event: id = unsafe { msg_send![app, currentEvent] };
+        let released = if event != nil {
+            let kind: NSUInteger = unsafe { msg_send![event, type] };
+            // Require an actual left-button release. A cancelled session with
+            // no button held is ambiguous and must preserve source ownership.
+            kind == 2 && buttons & 1 == 0
+        } else {
+            false
+        };
+        paths.finish_native_drag(if released {
+            // AppKit is bottom-left based; GPUI uses the primary display's top-left.
+            let screens = unsafe { NSScreen::screens(nil) };
+            let screen = unsafe { screens.objectAtIndex(0) };
+            let frame = unsafe { NSScreen::frame(screen) };
+            crate::NativeDragResult::Released {
+                position: Some(point(
+                    px(position.x as f32),
+                    px((frame.size.height - position.y) as f32),
+                )),
+            }
+        } else {
+            crate::NativeDragResult::Cancelled
+        });
     }
     let result = macos_external_drag_result(operation);
     send_new_event(
@@ -2649,7 +2691,15 @@ fn start_macos_external_paths_drag(
 
     unsafe {
         let window_state = get_window_state(&*native_view);
+        window_state.lock().native_drag_paths = Some(paths.clone());
         window_state.lock().external_paths_drag_operations = paths.operations();
+
+        let app = NSApplication::sharedApplication(nil);
+        let event: id = msg_send![app, currentEvent];
+        if event == nil {
+            window_state.lock().external_paths_drag_operations = ExternalPathDragOperations::COPY;
+            return ExternalPathsDragStartResult::Failed;
+        }
 
         if let Some(token) = paths.internal_token() {
             let writer: id = msg_send![class!(NSPasteboardItem), new];
@@ -2658,9 +2708,54 @@ fn start_macos_external_paths_drag(
             let item: id = msg_send![item, initWithPasteboardWriter: writer];
             let _: () = msg_send![writer, release];
             if item != nil {
-                let image: id = msg_send![class!(NSImage), alloc];
-                let image: id = msg_send![image, initWithSize: NSSize::new(32., 32.)];
-                let _: () = msg_send![item, setDraggingFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(32., 32.)) contents: image];
+                let (image, frame) = if let Some(bitmap) = &paths.native_image {
+                    let width = bitmap.pixels.width() as f64 / bitmap.scale_factor as f64;
+                    let height = bitmap.pixels.height() as f64 / bitmap.scale_factor as f64;
+                    let rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+                    let rep: id = msg_send![rep, initWithBitmapDataPlanes: ptr::null_mut::<*mut u8>()
+                        pixelsWide: bitmap.pixels.width() as NSInteger pixelsHigh: bitmap.pixels.height() as NSInteger
+                        bitsPerSample: 8 as NSInteger samplesPerPixel: 4 as NSInteger hasAlpha: YES isPlanar: NO
+                        colorSpaceName: ns_string("NSDeviceRGBColorSpace") bitmapFormat: 2 as NSUInteger
+                        bytesPerRow: (bitmap.pixels.width() * 4) as NSInteger bitsPerPixel: 32 as NSInteger];
+                    if rep == nil {
+                        let _: () = msg_send![item, release];
+                        window_state.lock().external_paths_drag_operations =
+                            ExternalPathDragOperations::COPY;
+                        return ExternalPathsDragStartResult::Failed;
+                    }
+                    let data: *mut u8 = msg_send![rep, bitmapData];
+                    ptr::copy_nonoverlapping(
+                        bitmap.pixels.as_raw().as_ptr(),
+                        data,
+                        bitmap.pixels.as_raw().len(),
+                    );
+                    let logical_size = NSSize::new(width, height);
+                    let _: () = msg_send![rep, setSize: logical_size];
+                    let image: id = msg_send![class!(NSImage), alloc];
+                    let image: id = msg_send![image, initWithSize: logical_size];
+                    let _: () = msg_send![image, addRepresentation: rep];
+                    let _: () = msg_send![rep, release];
+                    let mouse: NSPoint = msg_send![event, locationInWindow];
+                    let mouse: NSPoint = msg_send![native_view, convertPoint: mouse fromView: nil];
+                    (
+                        image,
+                        NSRect::new(
+                            NSPoint::new(
+                                mouse.x - bitmap.cursor_offset.x.0 as f64,
+                                mouse.y - height + bitmap.cursor_offset.y.0 as f64,
+                            ),
+                            logical_size,
+                        ),
+                    )
+                } else {
+                    let image: id = msg_send![class!(NSImage), alloc];
+                    let image: id = msg_send![image, initWithSize: NSSize::new(32., 32.)];
+                    (
+                        image,
+                        NSRect::new(NSPoint::new(0., 0.), NSSize::new(32., 32.)),
+                    )
+                };
+                let _: () = msg_send![item, setDraggingFrame: frame contents: image];
                 let _: () = msg_send![image, release];
                 let item: id = msg_send![item, autorelease];
                 dragging_items.push(item);
@@ -2697,13 +2792,6 @@ fn start_macos_external_paths_drag(
             return ExternalPathsDragStartResult::Failed;
         }
 
-        let app = NSApplication::sharedApplication(nil);
-        let event: id = msg_send![app, currentEvent];
-        if event == nil {
-            window_state.lock().external_paths_drag_operations = ExternalPathDragOperations::COPY;
-            return ExternalPathsDragStartResult::Failed;
-        }
-
         let items = NSArray::arrayWithObjects(nil, &dragging_items);
         let session: id = msg_send![
             native_view,
@@ -2715,6 +2803,9 @@ fn start_macos_external_paths_drag(
             window_state.lock().external_paths_drag_operations = ExternalPathDragOperations::COPY;
             ExternalPathsDragStartResult::Failed
         } else {
+            if paths.native_image.is_some() {
+                let _: () = msg_send![session, setAnimatesToStartingPositionsOnCancelOrFail: NO];
+            }
             ExternalPathsDragStartResult::Pending
         }
     }

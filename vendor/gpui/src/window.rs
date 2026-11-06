@@ -150,6 +150,171 @@ mod tests {
         .unwrap();
     }
 
+    #[crate::test]
+    fn native_image_drag_crosses_windows_and_completes_once(cx: &mut crate::TestAppContext) {
+        use std::cell::Cell;
+        let source = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| DragTestView))
+                .unwrap()
+        });
+        let other = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| DragTestView))
+                .unwrap()
+        });
+        let mut paths = crate::ExternalPaths::internal();
+        paths.source_window = Some(source.window_id());
+        paths.native_image = Some(Arc::new(crate::NativeDragImage::new(
+            image::RgbaImage::new(8, 8),
+            2.0,
+            point(px(2.), px(2.)),
+        )));
+        let completed = Rc::new(Cell::new(0));
+        let counter = completed.clone();
+        let view = source.root(cx).unwrap();
+        cx.update(|cx| {
+            cx.active_drag = Some(AnyDrag {
+                value: Arc::new(42u64),
+                view: view.into(),
+                cursor_offset: point(px(2.), px(2.)),
+                cursor_style: None,
+                external_paths: Some(paths.clone()),
+                external_paths_callback: Some(Box::new(move |_, _| counter.set(counter.get() + 1))),
+            });
+            cx.update_window(*source, |_, window, cx| {
+                assert!(window.cancel_window_drag_and_start_external_paths_drag(cx));
+                assert!(cx.internal_native_drag.is_some());
+                assert!(cx.has_active_drag());
+                window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Exited), cx);
+                assert!(cx.internal_native_drag.is_some());
+                assert!(!cx.has_active_drag());
+            })
+            .unwrap();
+            cx.update_window(*other, |_, window, cx| {
+                let result = window.dispatch_event(
+                    PlatformInput::FileDrop(FileDropEvent::Entered {
+                        position: point(px(10.), px(10.)),
+                        paths: paths.clone(),
+                    }),
+                    cx,
+                );
+                assert!(!result.default_prevented);
+                assert!(cx.has_active_drag());
+            })
+            .unwrap();
+            cx.update_window(*source, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::FileDrop(FileDropEvent::Entered {
+                        position: point(px(10.), px(10.)),
+                        paths: paths.clone(),
+                    }),
+                    cx,
+                );
+                assert_eq!(
+                    *cx.active_drag
+                        .as_ref()
+                        .unwrap()
+                        .value
+                        .downcast_ref::<u64>()
+                        .unwrap(),
+                    42
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseUp(crate::MouseUpEvent {
+                        position: point(px(10.), px(10.)),
+                        button: MouseButton::Right,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                    }),
+                    cx,
+                );
+                assert!(cx.has_active_drag());
+                assert!(cx.internal_native_drag.is_some());
+                cx.complete_external_paths_drag(ExternalPathsDragResult::Cancelled);
+                cx.complete_external_paths_drag(ExternalPathsDragResult::Cancelled);
+                assert!(cx.internal_native_drag.is_none());
+                assert!(!cx.has_active_drag());
+            })
+            .unwrap();
+        });
+        assert_eq!(completed.get(), 1);
+    }
+
+    #[crate::test]
+    fn closing_native_drag_source_releases_session(cx: &mut crate::TestAppContext) {
+        let source = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| DragTestView))
+                .unwrap()
+        });
+        let view = source.root(cx).unwrap();
+        let mut paths = crate::ExternalPaths::internal();
+        paths.source_window = Some(source.window_id());
+        paths.native_image = Some(Arc::new(crate::NativeDragImage::new(
+            image::RgbaImage::new(8, 8),
+            1.0,
+            Point::default(),
+        )));
+        let completed = Rc::new(std::cell::Cell::new(false));
+        let counter = completed.clone();
+        cx.update(|cx| {
+            cx.active_drag = Some(AnyDrag {
+                value: Arc::new(42u64),
+                view: view.into(),
+                cursor_offset: Point::default(),
+                cursor_style: None,
+                external_paths: Some(paths),
+                external_paths_callback: Some(Box::new(move |_, _| counter.set(true))),
+            });
+            cx.update_window(*source, |_, window, cx| {
+                window.cancel_window_drag_and_start_external_paths_drag(cx);
+                assert!(cx.internal_native_drag.is_some());
+                window.remove_window();
+            })
+            .unwrap();
+            assert!(!cx.has_active_drag());
+            assert!(cx.internal_native_drag.is_none());
+        });
+        assert!(completed.get());
+    }
+
+    #[crate::test]
+    fn failed_native_start_clears_payload_and_calls_completion(cx: &mut crate::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| DragTestView))
+                .unwrap()
+        });
+        cx.test_window(*window).0.lock().fail_native_drag_start = true;
+        let mut paths = crate::ExternalPaths::internal();
+        paths.native_image = Some(Arc::new(crate::NativeDragImage::new(
+            image::RgbaImage::new(8, 8),
+            1.0,
+            Point::default(),
+        )));
+        paths.source_window = Some(window.window_id());
+        let view = window.root(cx).unwrap();
+        let completed = Rc::new(std::cell::Cell::new(false));
+        let counter = completed.clone();
+        cx.update(|cx| {
+            cx.active_drag = Some(AnyDrag {
+                value: Arc::new(42u64),
+                view: view.into(),
+                cursor_offset: Point::default(),
+                cursor_style: None,
+                external_paths: Some(paths),
+                external_paths_callback: Some(Box::new(move |result, _| {
+                    assert_eq!(result, ExternalPathsDragResult::Cancelled);
+                    counter.set(true);
+                })),
+            });
+            cx.update_window(*window, |_, window, cx| {
+                window.cancel_window_drag_and_start_external_paths_drag(cx);
+                assert!(!cx.has_active_drag());
+                assert!(cx.internal_native_drag.is_none());
+            })
+            .unwrap();
+        });
+        assert!(completed.get());
+    }
+
     #[test]
     fn external_paths_drag_handoff_stays_inside_window() {
         assert!(!should_start_external_paths_drag(
@@ -2297,10 +2462,17 @@ impl Window {
             prompt_element = Some(element);
             self.prompt = Some(prompt);
         } else if let Some(active_drag) = cx.active_drag.take() {
-            let mut element = active_drag.view.clone().into_any();
-            let offset = self.mouse_position() - active_drag.cursor_offset;
-            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
-            active_drag_element = Some(element);
+            let native_image_visible = cx.internal_native_drag.as_ref().is_some_and(|drag| {
+                drag.external_paths
+                    .as_ref()
+                    .is_some_and(|paths| paths.native_image.is_some())
+            });
+            if !native_image_visible {
+                let mut element = active_drag.view.clone().into_any();
+                let offset = self.mouse_position() - active_drag.cursor_offset;
+                element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
+                active_drag_element = Some(element);
+            }
             cx.active_drag = Some(active_drag);
         } else {
             tooltip_element = self.prepaint_tooltip(cx);
@@ -3998,10 +4170,38 @@ impl Window {
 
         self.rendered_frame.mouse_listeners = mouse_listeners;
 
+        if event
+            .downcast_ref::<MouseUpEvent>()
+            .is_some_and(|event| event.button == MouseButton::Left)
+            && cx.internal_native_drag.as_ref().is_some_and(|drag| {
+                drag.external_paths
+                    .as_ref()
+                    .is_some_and(|paths| paths.native_image.is_some())
+            })
+        {
+            if let Some(paths) = cx
+                .internal_native_drag
+                .as_ref()
+                .and_then(|drag| drag.external_paths.as_ref())
+            {
+                let position = event
+                    .downcast_ref::<MouseUpEvent>()
+                    .map(|event| self.bounds().origin + event.position);
+                paths.finish_native_drag(crate::NativeDragResult::Released { position });
+            }
+            // Keep the source alive until the native loop reports completion.
+            // FileDrop::Submit is translated to MouseUp before that happens.
+        }
+
         if cx.has_active_drag() {
             if let Some(event) = event.downcast_ref::<MouseMoveEvent>() {
                 if cx.internal_native_drag.is_none()
-                    && should_start_external_paths_drag(event.position, self.bounds().size)
+                    && (should_start_external_paths_drag(event.position, self.bounds().size)
+                        || cx.active_drag.as_ref().is_some_and(|drag| {
+                            drag.external_paths
+                                .as_ref()
+                                .is_some_and(|paths| paths.native_image.is_some())
+                        }))
                 {
                     self.cancel_window_drag_and_start_external_paths_drag(cx);
                     return;
@@ -4012,7 +4212,10 @@ impl Window {
                 self.refresh();
             } else if event.is::<MouseExitEvent>() && cx.internal_native_drag.is_none() {
                 self.cancel_window_drag_and_start_external_paths_drag(cx);
-            } else if event.is::<MouseUpEvent>() {
+            } else if event
+                .downcast_ref::<MouseUpEvent>()
+                .is_some_and(|event| event.button == MouseButton::Left)
+            {
                 // If this was a mouse up event, cancel the active drag and redraw
                 // the window.
                 cx.active_drag = None;
@@ -4021,7 +4224,10 @@ impl Window {
         }
     }
 
-    fn cancel_window_drag_and_start_external_paths_drag(&mut self, cx: &mut App) -> bool {
+    pub(crate) fn cancel_window_drag_and_start_external_paths_drag(
+        &mut self,
+        cx: &mut App,
+    ) -> bool {
         let Some(mut drag) = cx.active_drag.take() else {
             return false;
         };
@@ -4039,6 +4245,18 @@ impl Window {
         arena_clear_needed.clear();
 
         if let Some(paths) = external_paths {
+            if paths.native_image.is_some() {
+                if let Some(drag) = &cx.internal_native_drag {
+                    cx.active_drag = Some(AnyDrag {
+                        value: drag.value.clone(),
+                        view: drag.view.clone(),
+                        cursor_offset: drag.cursor_offset,
+                        cursor_style: drag.cursor_style,
+                        external_paths: None,
+                        external_paths_callback: None,
+                    });
+                }
+            }
             cx.external_paths_drag_callback = external_paths_callback;
             match self.platform_window.start_external_paths_drag(paths) {
                 ExternalPathsDragStartResult::Pending => {}
@@ -4046,6 +4264,13 @@ impl Window {
                     cx.complete_external_paths_drag(result);
                 }
                 ExternalPathsDragStartResult::Failed => {
+                    if let Some(paths) = cx
+                        .internal_native_drag
+                        .as_ref()
+                        .and_then(|drag| drag.external_paths.as_ref())
+                    {
+                        paths.finish_native_drag(crate::NativeDragResult::Failed);
+                    }
                     cx.complete_external_paths_drag(ExternalPathsDragResult::Cancelled);
                 }
             }
@@ -4056,6 +4281,20 @@ impl Window {
     }
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
+        if event
+            .downcast_ref::<KeyDownEvent>()
+            .is_some_and(|event| event.keystroke.key == "escape")
+            && cx.internal_native_drag.as_ref().is_some_and(|drag| {
+                drag.external_paths
+                    .as_ref()
+                    .is_some_and(|paths| paths.native_image.is_some())
+            })
+        {
+            cx.stop_active_drag(self);
+            cx.stop_propagation();
+            self.default_prevented = true;
+            return;
+        }
         if self.invalidator.is_dirty() {
             self.draw(cx).clear();
         }

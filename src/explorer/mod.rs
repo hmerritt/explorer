@@ -161,5 +161,6 @@ pub mod benchmark_support {
     }
 }
 pub use tabs::ExplorerTabs;
+pub(crate) use tabs::TabTransfer;
 #[allow(unused_imports)]
 pub use view::ExplorerView;

@@ -887,7 +887,15 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn start_external_paths_drag(&self, paths: ExternalPaths) -> ExternalPathsDragStartResult {
-        self.borrow().client.start_external_paths_drag(&self.0, paths)
+        self.borrow()
+            .client
+            .start_external_paths_drag(&self.0, paths)
+    }
+
+    fn cancel_external_paths_drag(&self) {
+        self.borrow()
+            .client
+            .cancel_external_paths_drag(&self.0.surface());
     }
 
     fn modifiers(&self) -> Modifiers {

@@ -25,6 +25,8 @@ mod global;
 mod input;
 mod inspector;
 mod interactive;
+mod native_drag;
+pub use native_drag::*;
 mod key_dispatch;
 mod keymap;
 mod path_builder;

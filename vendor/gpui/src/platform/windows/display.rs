@@ -246,7 +246,7 @@ fn generate_uuid(device_name: &[u16]) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, &name)
 }
 
-fn get_scale_factor_for_monitor(monitor: HMONITOR) -> Result<f32> {
+pub(super) fn get_scale_factor_for_monitor(monitor: HMONITOR) -> Result<f32> {
     let mut dpi_x = 0;
     let mut dpi_y = 0;
     unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }?;

@@ -156,6 +156,154 @@ pub(crate) struct XdndSource {
     paths: ExternalPaths,
     requested_action: u32,
     accepted_action: Option<u32>,
+    icon: Option<X11DragIcon>,
+}
+
+/// An ARGB override-redirect window. Its empty input shape lets both pointer
+/// hit-testing and XDND discovery see the application beneath the preview.
+struct X11DragIcon {
+    connection: Rc<XCBConnection>,
+    window: xproto::Window,
+    colormap: xproto::Colormap,
+    pixmap: xproto::Pixmap,
+    gc: xproto::Gcontext,
+    offset: (i32, i32),
+}
+
+impl X11DragIcon {
+    fn new(
+        connection: Rc<XCBConnection>,
+        screen_index: usize,
+        image: &crate::NativeDragImage,
+    ) -> anyhow::Result<Self> {
+        use x11rb::protocol::shape::ConnectionExt as _;
+        let screen = &connection.setup().roots[screen_index];
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .filter(|d| d.depth == 32)
+            .flat_map(|d| &d.visuals)
+            .find(|v| (v.red_mask, v.green_mask, v.blue_mask) == (0xff0000, 0xff00, 0xff))
+            .ok_or_else(|| anyhow!("no ARGB visual available for native drag image"))?;
+        let window = connection.generate_id()?;
+        let colormap = connection.generate_id()?;
+        let pixmap = connection.generate_id()?;
+        let gc = connection.generate_id()?;
+        connection
+            .create_colormap(
+                xproto::ColormapAlloc::NONE,
+                colormap,
+                screen.root,
+                visual.visual_id,
+            )?
+            .check()?;
+        // Install the owner before issuing fallible requests, so partial setup is cleaned up.
+        let icon = Self {
+            connection: connection.clone(),
+            window,
+            colormap,
+            pixmap,
+            gc,
+            offset: (
+                (image.cursor_offset.x.0 * image.scale_factor).round() as i32,
+                (image.cursor_offset.y.0 * image.scale_factor).round() as i32,
+            ),
+        };
+        connection
+            .create_window(
+                32,
+                window,
+                screen.root,
+                0,
+                0,
+                image.pixels.width() as u16,
+                image.pixels.height() as u16,
+                0,
+                xproto::WindowClass::INPUT_OUTPUT,
+                visual.visual_id,
+                &xproto::CreateWindowAux::new()
+                    .override_redirect(1)
+                    .background_pixel(0)
+                    .border_pixel(0)
+                    .colormap(colormap),
+            )?
+            .check()?;
+        connection
+            .shape_rectangles(
+                x11rb::protocol::shape::SO::SET,
+                x11rb::protocol::shape::SK::INPUT,
+                xproto::ClipOrdering::UNSORTED,
+                window,
+                0,
+                0,
+                &[],
+            )?
+            .check()?;
+        connection
+            .create_pixmap(
+                32,
+                pixmap,
+                window,
+                image.pixels.width() as u16,
+                image.pixels.height() as u16,
+            )?
+            .check()?;
+        connection
+            .create_gc(gc, pixmap, &xproto::CreateGCAux::new())?
+            .check()?;
+        let bytes = image.premultiplied_bgra();
+        // Bound requests to a scanline; tab images also fit servers without BIG-REQUESTS.
+        let stride = image.pixels.width() as usize * 4;
+        for (row, data) in bytes.chunks(stride).enumerate() {
+            if let Err(error) = connection
+                .put_image(
+                    xproto::ImageFormat::Z_PIXMAP,
+                    pixmap,
+                    gc,
+                    image.pixels.width() as u16,
+                    1,
+                    0,
+                    row as i16,
+                    0,
+                    32,
+                    data,
+                )?
+                .check()
+            {
+                return Err(error.into());
+            }
+        }
+        connection
+            .change_window_attributes(
+                window,
+                &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
+            )?
+            .check()?;
+        connection.map_window(window)?.check()?;
+        Ok(icon)
+    }
+
+    fn move_to(&self, x: i16, y: i16) {
+        self.connection
+            .configure_window(
+                self.window,
+                &xproto::ConfigureWindowAux::new()
+                    .x(x as i32 - self.offset.0)
+                    .y(y as i32 - self.offset.1)
+                    .stack_mode(xproto::StackMode::ABOVE),
+            )
+            .log_err();
+    }
+}
+
+impl Drop for X11DragIcon {
+    fn drop(&mut self) {
+        self.connection.destroy_window(self.window).log_err();
+        self.connection.free_colormap(self.colormap).log_err();
+        self.connection.free_gc(self.gc).log_err();
+        self.connection.free_pixmap(self.pixmap).log_err();
+        self.connection.flush().log_err();
+    }
 }
 
 #[derive(Debug)]
@@ -282,7 +430,20 @@ impl X11ClientStatePtr {
         }
 
         let source_window = window.x_window;
-        let event_mask = EventMask::BUTTON_RELEASE | EventMask::BUTTON_MOTION | EventMask::POINTER_MOTION;
+        let icon = match paths
+            .native_image
+            .as_ref()
+            .map(|image| X11DragIcon::new(state.xcb_connection.clone(), state.x_root_index, image))
+            .transpose()
+        {
+            Ok(icon) => icon,
+            Err(error) => {
+                log::error!("unable to create X11 drag image: {error}");
+                return ExternalPathsDragStartResult::Failed;
+            }
+        };
+        let event_mask =
+            EventMask::BUTTON_RELEASE | EventMask::BUTTON_MOTION | EventMask::POINTER_MOTION;
         let grab = get_reply(
             || "Failed to grab X11 pointer for XDND source drag",
             state.xcb_connection.grab_pointer(
@@ -297,8 +458,28 @@ impl X11ClientStatePtr {
             ),
         )
         .log_err();
-        if grab.is_none() {
+        if !grab.is_some_and(|reply| reply.status == xproto::GrabStatus::SUCCESS) {
             return ExternalPathsDragStartResult::Failed;
+        }
+        if paths.native_image.is_some() {
+            let keyboard = state
+                .xcb_connection
+                .grab_keyboard(
+                    false,
+                    source_window,
+                    x11rb::CURRENT_TIME,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                )
+                .ok()
+                .and_then(|cookie| cookie.reply().ok());
+            if !keyboard.is_some_and(|reply| reply.status == xproto::GrabStatus::SUCCESS) {
+                state
+                    .xcb_connection
+                    .ungrab_pointer(x11rb::CURRENT_TIME)
+                    .log_err();
+                return ExternalPathsDragStartResult::Failed;
+            }
         }
 
         check_reply(
@@ -339,11 +520,22 @@ impl X11ClientStatePtr {
                 root,
                 source_window,
                 pointer.child,
+                paths.native_image.is_some(),
             )
         });
 
+        if let (Some(icon), Some(pointer)) = (&icon, &pointer) {
+            icon.move_to(pointer.root_x, pointer.root_y);
+        }
+
         if let Some(target_window) = target_window {
-            xdnd_send_enter(&state.xcb_connection, &state.atoms, source_window, target_window);
+            xdnd_send_enter(
+                &state.xcb_connection,
+                &state.atoms,
+                source_window,
+                target_window,
+                paths.internal_token().is_some(),
+            );
             if let Some(pointer) = &pointer {
                 xdnd_send_position(
                     &state.xcb_connection,
@@ -365,9 +557,44 @@ impl X11ClientStatePtr {
             paths,
             requested_action,
             accepted_action: None,
+            icon,
         });
         xcb_flush(&state.xcb_connection);
         ExternalPathsDragStartResult::Pending
+    }
+
+    pub(crate) fn cancel_external_paths_drag(&self, window: xproto::Window) {
+        let Some(client) = self.get_client() else {
+            return;
+        };
+        let mut state = client.0.borrow_mut();
+        if !state
+            .xdnd_source
+            .as_ref()
+            .is_some_and(|source| source.source_window == window)
+        {
+            return;
+        }
+        let source = state.xdnd_source.take().unwrap();
+        if let Some(target) = source.target_window {
+            xdnd_send_leave(&state.xcb_connection, &state.atoms, window, target);
+        }
+        state
+            .xcb_connection
+            .set_selection_owner(x11rb::NONE, state.atoms.XdndSelection, x11rb::CURRENT_TIME)
+            .log_err();
+        state
+            .xcb_connection
+            .ungrab_pointer(x11rb::CURRENT_TIME)
+            .log_err();
+        if source.icon.is_some() {
+            state
+                .xcb_connection
+                .ungrab_keyboard(x11rb::CURRENT_TIME)
+                .log_err();
+        }
+        drop(source);
+        xcb_flush(&state.xcb_connection);
     }
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
@@ -871,6 +1098,9 @@ impl X11Client {
         let Some(pointer) = pointer else {
             return true;
         };
+        if let Some(icon) = &source.icon {
+            icon.move_to(pointer.root_x, pointer.root_y);
+        }
 
         let target_window = xdnd_target_window_at_pointer(
             &state.xcb_connection,
@@ -878,6 +1108,7 @@ impl X11Client {
             root,
             source_window,
             pointer.child,
+            source.paths.native_image.is_some(),
         );
         let previous_target = source.target_window;
 
@@ -896,6 +1127,7 @@ impl X11Client {
                     &state.atoms,
                     source_window,
                     target_window,
+                    source.paths.internal_token().is_some(),
                 );
             }
             if let Some(source) = state.xdnd_source.as_mut() {
@@ -926,6 +1158,22 @@ impl X11Client {
         let Some(source) = state.xdnd_source.as_ref() else {
             return false;
         };
+
+        let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+        let position = state
+            .xcb_connection
+            .query_pointer(root)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|p| {
+                Point::new(
+                    px(p.root_x as f32 / source.window.state.borrow().scale_factor),
+                    px(p.root_y as f32 / source.window.state.borrow().scale_factor),
+                )
+            });
+        source
+            .paths
+            .finish_native_drag(crate::NativeDragResult::Released { position });
 
         if let (Some(target_window), Some(_accepted_action)) =
             (source.target_window, source.accepted_action)
@@ -965,6 +1213,12 @@ impl X11Client {
             .xcb_connection
             .ungrab_pointer(x11rb::CURRENT_TIME)
             .log_err();
+        if source.icon.is_some() {
+            state
+                .xcb_connection
+                .ungrab_keyboard(x11rb::CURRENT_TIME)
+                .log_err();
+        }
         xcb_flush(&state.xcb_connection);
         drop(state);
         source
@@ -1023,9 +1277,7 @@ impl X11Client {
                             ((arg1 & 1) != 0 && arg4 != x11rb::NONE).then_some(arg4);
                     }
                     return Some(());
-                } else if event.type_ == state.atoms.XdndFinished
-                    && state.xdnd_source.is_some()
-                {
+                } else if event.type_ == state.atoms.XdndFinished && state.xdnd_source.is_some() {
                     let result = xdnd_finished_result(arg1 != 0, arg2, &state.atoms);
                     let Some(source) = state.xdnd_source.take() else {
                         return Some(());
@@ -1041,6 +1293,9 @@ impl X11Client {
                     )
                     .log_err();
                     xcb.ungrab_pointer(x11rb::CURRENT_TIME).log_err();
+                    if source.icon.is_some() {
+                        xcb.ungrab_keyboard(x11rb::CURRENT_TIME).log_err();
+                    }
                     drop(state);
                     source
                         .window
@@ -1049,6 +1304,7 @@ impl X11Client {
                 }
 
                 if event.type_ == state.atoms.XdndEnter {
+                    state.xdnd_state = Xdnd::default();
                     state.xdnd_state.other_window = atom;
                     if (arg1 & 0x1) == 0x1 {
                         state.xdnd_state.drag_type = xdnd_get_supported_atom(
@@ -1058,6 +1314,7 @@ impl X11Client {
                         );
                     } else {
                         if let Some(atom) = [
+                            state.atoms.InternalDrag,
                             state.atoms.MozUrl,
                             state.atoms.TextUriList,
                             state.atoms.UTF8_STRING,
@@ -1173,6 +1430,8 @@ impl X11Client {
                 if let Some(payload) = text.and_then(|text| {
                     if browser {
                         ExternalPaths::from_browser_url_list(text.trim_end_matches('\0'))
+                    } else if state.xdnd_state.drag_type == state.atoms.InternalDrag {
+                        ExternalPaths::from_internal_token_payload(&text)
                     } else {
                         ExternalPaths::from_uri_list(&text)
                     }
@@ -1351,6 +1610,23 @@ impl X11Client {
                     }
                     keystroke
                 };
+                if keystroke.key == "escape"
+                    && state
+                        .xdnd_source
+                        .as_ref()
+                        .is_some_and(|source| source.icon.is_some())
+                {
+                    let source = state.xdnd_source.as_ref().unwrap();
+                    let window = source.window.clone();
+                    let id = source.source_window;
+                    drop(state);
+                    let pointer = X11ClientStatePtr(Rc::downgrade(&self.0));
+                    pointer.cancel_external_paths_drag(id);
+                    window.handle_input(PlatformInput::ExternalPathsDragFinished(
+                        ExternalPathsDragResult::Cancelled,
+                    ));
+                    return Some(());
+                }
                 drop(state);
                 window.handle_input(PlatformInput::KeyDown(crate::KeyDownEvent {
                     keystroke,
@@ -1458,8 +1734,8 @@ impl X11Client {
                     }
                 }
             }
-            Event::ButtonRelease(_) => {
-                if self.finish_xdnd_source_drop() {
+            Event::ButtonRelease(event) => {
+                if event.detail == 1 && self.finish_xdnd_source_drop() {
                     return Some(());
                 }
             }
@@ -1469,7 +1745,7 @@ impl X11Client {
                 }
             }
             Event::XinputButtonRelease(event) => {
-                if self.finish_xdnd_source_drop() {
+                if event.detail == 1 && self.finish_xdnd_source_drop() {
                     return Some(());
                 }
                 let window = self.get_window(event.event)?;
@@ -2346,6 +2622,7 @@ fn xdnd_get_supported_atom(
     {
         let offered: Vec<_> = atoms.collect();
         for atom in [
+            supported_atoms.InternalDrag,
             supported_atoms.MozUrl,
             supported_atoms.TextUriList,
             supported_atoms.UTF8_STRING,
@@ -2457,6 +2734,7 @@ fn xdnd_target_window_at_pointer(
     root: xproto::Window,
     source_window: xproto::Window,
     child: xproto::Window,
+    include_source: bool,
 ) -> Option<xproto::Window> {
     let mut window = child;
     if window == x11rb::NONE {
@@ -2476,7 +2754,9 @@ fn xdnd_target_window_at_pointer(
     }
 
     loop {
-        if window != source_window && xdnd_window_is_aware(xcb_connection, atoms, window) {
+        if (include_source || window != source_window)
+            && xdnd_window_is_aware(xcb_connection, atoms, window)
+        {
             return Some(window);
         }
         if window == root || window == x11rb::NONE {
@@ -2529,12 +2809,20 @@ fn xdnd_send_enter(
     atoms: &XcbAtoms,
     source: xproto::Window,
     target: xproto::Window,
+    internal: bool,
 ) {
     let message = ClientMessageEvent {
         format: 32,
         window: target,
         type_: atoms.XdndEnter,
-        data: ClientMessageData::from(xdnd_enter_data(source, atoms.TextUriList)),
+        data: ClientMessageData::from(xdnd_enter_data(
+            source,
+            if internal {
+                atoms.InternalDrag
+            } else {
+                atoms.TextUriList
+            },
+        )),
         sequence: 0,
         response_type: xproto::CLIENT_MESSAGE_EVENT,
     };
@@ -2627,15 +2915,24 @@ fn xdnd_handle_source_selection_request(
     let mut response_property = x11rb::NONE;
 
     if let Some(source) = source {
-        if event.target == atoms.TextUriList {
-            let uri_list = source.paths.to_uri_list();
+        let offered_type = if source.paths.internal_token().is_some() {
+            atoms.InternalDrag
+        } else {
+            atoms.TextUriList
+        };
+        if event.target == offered_type {
+            let uri_list = source
+                .paths
+                .internal_token()
+                .map(str::to_owned)
+                .unwrap_or_else(|| source.paths.to_uri_list());
             if check_reply(
                 || "Failed to write XDND text/uri-list selection",
                 xcb_connection.change_property8(
                     xproto::PropMode::REPLACE,
                     event.requestor,
                     property,
-                    atoms.TextUriList,
+                    offered_type,
                     uri_list.as_bytes(),
                 ),
             )
@@ -2652,7 +2949,7 @@ fn xdnd_handle_source_selection_request(
                     event.requestor,
                     property,
                     atoms.XA_ATOM,
-                    &[atoms.TextUriList],
+                    &[offered_type],
                 ),
             )
             .log_err()

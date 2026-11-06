@@ -212,6 +212,7 @@ x11rb = { version = "0.13.1", features = [
     "xinput",
     "cursor",
     "resource_manager",
+    "shape",
     "sync",
 ], optional = true }
 xkbcommon = { version = "0.8.0", features = [

@@ -161,12 +161,11 @@ pub(crate) fn render_titlebar_drag_region<T: WindowDragState + 'static>(
     id: &'static str,
     decorations: Decorations,
     cx: &mut Context<T>,
-) -> AnyElement {
+) -> Stateful<Div> {
     render_titlebar_drag_surface(id, decorations, cx)
         .h_full()
         .min_w(px(TITLEBAR_DRAG_MIN_WIDTH))
         .flex_1()
-        .into_any_element()
 }
 
 pub(crate) fn render_titlebar_drag_overlay<T: WindowDragState + 'static>(
