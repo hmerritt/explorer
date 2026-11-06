@@ -1284,6 +1284,7 @@ impl ExplorerView {
                 .background_executor()
                 .spawn({
                     async move {
+                        let _span = crate::startup_trace::Span::new("directory_load");
                         let entries = request.load();
                         DirectoryLoadResult {
                             entries,
@@ -1503,6 +1504,7 @@ impl ExplorerView {
         if self.directory_load_generation != state.generation || self.path != state.path {
             return false;
         }
+        let _span = crate::startup_trace::Span::new("directory_apply");
         if self.is_trash_view()
             && result
                 .entries
@@ -2193,7 +2195,8 @@ impl ExplorerView {
 
     fn start_device_catalog_tasks(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "benchmarks")]
-        if crate::performance::config_root().is_some() {
+        if crate::performance::config_root().is_some() && !crate::performance::startup::is_active()
+        {
             return;
         }
         self.start_remote_events(cx);

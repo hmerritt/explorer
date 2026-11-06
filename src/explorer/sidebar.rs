@@ -49,6 +49,7 @@ pub(super) fn sidebar_sections(
     settings: &SidebarSettings,
     filesystem_name: &str,
 ) -> SidebarSections {
+    let _span = crate::startup_trace::Span::new("sidebar_discovery");
     let (network_roots, drive_roots) = local_drive_roots()
         .into_iter()
         .partition(|path| path_is_remote_drive(path));

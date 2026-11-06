@@ -525,6 +525,7 @@ fn open_explorer_window_at(
     display_id: Option<DisplayId>,
     cx: &mut App,
 ) -> WindowHandle<Explorer> {
+    let _span = crate::startup_trace::Span::new("open_window");
     let handle = cx
         .open_window(
             WindowOptions {
@@ -551,6 +552,7 @@ fn open_explorer_window_at(
                 let explorer = cx.new(|cx| {
                     let focus_handle = cx.focus_handle();
                     focus_handle.focus(window);
+                    let _span = crate::startup_trace::Span::new("explorer_tabs");
                     ExplorerTabs::new(path, focus_handle, window, cx)
                 });
 
@@ -567,6 +569,8 @@ fn open_explorer_window_at(
                     })
                     .detach();
 
+                    #[cfg(feature = "benchmarks")]
+                    crate::performance::startup::attach(explorer.clone(), window, cx);
                     Explorer { explorer }
                 })
             },
@@ -615,6 +619,8 @@ fn handle_initial_launch(request: LaunchRequest, cx: &mut App) {
 }
 
 fn handle_launch_request(request: LaunchRequest, cx: &mut App) {
+    #[cfg(feature = "benchmarks")]
+    crate::performance::startup::launch_received(cx);
     if let Some(path) = request.epub_path {
         if let Err(error) = crate::epub_reader::open_epub_window(path, cx) {
             eprintln!("{error}");
@@ -1457,20 +1463,39 @@ fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
 }
 
 fn initialize_application(cx: &mut App, args: Vec<OsString>) {
-    register_embedded_fonts(cx);
-    crate::http_client::initialize(cx);
-    crate::debug_options::initialize(cx, args);
-    crate::settings::initialize(cx);
+    let _span = crate::startup_trace::Span::new("application_initialization");
+    macro_rules! stage {
+        ($name:literal, $body:expr) => {{
+            let _span = crate::startup_trace::Span::new($name);
+            $body
+        }};
+    }
+    stage!("fonts", register_embedded_fonts(cx));
+    stage!("http_client", crate::http_client::initialize(cx));
+    stage!("debug_options", crate::debug_options::initialize(cx, args));
+    stage!("settings", crate::settings::initialize(cx));
     initialize_explorer_window_registry(cx);
-    crate::explorer::initialize_cache_directory();
+    stage!(
+        "cache_directory",
+        crate::explorer::initialize_cache_directory()
+    );
     crate::explorer::initialize_clipboard_summary(cx);
-    crate::explorer::initialize_native_icon_cache(cx);
-    crate::explorer::initialize_image_thumbnail_cache(cx);
+    stage!(
+        "native_icon_cache",
+        crate::explorer::initialize_native_icon_cache(cx)
+    );
+    stage!(
+        "thumbnail_cache",
+        crate::explorer::initialize_image_thumbnail_cache(cx)
+    );
     crate::explorer::initialize_folder_size_cache(cx);
     crate::explorer::initialize_file_checksum_cache(cx);
     crate::explorer::initialize_window_cleanup(cx);
-    crate::explorer::initialize_cache_cleanup(cx);
-    cx.bind_keys(platform_key_bindings());
+    stage!(
+        "cache_maintenance_schedule",
+        crate::explorer::initialize_cache_cleanup(cx)
+    );
+    stage!("key_bindings", cx.bind_keys(platform_key_bindings()));
 }
 
 #[cfg(feature = "benchmarks")]
@@ -1499,12 +1524,18 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
     configure_linux_display_backend();
 
     let initial_launch_request = LaunchRequest::from_args(args.clone());
-    let single_instance_primary = match prepare_single_instance_launch(&initial_launch_request) {
+    let single_instance_primary = match {
+        let _span = crate::startup_trace::Span::new("single_instance");
+        prepare_single_instance_launch(&initial_launch_request)
+    } {
         SingleInstanceLaunch::Primary(primary) => primary,
         SingleInstanceLaunch::RoutedToPrimary => return,
     };
 
-    let app = Application::new();
+    let app = {
+        let _span = crate::startup_trace::Span::new("gpui_application");
+        Application::new()
+    };
 
     #[cfg(target_os = "macos")]
     let open_url_requests = {
@@ -1526,6 +1557,7 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
 
         #[cfg(target_os = "windows")]
         if cx.global::<SettingsState>().value.app.tray {
+            let _span = crate::startup_trace::Span::new("tray_initialization");
             if let Err(error) =
                 apply_tray_initialization_result(crate::windows_tray::initialize(cx), cx)
             {
@@ -1541,6 +1573,7 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
         start_open_url_request_handler(open_url_requests, cx);
 
         handle_initial_launch(initial_launch_request, cx);
+        crate::startup_trace::flush();
     });
 }
 

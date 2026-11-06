@@ -2,6 +2,7 @@
 pub mod fixtures;
 pub mod report;
 mod runner;
+pub(crate) mod startup;
 pub(crate) mod ui;
 
 use serde::{Deserialize, Serialize};

@@ -3037,7 +3037,7 @@ fn observe_window_activation(window: &mut Window, cx: &mut Context<ExplorerTabs>
 
 fn start_clipboard_summary_poll(window: &Window, cx: &Context<ExplorerTabs>) {
     #[cfg(feature = "benchmarks")]
-    if crate::performance::config_root().is_some() {
+    if crate::performance::config_root().is_some() && !crate::performance::startup::is_active() {
         return;
     }
     window

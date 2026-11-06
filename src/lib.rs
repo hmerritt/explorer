@@ -18,6 +18,8 @@ mod os_paths;
 pub mod performance;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod settings;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+mod startup_trace;
 #[cfg(any(target_os = "windows", test))]
 mod update_check;
 #[cfg(test)]
@@ -39,6 +41,11 @@ mod windows_tray;
 #[path = "../vendor/gpui/src/platform/windows/window_move.rs"]
 mod gpui_window_move_regression;
 
+// Keep the vendored adapter-selection regression in the normal cross-platform test run.
+#[cfg(test)]
+#[path = "../vendor/gpui/src/platform/windows/device_selection.rs"]
+mod gpui_device_selection_regression;
+
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use settings::{
     AppSettings, ContextMenuSettings, CustomContextMenuItem, ExplorerSettings, FileColumnKind,
@@ -58,9 +65,22 @@ pub mod benchmark_support {
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn run() {
+    // A normal build cannot honor the isolated benchmark configuration. Reject
+    // worker launches before routing to an existing instance or touching settings.
+    #[cfg(not(feature = "benchmarks"))]
+    if std::env::var_os("EXPLORER_STARTUP_BENCH_REQUEST").is_some() {
+        eprintln!("Startup benchmark workers require a build with --features benchmarks");
+        std::process::exit(2);
+    }
+    startup_trace::initialize();
+    #[cfg(feature = "benchmarks")]
+    performance::startup::initialize();
     let args = std::env::args_os().collect::<Vec<_>>();
     #[cfg(target_os = "windows")]
-    let (args, first_run) = match windows_squirrel::handle_startup(args) {
+    let (args, first_run) = match {
+        let _span = startup_trace::Span::new("installer_lifecycle");
+        windows_squirrel::handle_startup(args)
+    } {
         Ok(windows_squirrel::SquirrelStartup::Continue { args, first_run }) => (args, first_run),
         Ok(windows_squirrel::SquirrelStartup::Exit) => return,
         Err(error) => {
@@ -72,7 +92,10 @@ pub fn run() {
     let (args, first_run) = (args, false);
 
     #[cfg(target_os = "windows")]
-    match windows_file_associations::handle_file_association_command(args.clone()) {
+    match {
+        let _span = startup_trace::Span::new("file_association_arguments");
+        windows_file_associations::handle_file_association_command(args.clone())
+    } {
         Ok(true) => return,
         Ok(false) => {}
         Err(error) => {
@@ -82,4 +105,5 @@ pub fn run() {
     }
 
     app::run(args, first_run);
+    startup_trace::flush();
 }

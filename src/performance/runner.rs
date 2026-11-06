@@ -47,7 +47,7 @@ fn worker_timeout(
         None
     }
 }
-const HELP: &str = "explorer-bench list [--preset quick|full] [--filter ID]\nexplorer-bench run [--preset quick|full] [--filter ID] [--output DIRECTORY]\nexplorer-bench compare BEFORE AFTER [--allow-incompatible]\n\nBuild/run with: cargo run --locked --release --features benchmarks --bin explorer-bench -- COMMAND\nRun creates a new timestamped directory beneath --output (default target/performance).";
+const HELP: &str = "explorer-bench list [--preset quick|full] [--filter ID]\nexplorer-bench run [--preset quick|full] [--filter ID] [--output DIRECTORY]\nexplorer-bench compare BEFORE AFTER [--allow-incompatible]\nexplorer-bench startup --help\n\nBuild/run with: cargo run --locked --release --features benchmarks --bin explorer-bench -- COMMAND\nRun creates a new timestamped directory beneath --output (default target/performance).";
 
 pub fn main() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -56,6 +56,7 @@ pub fn main() -> Result<(), String> {
         return Ok(());
     }
     match args[0].as_str() {
+        "startup" => super::startup::main(&args[1..]),
         "worker" => {
             if args.len() != 2 {
                 return Err("internal worker expects a request file".into());
@@ -167,7 +168,7 @@ fn command_text(program: &str, args: &[&str]) -> String {
         .unwrap_or_else(|| "unavailable".into())
 }
 
-fn metadata() -> BTreeMap<String, String> {
+pub(super) fn metadata() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for (key, value) in [
         ("commit", command_text("git", &["rev-parse", "HEAD"])),
