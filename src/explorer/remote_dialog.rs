@@ -64,12 +64,14 @@ struct RemoteCredentialInput {
 
 pub(super) fn open_site_dialog(
     explorer: Entity<ExplorerView>,
+    placement: super::dialog_placement::DialogPlacement,
     path: &Path,
     remote: &[RemoteSidebarItem],
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
     let (original, name, address) = site_dialog_initial_values(path, remote);
-    let options = remote_window_options("Connect to SFTP server", 310.0, cx);
+    let mut options = remote_window_options("Connect to SFTP server", 310.0, cx);
+    placement.apply(&mut options);
     cx.open_window(options, move |window, cx| {
         let name = cx.new(|cx| {
             RemoteCredentialInput::new(name, "Site name (optional)", false, cx.focus_handle())
@@ -124,6 +126,7 @@ fn site_dialog_initial_values(
 
 pub(super) fn open_remote_credentials_dialog(
     explorer: Entity<ExplorerView>,
+    placement: super::dialog_placement::DialogPlacement,
     id: u64,
     host: String,
     username: String,
@@ -131,7 +134,8 @@ pub(super) fn open_remote_credentials_dialog(
     passphrase: bool,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
-    let options = remote_window_options("Sign in", CREDENTIALS_HEIGHT, cx);
+    let mut options = remote_window_options("Sign in", CREDENTIALS_HEIGHT, cx);
+    placement.apply(&mut options);
     let handle = cx
         .open_window(options, move |window, cx| {
             let username_input = cx.new(|cx| {
@@ -175,11 +179,13 @@ pub(super) fn open_remote_credentials_dialog(
 
 pub(super) fn open_remote_host_key_dialog(
     explorer: Entity<ExplorerView>,
+    placement: super::dialog_placement::DialogPlacement,
     id: u64,
     key: RemoteHostKey,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
-    let options = remote_window_options("Unknown host", HOST_KEY_HEIGHT, cx);
+    let mut options = remote_window_options("Unknown host", HOST_KEY_HEIGHT, cx);
+    placement.apply(&mut options);
     let handle = cx
         .open_window(options, move |window, cx| {
             let focus_handle = cx.focus_handle();

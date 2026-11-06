@@ -362,7 +362,7 @@ impl ExplorerView {
             DialogKind::Progress(_, _) => "File operation",
         };
         let (width, height) = dialog_size(&kind, cx);
-        let options = WindowOptions {
+        let mut options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some(format!("{} — {title}", trash::label()).into()),
                 ..Default::default()
@@ -376,6 +376,7 @@ impl ExplorerView {
             is_minimizable: false,
             ..Default::default()
         };
+        self.dialog_placement.apply(&mut options);
         let explorer = cx.entity().downgrade();
         match cx.open_window(options, |window, cx| {
             let focus = cx.focus_handle();
@@ -1345,6 +1346,52 @@ mod tests {
                 app.read_from_clipboard().unwrap().text().unwrap(),
                 "unchanged"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn bin_dialogs_open_centered_on_explorer(cx: &mut gpui::TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (view, cx) = cx.add_window_view(|_, cx| bin_view(Some(cx.focus_handle())));
+        cx.simulate_resize(gpui::size(px(1100.), px(750.)));
+        cx.update(|window, app| {
+            let parent = window.bounds();
+            let placement =
+                super::super::dialog_placement::DialogPlacement::from_window(window, app);
+            let kinds = [
+                DialogKind::Purge(PurgeConfirmation::new(
+                    vec![],
+                    crate::settings::DEFAULT_DATE_FORMAT,
+                )),
+                DialogKind::Conflict(RecoveryRequest {
+                    ids: vec![],
+                    directory: None,
+                }),
+                DialogKind::Properties(vec![]),
+                DialogKind::Progress(
+                    Arc::new(Mutex::new(Progress {
+                        done: 0,
+                        total: 1,
+                        name: "file.txt".into(),
+                        finished: false,
+                    })),
+                    Arc::new(AtomicBool::new(false)),
+                ),
+            ];
+            for kind in kinds {
+                let handle = view.update(app, |view, cx| {
+                    view.dialog_placement = placement;
+                    view.show_bin_dialog(kind, cx);
+                    view.active_dialog_window.unwrap()
+                });
+                handle
+                    .update(app, |_, window, _| {
+                        assert_eq!(window.bounds().center(), parent.center());
+                        window.remove_window();
+                    })
+                    .unwrap();
+                view.update(app, |view, _| view.active_dialog_window = None);
+            }
         });
     }
 

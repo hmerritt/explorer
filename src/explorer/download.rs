@@ -708,6 +708,7 @@ impl ExplorerView {
                 self.request_transfer_panel_expansion(cx);
                 match open_remote_credentials_dialog(
                     cx.entity(),
+                    self.dialog_placement,
                     id,
                     host,
                     username,
@@ -741,6 +742,7 @@ impl ExplorerView {
                 self.request_transfer_panel_expansion(cx);
                 match open_remote_credentials_dialog(
                     cx.entity(),
+                    self.dialog_placement,
                     id,
                     host,
                     username,
@@ -764,7 +766,8 @@ impl ExplorerView {
                     row.set_status(DownloadNoticeStatus::WaitingForHostConfirmation);
                 }
                 self.request_transfer_panel_expansion(cx);
-                match open_remote_host_key_dialog(cx.entity(), id, *key, cx) {
+                match open_remote_host_key_dialog(cx.entity(), self.dialog_placement, id, *key, cx)
+                {
                     Ok(handle) => self.active_dialog_window = Some(handle),
                     Err(error) => {
                         self.complete_download(

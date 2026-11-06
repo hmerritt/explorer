@@ -783,7 +783,7 @@ impl ExplorerTabs {
         &mut self,
         path: PathBuf,
         focus_handle: FocusHandle,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ExplorerPane {
         let pane_id = PaneId(self.next_pane_id);
@@ -796,7 +796,7 @@ impl ExplorerTabs {
         pane_id: PaneId,
         path: PathBuf,
         focus_handle: FocusHandle,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ExplorerPane {
         let view = cx.new(|cx| {
@@ -812,7 +812,7 @@ impl ExplorerTabs {
     fn create_restored_pane(
         &mut self,
         snapshot: ClosedPane,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ExplorerPane {
         let focus = cx.focus_handle();
@@ -840,7 +840,7 @@ impl ExplorerTabs {
         self.scroll_active_tab_into_view();
     }
 
-    fn add_background_tab(&mut self, path: PathBuf, window: &Window, cx: &mut Context<Self>) {
+    fn add_background_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
         let focus_handle = cx.focus_handle();
@@ -2970,7 +2970,19 @@ fn close_tab_glyph_visual() -> gpui::Div {
         .child(CLOSE_GLYPH)
 }
 
-fn observe_tab_view(view: &Entity<ExplorerView>, window: &Window, cx: &mut Context<ExplorerTabs>) {
+fn observe_tab_view(
+    view: &Entity<ExplorerView>,
+    window: &mut Window,
+    cx: &mut Context<ExplorerTabs>,
+) {
+    view.update(cx, |view, cx| {
+        view.dialog_placement = super::dialog_placement::DialogPlacement::from_window(window, cx);
+        cx.observe_window_bounds(window, |view, window, cx| {
+            view.dialog_placement =
+                super::dialog_placement::DialogPlacement::from_window(window, cx);
+        })
+        .detach();
+    });
     cx.observe(view, |this, _, cx| {
         this.cleanup_completed_background_operations(cx);
         cx.notify();
@@ -9051,6 +9063,86 @@ mod tests {
         });
         cx.update(|_, app| assert!(!app.has_active_drag()));
         cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn background_dialog_uses_resized_owner_when_another_window_is_active(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let foreground = observe_active_test_view(&tabs, cx);
+        let background = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                tabs.tabs.last().unwrap().view.clone()
+            })
+        });
+        cx.simulate_resize(gpui::size(px(1100.), px(750.)));
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let parent = window.bounds();
+            let display_id = window.display(app).map(|display| display.id());
+            let other = app
+                .open_window(
+                    gpui::WindowOptions {
+                        window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(
+                            gpui::point(px(-1800.), px(200.)),
+                            gpui::size(px(600.), px(400.)),
+                        ))),
+                        ..Default::default()
+                    },
+                    |_, cx| {
+                        cx.new(|cx| {
+                            ExplorerTabs::new_for_test(
+                                temp.path().to_path_buf(),
+                                cx.focus_handle(),
+                                cx,
+                            )
+                        })
+                    },
+                )
+                .unwrap();
+            other
+                .update(app, |_, window, _| window.activate_window())
+                .unwrap();
+            for view in [&foreground, &background] {
+                let mut options = gpui::WindowOptions {
+                    window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(
+                        gpui::point(px(0.), px(0.)),
+                        gpui::size(px(430.), px(310.)),
+                    ))),
+                    ..Default::default()
+                };
+                view.read(app).dialog_placement.apply(&mut options);
+                assert_eq!(
+                    options.window_bounds,
+                    Some(super::super::dialog_placement::centered_dialog_bounds(
+                        parent,
+                        gpui::size(px(430.), px(310.)),
+                    ))
+                );
+                assert_eq!(options.display_id, display_id);
+            }
+            let dialog = background.update(app, |view, cx| {
+                super::super::remote_dialog::open_site_dialog(
+                    cx.entity(),
+                    view.dialog_placement,
+                    &view.path,
+                    &view.sidebar_settings.remote,
+                    cx,
+                )
+                .unwrap()
+            });
+            dialog
+                .update(app, |_, window, _| {
+                    assert_eq!(window.bounds().center(), parent.center());
+                    assert_eq!(window.bounds().size, gpui::size(px(430.), px(310.)));
+                    window.remove_window();
+                })
+                .unwrap();
+            other
+                .update(app, |_, window, _| window.remove_window())
+                .unwrap();
+        });
     }
 
     #[gpui::test]

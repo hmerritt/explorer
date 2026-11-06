@@ -225,7 +225,13 @@ impl ExplorerView {
             return;
         };
 
-        match open_dialog_window(kind, cx.entity(), self.date_format.clone(), cx) {
+        match open_dialog_window(
+            kind,
+            cx.entity(),
+            self.date_format.clone(),
+            self.dialog_placement,
+            cx,
+        ) {
             Ok(handle) => self.active_dialog_window = Some(handle),
             Err(error) => self.set_error_notice(format!("Failed to open dialog: {error}")),
         }
@@ -254,6 +260,7 @@ impl ExplorerView {
             ExplorerDialogKind::FileOperation(progress),
             cx.entity(),
             self.date_format.clone(),
+            self.dialog_placement,
             cx,
         ) {
             Ok(handle) => self.active_dialog_window = Some(handle),
@@ -284,6 +291,7 @@ impl ExplorerView {
             ExplorerDialogKind::RemoteDeleteOperation(progress),
             cx.entity(),
             self.date_format.clone(),
+            self.dialog_placement,
             cx,
         ) {
             Ok(handle) => self.active_dialog_window = Some(handle),
@@ -1071,10 +1079,12 @@ fn open_dialog_window(
     kind: ExplorerDialogKind,
     explorer: Entity<ExplorerView>,
     date_format: String,
+    placement: super::dialog_placement::DialogPlacement,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
     let font = crate::settings::current_app_font(cx);
-    let options = dialog_window_options(&kind, &date_format, &font, cx);
+    let mut options = dialog_window_options(&kind, &date_format, &font, cx);
+    placement.apply(&mut options);
     let handle = cx
         .open_window(options, |window, cx| {
             let focus_handle = cx.focus_handle();
@@ -3099,6 +3109,57 @@ mod tests {
             test_dialog_entity(cx, ExplorerDialogKind::FileOperation(test_progress()));
 
         hover_selector_until_tooltip(cx, "file-operation-terminate");
+    }
+
+    #[gpui::test]
+    fn all_file_dialog_kinds_open_centered_on_explorer(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            ExplorerView::new_with_focus_handle_for_test(
+                PathBuf::from("dialog-test"),
+                cx.focus_handle(),
+            )
+        });
+        cx.simulate_resize(gpui::size(px(1100.), px(750.)));
+        cx.update(|window, app| {
+            let parent = window.bounds();
+            let placement =
+                super::super::dialog_placement::DialogPlacement::from_window(window, app);
+            let kinds = [
+                ExplorerDialogKind::PermanentDelete(PendingPermanentDelete {
+                    paths: vec![PathBuf::from("missing.txt")],
+                }),
+                ExplorerDialogKind::Trash(PendingTrash {
+                    paths: vec![PathBuf::from("missing.txt")],
+                }),
+                ExplorerDialogKind::FileConflict(single_conflict_batch()),
+                ExplorerDialogKind::FileOperation(test_progress()),
+                ExplorerDialogKind::RemoteDeleteOperation(RemoteDeleteProgress {
+                    phase: RemoteDeletePhase::Preparing,
+                    total_items: 1,
+                    completed_items: 0,
+                    current_item: None,
+                }),
+            ];
+            for kind in kinds {
+                let handle = view.update(app, |_, cx| {
+                    open_dialog_window(
+                        kind,
+                        cx.entity(),
+                        crate::settings::DEFAULT_DATE_FORMAT.to_owned(),
+                        placement,
+                        cx,
+                    )
+                    .unwrap()
+                });
+                handle
+                    .update(app, |_, window, _| {
+                        assert_eq!(window.bounds().center(), parent.center());
+                        window.remove_window();
+                    })
+                    .unwrap();
+            }
+        });
     }
 
     #[gpui::test]

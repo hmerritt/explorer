@@ -194,6 +194,7 @@ pub struct ExplorerView {
     pub(super) active_file_operation: Option<FileOperationState>,
     pub(super) active_remote_delete: Option<RemoteDeleteState>,
     pub(super) active_dialog_window: Option<AnyWindowHandle>,
+    pub(super) dialog_placement: super::dialog_placement::DialogPlacement,
     pub(super) active_rename: Option<RenameState>,
     pub(super) rename_focus_out: Option<Subscription>,
     pub(super) active_address_bar: Option<AddressBarState>,
@@ -460,6 +461,10 @@ impl ExplorerView {
         let settings = cx.global::<crate::settings::SettingsState>().value.clone();
         let mut view =
             Self::new_unloaded_inner_with_settings(initial_path, Some(focus_handle), &settings);
+        if let Some(window) = parent_window {
+            view.dialog_placement =
+                super::dialog_placement::DialogPlacement::from_window(window, cx);
+        }
         #[cfg(target_os = "windows")]
         {
             #[cfg(not(test))]
@@ -673,6 +678,7 @@ impl ExplorerView {
             active_file_operation: None,
             active_remote_delete: None,
             active_dialog_window: None,
+            dialog_placement: Default::default(),
             active_rename: None,
             rename_focus_out: None,
             active_address_bar: None,

@@ -2402,7 +2402,19 @@ impl PropertiesDialog {
             ));
         }
 
-        let handle = open_linux_default_app_picker_window(path, before, choices, cx.entity(), cx)?;
+        let placement = self
+            .explorer
+            .upgrade()
+            .map(|explorer| explorer.read(cx).dialog_placement)
+            .unwrap_or_default();
+        let handle = open_linux_default_app_picker_window(
+            path,
+            before,
+            choices,
+            cx.entity(),
+            placement,
+            cx,
+        )?;
         self.default_app_picker = Some(handle);
         Ok(())
     }
@@ -4511,10 +4523,12 @@ fn open_linux_default_app_picker_window(
     before: Option<PropertyDefaultApp>,
     choices: crate::explorer::open_with::LinuxDefaultApplicationChoices,
     properties: gpui::Entity<PropertiesDialog>,
+    placement: super::dialog_placement::DialogPlacement,
     cx: &mut Context<PropertiesDialog>,
 ) -> Result<AnyWindowHandle, String> {
     let title = format!("Open With - {}", property_path_display_name(&path));
-    let options = linux_default_app_picker_window_options(title, cx);
+    let mut options = linux_default_app_picker_window_options(title, cx);
+    placement.apply(&mut options);
     let handle = cx
         .open_window(options, |window, cx| {
             let focus_handle = cx.focus_handle();
@@ -4562,10 +4576,10 @@ fn linux_default_app_picker_window_options(title: String, cx: &App) -> WindowOpt
 }
 
 fn properties_window_bounds(parent_bounds: Bounds<Pixels>) -> WindowBounds {
-    WindowBounds::Windowed(Bounds::centered_at(
-        parent_bounds.center(),
+    super::dialog_placement::centered_dialog_bounds(
+        parent_bounds,
         size(px(PROPERTIES_WIDTH), px(PROPERTIES_HEIGHT)),
-    ))
+    )
 }
 
 fn properties_window_options(title: String, parent_window: &Window, cx: &App) -> WindowOptions {

@@ -334,7 +334,13 @@ impl ExplorerView {
                         if let Some((id, error)) = remote_fs::take_prompt() {
                             let result = match error {
                                 RemoteDownloadError::UnknownHost(key) => {
-                                    open_remote_host_key_dialog(cx.entity(), id, *key, cx)
+                                    open_remote_host_key_dialog(
+                                        cx.entity(),
+                                        view.dialog_placement,
+                                        id,
+                                        *key,
+                                        cx,
+                                    )
                                 }
                                 RemoteDownloadError::CredentialsRequired {
                                     host,
@@ -342,6 +348,7 @@ impl ExplorerView {
                                     message,
                                 } => open_remote_credentials_dialog(
                                     cx.entity(),
+                                    view.dialog_placement,
                                     id,
                                     host,
                                     username,
@@ -355,6 +362,7 @@ impl ExplorerView {
                                     key_path,
                                 } => open_remote_credentials_dialog(
                                     cx.entity(),
+                                    view.dialog_placement,
                                     id,
                                     host,
                                     username,

@@ -886,6 +886,7 @@ impl ExplorerView {
                     if this.active_dialog_window.is_none() {
                         match super::remote_dialog::open_site_dialog(
                             cx.entity(),
+                            this.dialog_placement,
                             &this.path,
                             &this.sidebar_settings.remote,
                             cx,
