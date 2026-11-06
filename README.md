@@ -132,7 +132,7 @@ Minimal example:
         "feed_url": "https://github.com/hmerritt/explorer/releases/latest/download"
     },
     "view": {
-        "media_preview_size": 400,
+        "media_preview_size": 500,
         "mode": "details",
         "search_mode": "detailed",
         "show_extensions": true,
