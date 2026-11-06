@@ -47,7 +47,8 @@ const LEGACY_IMAGE_THUMBNAIL_CACHE_VERSIONS: &[&str] = &["image-thumbnails-v1"];
 const DISK_MANIFEST_FILE_NAME: &str = "manifest.json";
 const IMAGE_THUMBNAIL_SIZE: u32 = 128;
 #[cfg(test)]
-const HOVER_IMAGE_PREVIEW_SIZE: u32 = crate::settings::DEFAULT_MEDIA_PREVIEW_SIZE;
+// Keep fixture dimensions stable when the user-facing default changes.
+const HOVER_IMAGE_PREVIEW_SIZE: u32 = 400;
 const IMAGE_THUMBNAIL_CACHE_WRITER_CAPACITY: usize = 64;
 const IMAGE_THUMBNAIL_CACHE_BATCH_DELAY: Duration = Duration::from_millis(8);
 const QOI_SIGNATURE: &[u8] = b"qoif";

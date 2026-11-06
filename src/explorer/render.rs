@@ -8970,6 +8970,8 @@ mod tests {
             crate::explorer::image_thumbnails::initialize_for_test(app);
         });
         let mut settings = crate::settings::ExplorerSettings::default();
+        // Geometry assertions use a fixed fixture size independent of the default.
+        settings.view.media_preview_size = 400;
         settings.view.sort = FileSortSettings {
             column: FileSortColumn::Name,
             direction: SortDirection::Ascending,
@@ -12448,6 +12450,34 @@ mod tests {
 
         assert_eq!(preview.size.width, gpui::px(400.0));
         assert_eq!(preview.size.height, gpui::px(200.0));
+    }
+
+    #[gpui::test]
+    fn alt_hover_image_entry_uses_default_media_preview_size(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        write_test_png_with_dimensions(&temp.path().join("image.png"), 8, 4);
+        let settings = crate::settings::ExplorerSettings::default();
+        assert_eq!(settings.view.media_preview_size, 500);
+        cx.update(|app| {
+            crate::explorer::image_thumbnails::initialize_for_test(app);
+        });
+        cx.set_global(SettingsState::for_test(settings.clone()));
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window);
+            let mut view =
+                ExplorerView::new_with_settings_for_test(path, Some(focus_handle), &settings);
+            view.observe_image_thumbnail_cache(cx);
+            view
+        });
+        cx.read_entity(&view, |view, _| assert_eq!(view.media_preview_size, 500));
+
+        hover_selector(cx, "explorer-large-icon-entry-0", alt_modifiers());
+        let preview = run_until_image_hover_preview_size(cx, (500.0, 250.0));
+
+        assert_eq!(preview.size.width, gpui::px(500.0));
+        assert_eq!(preview.size.height, gpui::px(250.0));
     }
 
     #[gpui::test]
