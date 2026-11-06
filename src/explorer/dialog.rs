@@ -62,7 +62,7 @@ const CONFLICT_DIALOG_WIDTH: f32 = 450.0;
 const DELETE_DIALOG_WIDTH: f32 = 460.0;
 const DELETE_DIALOG_PROMPT_TEXT_SIZE: f32 = 12.0;
 const DELETE_DIALOG_BUTTONS_TOP_MARGIN: f32 = 24.0;
-const DELETE_DIALOG_BUTTON_HEIGHT: f32 = 28.0;
+pub(super) const DELETE_DIALOG_BUTTON_HEIGHT: f32 = 28.0;
 const DELETE_DIALOG_BUTTON_MIN_WIDTH: f32 = 84.0;
 const DELETE_DIALOG_BUTTON_GAP: f32 = 12.0;
 const DELETE_DIALOG_BUTTON_BORDER_RADIUS: f32 = 0.0;
@@ -1275,7 +1275,8 @@ pub(super) fn dialog_button(
         .id(id)
         .debug_selector(move || id.to_owned())
         .min_w(px(DELETE_DIALOG_BUTTON_MIN_WIDTH))
-        .h(px(28.0))
+        .h(px(DELETE_DIALOG_BUTTON_HEIGHT))
+        .text_size(px(DELETE_DIALOG_PROMPT_TEXT_SIZE))
         .relative()
         .flex()
         .items_center()

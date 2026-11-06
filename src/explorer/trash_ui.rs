@@ -1,7 +1,8 @@
 use super::{
     dialog::{
-        DeleteDialogIconKind, PermanentDeleteDialogText, PermanentDeleteItemKind,
-        delete_confirmation, delete_confirmation_size, dialog_button, shell_dialog_body,
+        DELETE_DIALOG_BUTTON_HEIGHT, DeleteDialogIconKind, PermanentDeleteDialogText,
+        PermanentDeleteItemKind, delete_confirmation, delete_confirmation_size, dialog_button,
+        shell_dialog_body,
     },
     trash::{self, BatchResult, RecoveryChoice, RecoveryRequest, RecoveryUndo, TrashItemId},
     view::ExplorerView,
@@ -880,16 +881,22 @@ impl Render for TrashDialog {
                             .truncate()
                             .child(progress.name.clone()),
                     )
-                    .child(button(
-                        "trash-progress-cancel",
-                        "Cancel",
-                        true,
-                        cx.listener(|this, _, _, _| {
-                            if let DialogKind::Progress(_, cancel) = &this.kind {
-                                cancel.store(true, Ordering::Relaxed);
-                            }
-                        }),
-                    ));
+                    .child(
+                        div().w_full().flex().justify_end().child(
+                            dialog_button(
+                                "trash-progress-cancel",
+                                "Cancel",
+                                true,
+                                window.scale_factor(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let DialogKind::Progress(_, cancel) = &this.kind {
+                                    cancel.store(true, Ordering::Relaxed);
+                                }
+                                cx.stop_propagation();
+                            })),
+                        ),
+                    );
             }
         }
         body
@@ -949,7 +956,10 @@ fn dialog_size(kind: &DialogKind, cx: &gpui::App) -> (f32, f32) {
                 + DIALOG_GAP * 5.0
         }
         DialogKind::Progress(_, _) => {
-            DIALOG_LINE_HEIGHT * 3.0 + PROGRESS_BAR_HEIGHT + DIALOG_BUTTON_HEIGHT + DIALOG_GAP * 4.0
+            DIALOG_LINE_HEIGHT * 3.0
+                + PROGRESS_BAR_HEIGHT
+                + DELETE_DIALOG_BUTTON_HEIGHT
+                + DIALOG_GAP * 4.0
         }
         DialogKind::Properties(items) => {
             let lines: Vec<_> = items.iter().flat_map(property_lines).collect();
@@ -1415,7 +1425,12 @@ mod tests {
                 assert_eq!(bounds.right(), px(width - 20.0));
                 assert!(bounds.bottom() <= px(height - 14.0));
             } else {
-                assert_eq!(bounds.size.height, px(DIALOG_BUTTON_HEIGHT));
+                if is_progress {
+                    assert_eq!(bounds.size, size(px(84.0), px(28.0)));
+                    assert_eq!(bounds.right(), px(width - DIALOG_PADDING));
+                } else {
+                    assert_eq!(bounds.size.height, px(DIALOG_BUTTON_HEIGHT));
+                }
                 assert!(
                     (bounds.bottom() - px(height - DIALOG_PADDING)).abs() <= px(1.0),
                     "{action}: button bottom {:?}, expected {}",
@@ -1435,6 +1450,14 @@ mod tests {
                         .height,
                     px(DIALOG_LINE_HEIGHT)
                 );
+                window.read_entity(&dialog, |dialog, _| assert_eq!(dialog.focused_choice, 0));
+                assert!(!cancel.load(Ordering::Relaxed));
+                window.simulate_click(bounds.center(), gpui::Modifiers::default());
+                assert!(cancel.load(Ordering::Relaxed));
+                cancel.store(false, Ordering::Relaxed);
+                window.dispatch_action(super::super::dialog::DialogConfirm);
+                assert!(cancel.load(Ordering::Relaxed));
+                cancel.store(false, Ordering::Relaxed);
                 window.dispatch_action(super::super::dialog::DialogCancel);
                 assert!(cancel.load(Ordering::Relaxed));
             } else {
