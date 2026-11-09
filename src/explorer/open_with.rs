@@ -11,6 +11,10 @@ use crate::explorer::{
     view::ExplorerView,
 };
 
+mod sftp_mpv;
+
+const REMOTE_OPEN_NOTICE: &str = "Download the remote file to a local folder before opening it. Changes to that copy are not uploaded automatically.";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OpenFileIntent {
     Default,
@@ -351,8 +355,12 @@ impl ExplorerView {
             return;
         }
         if paths.iter().any(|path| super::remote_fs::is_remote(path)) {
-            self.set_error_notice("Download the remote file to a local folder before opening it. Changes to that copy are not uploaded automatically.".to_owned());
-            cx.notify();
+            if intent == OpenFileIntent::Default {
+                self.open_sftp_videos_in_mpv(paths, cx);
+            } else {
+                self.set_error_notice(REMOTE_OPEN_NOTICE);
+                cx.notify();
+            }
             return;
         }
 
@@ -538,6 +546,39 @@ impl ExplorerView {
                 }
             }
         }
+    }
+
+    fn open_sftp_videos_in_mpv(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.open_with_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { sftp_mpv::launch(&paths) })
+                .await;
+            let _ = this.update(cx, |explorer, cx| {
+                explorer.open_with_task = None;
+                match &result {
+                    Ok(Some(_)) => explorer.clear_operation_notice(),
+                    Ok(None) => explorer.set_error_notice(REMOTE_OPEN_NOTICE),
+                    Err(error) => explorer.set_error_notice(error.to_string()),
+                }
+                cx.notify();
+            });
+
+            if let Ok(Some(playback)) = result {
+                cx.spawn(async move |cx| {
+                    if !matches!(playback.exit.await, Ok(Ok(status)) if status.success()) {
+                        let _ = this.update(cx, |explorer, cx| {
+                            explorer.set_error_notice(format!(
+                                "mpv could not play {} over SFTP. Check that mpv can connect to the server and open the video.",
+                                playback.label,
+                            ));
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
+        }));
     }
 
     pub(super) fn handle_open_with_result(
@@ -1790,6 +1831,43 @@ unsafe fn mac_path_from_url(url: cocoa::base::id) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use gpui::AppContext;
+
+    #[gpui::test]
+    fn remote_opens_outside_the_mpv_exception_keep_the_download_notice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::explorer::remote_fs::RemoteLocation;
+
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            ExplorerView::new_with_focus_handle_for_test(PathBuf::from("."), cx.focus_handle())
+        });
+        let remote_path = |name: &str| {
+            RemoteLocation::parse(&format!("sftp://fixture/{name}"))
+                .unwrap()
+                .provider_path()
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.choose_application_for_file(remote_path("movie.mp4"), window, cx);
+                assert!(view.open_with_task.is_none());
+                assert_eq!(
+                    view.operation_notice.as_ref().unwrap().text,
+                    REMOTE_OPEN_NOTICE,
+                );
+                view.clear_operation_notice();
+                view.open_file_with_default_app(&remote_path("readme.txt"), window, cx);
+                assert!(view.open_with_task.is_some());
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_with_task.is_none());
+            assert_eq!(
+                view.operation_notice.as_ref().unwrap().text,
+                REMOTE_OPEN_NOTICE,
+            );
+        });
+    }
 
     fn write_test_image(path: &Path, format: image::ImageFormat) {
         let mut bytes = std::io::Cursor::new(Vec::new());
