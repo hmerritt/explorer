@@ -14,8 +14,7 @@ use std::{
 use futures::{StreamExt, channel::mpsc, future::Either};
 use gpui::{
     App, Bounds, ClickEvent, Context, Global, Render, SharedString, TitlebarOptions, Window,
-    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div, point, prelude::*, px, rgb,
-    size,
+    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use windows::{
     Win32::{
@@ -50,9 +49,6 @@ use windows::{
 
 use crate::dialog_height::DialogHeight;
 use crate::update_check::{UpdateCheckError, UpdateCheckResult, check_latest_release};
-use crate::window_chrome::{
-    TITLEBAR_HEIGHT, WindowDragState, render_titlebar_drag_region, render_window_controls,
-};
 
 const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 40;
 const TRAY_SHUTDOWN_MESSAGE: u32 = WM_APP + 41;
@@ -256,7 +252,6 @@ enum UpdatePanelState {
 struct AboutUpdateWindow {
     mode: AboutMode,
     update: UpdatePanelState,
-    should_move_window: bool,
 }
 
 impl AboutUpdateWindow {
@@ -264,7 +259,6 @@ impl AboutUpdateWindow {
         let mut this = Self {
             mode,
             update: UpdatePanelState::Idle,
-            should_move_window: false,
         };
         if matches!(mode, AboutMode::CheckForUpdates) {
             this.begin_update_check(cx);
@@ -376,7 +370,7 @@ impl AboutUpdateWindow {
             .flex()
             .flex_col()
             .gap(px(14.0))
-            .child(div().text_size(px(20.0)).child("Explorer updates"))
+            .child(div().text_size(px(20.0)).child("Explorer update checker"))
             .child(content)
             .into_any_element();
         (
@@ -386,40 +380,12 @@ impl AboutUpdateWindow {
     }
 }
 
-impl WindowDragState for AboutUpdateWindow {
-    fn set_window_drag_pending(&mut self, pending: bool) {
-        self.should_move_window = pending;
-    }
-
-    fn take_window_drag_pending(&mut self) -> bool {
-        let pending = self.should_move_window;
-        self.should_move_window = false;
-        pending
-    }
-}
-
 impl Render for AboutUpdateWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (body, actions) = match self.mode {
             AboutMode::About => (self.render_about(), None),
             AboutMode::CheckForUpdates => self.render_update(cx),
         };
-        let titlebar = div()
-            .id("explorer-about-update-titlebar")
-            .debug_selector(|| "explorer-about-update-titlebar".to_owned())
-            .w_full()
-            .h(px(TITLEBAR_HEIGHT))
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .bg(rgb(0xe8e8e8))
-            .child(render_titlebar_drag_region(
-                "explorer-about-update-titlebar-drag-region",
-                window.window_decorations(),
-                cx,
-            ))
-            .children(render_window_controls(window));
         div()
             .size_full()
             .flex()
@@ -427,7 +393,6 @@ impl Render for AboutUpdateWindow {
             .bg(rgb(0xffffff))
             .text_size(px(13.0))
             .text_color(rgb(0x202020))
-            .child(titlebar)
             .child(
                 div()
                     .flex_1()
@@ -478,10 +443,7 @@ fn open_about_window(mode: AboutMode, cx: &mut App) {
             ))),
             window_min_size: Some(size(px(420.0), px(140.0))),
             titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from("About Explorer")),
-                appears_transparent: true,
-                traffic_light_position: cfg!(target_os = "macos")
-                    .then_some(point(px(12.0), px(11.0))),
+                title: Some(SharedString::from("Explorer")),
                 ..Default::default()
             }),
             window_decorations: Some(WindowDecorations::Server),
@@ -1110,18 +1072,6 @@ mod tests {
             error,
             r"Could not open C:\Explorer\settings.json: access denied"
         );
-    }
-
-    #[gpui::test]
-    fn about_update_window_renders_custom_caption_controls(cx: &mut TestAppContext) {
-        let (_, cx) = cx.add_window_view(|_, cx| AboutUpdateWindow::new(AboutMode::About, cx));
-
-        cx.debug_bounds("explorer-about-update-titlebar")
-            .expect("utility titlebar bounds");
-        cx.debug_bounds("explorer-windows-window-controls")
-            .expect("Windows caption control bounds");
-        cx.debug_bounds("explorer-window-close")
-            .expect("close caption button bounds");
     }
 
     #[gpui::test]
