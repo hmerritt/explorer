@@ -1,3 +1,4 @@
+use crate::dialog_height::DialogHeight;
 use std::fmt::Write as _;
 use std::{
     cell::RefCell,
@@ -81,6 +82,7 @@ use crate::explorer::video::ffprobe_duration_seconds_from_probe;
 
 const PROPERTIES_WIDTH: f32 = 408.0;
 const PROPERTIES_HEIGHT: f32 = 520.0;
+const PROPERTIES_MIN_HEIGHT: f32 = 120.0;
 const PROPERTIES_PADDING: f32 = 10.0;
 const PROPERTIES_PANEL_PADDING: f32 = 20.0;
 const PROPERTIES_TAB_HEIGHT: f32 = 22.0;
@@ -2657,7 +2659,6 @@ struct LinuxDefaultAppPickerDialog {
     properties: WeakEntity<PropertiesDialog>,
     font: gpui::Font,
     focus_handle: FocusHandle,
-    scroll_handle: ScrollHandle,
 }
 
 #[cfg(target_os = "linux")]
@@ -2682,7 +2683,6 @@ impl LinuxDefaultAppPickerDialog {
             properties,
             font,
             focus_handle,
-            scroll_handle: ScrollHandle::new(),
         };
         cx.observe_global::<SettingsState>(|this, cx| {
             this.font = crate::settings::current_app_font(cx);
@@ -2804,6 +2804,60 @@ impl Render for LinuxDefaultAppPickerDialog {
             list = list.child(self.render_choice(index, choice, cx));
         }
 
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .child(format!("Choose a default app for {file_name}")),
+            )
+            .child(
+                div()
+                    .text_color(rgb(PROPERTIES_MUTED_TEXT))
+                    .child(format!("File type: {}", self.mime_type)),
+            )
+            .child(
+                div()
+                    .id("linux-default-app-picker-list")
+                    .border_1()
+                    .border_color(rgb(PROPERTIES_BORDER))
+                    .child(list),
+            );
+        let actions = div()
+            .mt(px(10.0))
+            .flex()
+            .flex_row()
+            .justify_end()
+            .gap(px(8.0))
+            .child(
+                property_button(
+                    "linux-default-app-ok",
+                    "OK",
+                    selected,
+                    window.scale_factor(),
+                )
+                .when(selected, |this| {
+                    this.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.confirm(window, cx);
+                        cx.stop_propagation();
+                    }))
+                }),
+            )
+            .child(
+                property_button(
+                    "linux-default-app-cancel",
+                    "Cancel",
+                    true,
+                    window.scale_factor(),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.cancel(window, cx);
+                    cx.stop_propagation();
+                })),
+            )
+            .into_any_element();
         div()
             .font(self.font.clone())
             .key_context("ExplorerDialog")
@@ -2815,77 +2869,10 @@ impl Render for LinuxDefaultAppPickerDialog {
             .text_color(rgb(0x000000))
             .on_action(cx.listener(Self::handle_cancel))
             .on_action(cx.listener(Self::handle_confirm))
+            .p(px(PROPERTIES_PADDING))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .p(px(PROPERTIES_PADDING))
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .child(format!("Choose a default app for {file_name}")),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(PROPERTIES_MUTED_TEXT))
-                            .child(format!("File type: {}", self.mime_type)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .id("linux-default-app-picker-list")
-                            .border_1()
-                            .border_color(rgb(PROPERTIES_BORDER))
-                            .overflow_y_scroll()
-                            .scrollbar_width(px(0.0))
-                            .track_scroll(&self.scroll_handle)
-                            .on_scroll_wheel(cx.listener(
-                                |_: &mut Self, _: &ScrollWheelEvent, _, cx| {
-                                    cx.notify();
-                                },
-                            ))
-                            .child(list),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .gap(px(8.0))
-                            .child(
-                                property_button(
-                                    "linux-default-app-ok",
-                                    "OK",
-                                    selected,
-                                    window.scale_factor(),
-                                )
-                                .when(selected, |this| {
-                                    this.on_click(cx.listener(
-                                        |this, _: &ClickEvent, window, cx| {
-                                            this.confirm(window, cx);
-                                            cx.stop_propagation();
-                                        },
-                                    ))
-                                }),
-                            )
-                            .child(
-                                property_button(
-                                    "linux-default-app-cancel",
-                                    "Cancel",
-                                    true,
-                                    window.scale_factor(),
-                                )
-                                .on_click(cx.listener(
-                                    |this, _: &ClickEvent, window, cx| {
-                                        this.cancel(window, cx);
-                                        cx.stop_propagation();
-                                    },
-                                )),
-                            ),
-                    ),
+                DialogHeight::new(window, cx, true, Some(px(DEFAULT_APP_PICKER_HEIGHT)))
+                    .layout(body, Some(actions)),
             )
     }
 }
@@ -3000,18 +2987,32 @@ impl PropertiesDialog {
             .into_any_element()
     }
 
-    fn render_body(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let fit = DialogHeight::new(window, cx, true, None);
+        let chrome = px(property_dialog_chrome_height());
         let body = match self.snapshot_state.clone() {
-            PropertySnapshotState::Loading => centered_message("Loading properties..."),
-            PropertySnapshotState::Failed(error) => centered_message(error),
+            PropertySnapshotState::Loading => property_status_body(&fit, "Loading properties..."),
+            PropertySnapshotState::Failed(error) => property_status_body(&fit, error),
             PropertySnapshotState::Ready(snapshot) => match self.active_tab {
-                PropertyTab::General => self.render_general(&snapshot, window, cx),
-                PropertyTab::Details => self.render_details(&snapshot, cx),
-                PropertyTab::Code => self.render_code(&snapshot, cx),
-                PropertyTab::Image => self.render_image(&snapshot, window, cx),
-                PropertyTab::Cover => self.render_cover(&snapshot, window, cx),
-                PropertyTab::Spectrum => self.render_spectrum(&snapshot, cx),
-                PropertyTab::Frames => self.render_frames(&snapshot, cx),
+                PropertyTab::General => self.render_general(&snapshot, window, &fit, cx),
+                PropertyTab::Details => self.render_details(&snapshot, &fit, cx),
+                PropertyTab::Code => self.render_code(&snapshot, &fit, cx),
+                tab => {
+                    let preview = match tab {
+                        PropertyTab::Image => self.render_image(&snapshot, window, cx),
+                        PropertyTab::Cover => self.render_cover(&snapshot, window, cx),
+                        PropertyTab::Spectrum => self.render_spectrum(&snapshot, cx),
+                        PropertyTab::Frames => self.render_frames(&snapshot, cx),
+                        _ => unreachable!(),
+                    };
+                    div()
+                        .size_full()
+                        .child(preview)
+                        .on_children_prepainted(move |_, window, cx| {
+                            fit.resize(px(PROPERTIES_HEIGHT), chrome, window, cx);
+                        })
+                        .into_any_element()
+                }
             },
         };
 
@@ -3041,6 +3042,7 @@ impl PropertiesDialog {
         &self,
         snapshot: &PropertySnapshot,
         window: &Window,
+        fit: &DialogHeight,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let type_label = type_of_file_label(snapshot);
@@ -3055,10 +3057,7 @@ impl PropertiesDialog {
         let mut body = div()
             .flex()
             .flex_col()
-            .flex_1()
             .min_w(px(0.0))
-            .id("properties-general-body")
-            .overflow_y_scroll()
             .p(px(PROPERTIES_PANEL_PADDING))
             .child(self.render_title_row(snapshot, cx))
             .child(separator());
@@ -3146,7 +3145,13 @@ impl PropertiesDialog {
             body = body.child(error_message(error));
         }
 
-        body.into_any_element()
+        div()
+            .id("properties-general-body")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .child(fit.measure_body(body, px(property_dialog_chrome_height())))
+            .into_any_element()
     }
 
     fn render_title_row(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
@@ -3356,6 +3361,7 @@ impl PropertiesDialog {
     fn render_details(
         &mut self,
         snapshot: &PropertySnapshot,
+        fit: &DialogHeight,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let loading_details = matches!(self.details_state, PropertyDetailsState::Loading);
@@ -3392,17 +3398,9 @@ impl PropertiesDialog {
         let mut body = div()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
             .w_full()
-            .id("properties-details-body")
-            .overflow_y_scroll()
-            .scrollbar_width(px(0.0))
+            .min_w(px(0.0))
             .p(px(PROPERTIES_PANEL_PADDING))
-            .track_scroll(&self.details_scroll_handle)
-            .on_scroll_wheel(cx.listener(|_: &mut Self, _: &ScrollWheelEvent, _, cx| {
-                cx.notify();
-            }))
             .child(
                 div()
                     .flex()
@@ -3433,6 +3431,25 @@ impl PropertiesDialog {
             );
         }
 
+        let progress = LinearProgressStyle::explorer_copy_green();
+        let chrome = property_dialog_chrome_height()
+            + if loading_details {
+                progress.height
+            } else {
+                0.0
+            };
+        let body = div()
+            .id("properties-details-body")
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_y_scroll()
+            .scrollbar_width(px(0.0))
+            .track_scroll(&self.details_scroll_handle)
+            .on_scroll_wheel(cx.listener(|_: &mut Self, _: &ScrollWheelEvent, _, cx| {
+                cx.notify();
+            }))
+            .child(fit.measure_body(body, px(chrome)));
         let has_scrollbar = self.details_scrollbar_metrics().is_some();
         let content = div()
             .flex()
@@ -3459,7 +3476,7 @@ impl PropertiesDialog {
             .when(loading_details, |this| {
                 this.child(linear_indeterminate(
                     "properties-details-linear-progress",
-                    LinearProgressStyle::explorer_copy_green(),
+                    progress,
                 ))
             })
             .into_any_element()
@@ -3495,12 +3512,17 @@ impl PropertiesDialog {
             .into_any_element()
     }
 
-    fn render_code(&self, snapshot: &PropertySnapshot, cx: &mut Context<Self>) -> AnyElement {
+    fn render_code(
+        &self,
+        snapshot: &PropertySnapshot,
+        fit: &DialogHeight,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let has_code_tab =
             single_folder_direct_git_repository_root(&snapshot.target, snapshot.item_kind)
                 .is_some();
         if !has_code_tab {
-            return centered_message("Code information is not available for this item.");
+            return property_status_body(fit, "Code information is not available for this item.");
         }
 
         let loading_code = matches!(
@@ -3510,11 +3532,8 @@ impl PropertiesDialog {
         let mut body = div()
             .flex()
             .flex_col()
-            .flex_1()
-            .min_w(px(0.0))
             .w_full()
-            .id("properties-code-body")
-            .overflow_y_scroll()
+            .min_w(px(0.0))
             .p(px(PROPERTIES_PANEL_PADDING));
 
         match &self.code_state {
@@ -3596,6 +3615,16 @@ impl PropertiesDialog {
                 }
             }
         }
+        let progress = LinearProgressStyle::explorer_copy_green();
+        let chrome =
+            property_dialog_chrome_height() + if loading_code { progress.height } else { 0.0 };
+        let body = div()
+            .id("properties-code-body")
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .overflow_y_scroll()
+            .child(fit.measure_body(body, px(chrome)));
 
         div()
             .flex()
@@ -3609,7 +3638,7 @@ impl PropertiesDialog {
             .when(loading_code, |this| {
                 this.child(linear_indeterminate(
                     "properties-code-linear-progress",
-                    LinearProgressStyle::explorer_copy_green(),
+                    progress,
                 ))
             })
             .into_any_element()
@@ -4427,6 +4456,7 @@ impl PropertiesDialog {
         div()
             .flex()
             .flex_row()
+            .flex_shrink_0()
             .justify_end()
             .gap(px(8.0))
             .pt(px(PROPERTIES_BUTTON_ROW_TOP_PADDING))
@@ -4560,7 +4590,7 @@ fn linux_default_app_picker_window_options(title: String, cx: &App) -> WindowOpt
         )),
         window_min_size: Some(size(
             px(DEFAULT_APP_PICKER_WIDTH),
-            px(DEFAULT_APP_PICKER_HEIGHT),
+            px(PROPERTIES_MIN_HEIGHT),
         )),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from(title)),
@@ -4585,7 +4615,7 @@ fn properties_window_bounds(parent_bounds: Bounds<Pixels>) -> WindowBounds {
 fn properties_window_options(title: String, parent_window: &Window, cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(properties_window_bounds(parent_window.bounds())),
-        window_min_size: Some(size(px(PROPERTIES_WIDTH), px(PROPERTIES_HEIGHT))),
+        window_min_size: Some(size(px(PROPERTIES_WIDTH), px(PROPERTIES_MIN_HEIGHT))),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from(title)),
             ..Default::default()
@@ -9928,11 +9958,7 @@ fn property_cover_preview_max_size(window: &Window) -> PropertyPreviewSize {
         - (PROPERTIES_BORDER_WIDTH * 2.0)
         - (PROPERTIES_PANEL_PADDING * 2.0);
     let height = f32::from(bounds.height)
-        - (PROPERTIES_PADDING * 2.0)
-        - PROPERTIES_TAB_HEIGHT
-        - PROPERTIES_BORDER_WIDTH
-        - PROPERTIES_BORDER_WIDTH
-        - property_button_row_height()
+        - property_dialog_chrome_height()
         - (PROPERTIES_PANEL_PADDING * 2.0)
         - PROPERTIES_COVER_NAVIGATION_HEIGHT;
 
@@ -9940,6 +9966,23 @@ fn property_cover_preview_max_size(window: &Window) -> PropertyPreviewSize {
         width: width.max(0.0),
         height: height.max(0.0),
     }
+}
+
+fn property_dialog_chrome_height() -> f32 {
+    2.0 * PROPERTIES_PADDING
+        + PROPERTIES_TAB_HEIGHT
+        + 2.0 * PROPERTIES_BORDER_WIDTH
+        + property_button_row_height()
+}
+
+fn property_status_body(fit: &DialogHeight, message: impl Into<String>) -> AnyElement {
+    fit.layout(
+        div()
+            .p(px(PROPERTIES_PANEL_PADDING))
+            .child(centered_message(message)),
+        None,
+    )
+    .into_any_element()
 }
 
 fn property_button_row_height() -> f32 {
@@ -10747,6 +10790,7 @@ fn property_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .min_w(px(PROPERTIES_BUTTON_MIN_WIDTH))
         .h(px(PROPERTIES_BUTTON_HEIGHT))
         .px(px(10.0))
@@ -11746,6 +11790,108 @@ mod tests {
             ),
             Some(PropertyTab::Details)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn linux_default_app_picker_fits_short_lists_and_caps_long_lists(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            dialog_height::settle_dialog_height,
+            explorer::open_with::{LinuxDefaultApplicationChoice, LinuxDefaultApplicationChoices},
+        };
+
+        let temp = TempDir::new();
+        let path = temp.path().join("example.txt");
+        std::fs::write(&path, "example").unwrap();
+        let (properties, properties_cx) = test_properties_dialog_window(
+            cx,
+            PropertyTarget {
+                paths: vec![path.clone()],
+            },
+        );
+        let picker = properties_cx.update(|_, cx| {
+            let choice = LinuxDefaultApplicationChoice {
+                name: "Example editor".into(),
+                desktop_id: "editor.desktop".into(),
+                compatible: true,
+                current_default: true,
+            };
+            properties.update(cx, |_, cx| {
+                open_linux_default_app_picker_window(
+                    path,
+                    None,
+                    LinuxDefaultApplicationChoices {
+                        mime_type: "text/plain".into(),
+                        choices: vec![choice],
+                    },
+                    properties.clone(),
+                    Default::default(),
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        let picker_view = picker.downcast::<LinuxDefaultAppPickerDialog>().unwrap();
+        let mut picker_cx = gpui::VisualTestContext::from_window(picker, cx);
+        let compact = settle_dialog_height(&mut picker_cx);
+        assert!(compact.height < px(DEFAULT_APP_PICKER_HEIGHT));
+        picker_view
+            .update(&mut picker_cx, |picker, _, cx| {
+                picker.choices = vec![picker.choices[0].clone(); 50];
+                cx.notify();
+            })
+            .unwrap();
+        let capped = settle_dialog_height(&mut picker_cx);
+        assert_eq!(capped.height, px(DEFAULT_APP_PICKER_HEIGHT));
+        let cancel = picker_cx.debug_bounds("linux-default-app-cancel").unwrap();
+        assert!((capped.height - cancel.bottom() - px(PROPERTIES_PADDING)).abs() <= px(1.0));
+    }
+
+    #[gpui::test]
+    fn properties_dialog_fits_loaded_content_and_tabs_until_manually_resized(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::dialog_height::settle_dialog_height;
+
+        let temp = TempDir::new();
+        let image = temp.path().join("photo.png");
+        write_test_png(&image, 4, 2);
+        let (dialog, cx) = test_properties_dialog_window(cx, PropertyTarget { paths: vec![image] });
+        let general = settle_dialog_height(cx);
+        let loaded = cx.read_entity(&dialog, |dialog, _| dialog.snapshot_state.clone());
+        assert!(matches!(loaded, PropertySnapshotState::Ready(_)));
+
+        dialog.update(cx, |dialog, cx| {
+            dialog.snapshot_state = PropertySnapshotState::Loading;
+            cx.notify();
+        });
+        let loading = settle_dialog_height(cx);
+        assert!(loading.height < general.height);
+
+        dialog.update(cx, |dialog, cx| {
+            dialog.snapshot_state = loaded;
+            dialog.active_tab = PropertyTab::Image;
+            cx.notify();
+        });
+        let preview = settle_dialog_height(cx);
+        assert_eq!(preview.height, px(PROPERTIES_HEIGHT));
+        dialog.update(cx, |dialog, cx| {
+            dialog.active_tab = PropertyTab::General;
+            cx.notify();
+        });
+        assert_eq!(settle_dialog_height(cx), general);
+
+        let manual = size(general.width, px(240.0));
+        cx.simulate_resize(manual);
+        dialog.update(cx, |dialog, cx| {
+            dialog.active_tab = PropertyTab::Image;
+            cx.notify();
+        });
+        assert_eq!(settle_dialog_height(cx), manual);
+        let ok = cx.debug_bounds("properties-ok").unwrap();
+        assert!((manual.height - ok.bottom() - px(PROPERTIES_PADDING)).abs() <= px(1.0));
     }
 
     #[gpui::test]

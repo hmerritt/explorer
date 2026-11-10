@@ -7,6 +7,7 @@ use super::{
     trash::{self, BatchResult, RecoveryChoice, RecoveryRequest, RecoveryUndo, TrashItemId},
     view::ExplorerView,
 };
+use crate::dialog_height::DialogHeight;
 use crate::settings::{FileColumnSettings, FileSortSettings, FileViewMode};
 use gpui::{
     AppContext, Bounds, Context, FocusHandle, Focusable, IntoElement, MouseButton, Render,
@@ -670,7 +671,7 @@ impl Render for TrashDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _ = &self.poll;
         let font = crate::settings::current_app_font(cx);
-        let mut body = if matches!(self.kind, DialogKind::Purge(_)) {
+        let root = if matches!(self.kind, DialogKind::Purge(_)) {
             shell_dialog_body(font.clone())
         } else {
             div()
@@ -680,9 +681,6 @@ impl Render for TrashDialog {
                 .text_size(px(DIALOG_TEXT_SIZE))
                 .line_height(px(DIALOG_LINE_HEIGHT))
                 .bg(rgb(0xffffff))
-                .flex()
-                .flex_col()
-                .gap(px(DIALOG_GAP))
         }
         .id("trash-dialog")
         .debug_selector(|| "trash-dialog".into())
@@ -738,55 +736,55 @@ impl Render for TrashDialog {
                 cx.stop_propagation();
             }),
         );
-        match &self.kind {
-            DialogKind::Purge(pending) => {
-                body = body.child(delete_confirmation(
-                    pending.text.clone(),
-                    pending.icon_kind(),
-                    &font,
-                    window,
-                    dialog_button(
-                        "trash-confirm-delete",
-                        "Yes",
-                        self.focused_choice == 0,
-                        window.scale_factor(),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.focused_choice = 0;
-                            cx.notify();
-                        }),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.choose(RecoveryChoice::Replace, window, cx);
-                        cx.stop_propagation();
-                    })),
-                    dialog_button(
-                        "trash-cancel",
-                        "No",
-                        self.focused_choice == 1,
-                        window.scale_factor(),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.focused_choice = 1;
-                            cx.notify();
-                        }),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.close(window, cx);
-                        cx.stop_propagation();
-                    })),
-                ));
-            }
+        let column = || div().flex().flex_col().gap(px(DIALOG_GAP));
+        let (body, actions) = match &self.kind {
+            DialogKind::Purge(pending) => delete_confirmation(
+                pending.text.clone(),
+                pending.icon_kind(),
+                &font,
+                window,
+                dialog_button(
+                    "trash-confirm-delete",
+                    "Yes",
+                    self.focused_choice == 0,
+                    window.scale_factor(),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.focused_choice = 0;
+                        cx.notify();
+                    }),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.choose(RecoveryChoice::Replace, window, cx);
+                    cx.stop_propagation();
+                })),
+                dialog_button(
+                    "trash-cancel",
+                    "No",
+                    self.focused_choice == 1,
+                    window.scale_factor(),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.focused_choice = 1;
+                        cx.notify();
+                    }),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close(window, cx);
+                    cx.stop_propagation();
+                })),
+            ),
             DialogKind::Conflict(_) => {
-                body = body
+                let body = column()
                     .child(dialog_text(
                         "The destination already contains items with the same names.",
                     ))
                     .child(dialog_text("Choose how to restore conflicting items:"));
+                let mut actions = column().mt(px(DIALOG_GAP));
                 for (index, (id, label, choice)) in [
                     (
                         "trash-conflict-replace",
@@ -807,28 +805,26 @@ impl Render for TrashDialog {
                 .into_iter()
                 .enumerate()
                 {
-                    body = body.child(button(
+                    actions = actions.child(button(
                         id,
                         label,
                         self.focused_choice == index,
                         cx.listener(move |this, _, window, cx| this.choose(choice, window, cx)),
                     ));
                 }
-                body = body.child(button(
+                actions = actions.child(button(
                     "trash-cancel",
                     "Cancel",
                     self.focused_choice == 3,
                     cx.listener(|this, _, window, cx| this.close(window, cx)),
                 ));
+                (body.into_any_element(), Some(actions.into_any_element()))
             }
             DialogKind::Properties(items) => {
                 let mut details = div()
                     .id("trash-properties-details")
                     .debug_selector(|| "trash-properties-details".into())
                     .pr(px(PROPERTIES_SCROLL_SPACE))
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .gap(px(PROPERTIES_GAP));
@@ -837,12 +833,13 @@ impl Render for TrashDialog {
                         details = details.child(dialog_text(line));
                     }
                 }
-                body = body.child(details).child(button(
+                let actions = div().mt(px(DIALOG_GAP)).child(button(
                     "trash-properties-close",
                     "Close",
                     true,
                     cx.listener(|this, _, window, cx| this.close(window, cx)),
                 ));
+                (details.into_any_element(), Some(actions.into_any_element()))
             }
             DialogKind::Progress(progress, _) => {
                 let progress = progress.lock().unwrap();
@@ -851,7 +848,7 @@ impl Render for TrashDialog {
                 } else {
                     progress.done as f32 / progress.total as f32
                 };
-                body = body
+                let body = column()
                     .child(dialog_text("Working…"))
                     .child(
                         div()
@@ -881,26 +878,32 @@ impl Render for TrashDialog {
                             .flex_shrink_0()
                             .truncate()
                             .child(progress.name.clone()),
-                    )
-                    .child(
-                        div().w_full().flex().justify_end().child(
-                            dialog_button(
-                                "trash-progress-cancel",
-                                "Cancel",
-                                true,
-                                window.scale_factor(),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let DialogKind::Progress(_, cancel) = &this.kind {
-                                    cancel.store(true, Ordering::Relaxed);
-                                }
-                                cx.stop_propagation();
-                            })),
-                        ),
                     );
+                let actions = div()
+                    .mt(px(DIALOG_GAP))
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        dialog_button(
+                            "trash-progress-cancel",
+                            "Cancel",
+                            true,
+                            window.scale_factor(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let DialogKind::Progress(_, cancel) = &this.kind {
+                                cancel.store(true, Ordering::Relaxed);
+                            }
+                            cx.stop_propagation();
+                        })),
+                    );
+                (body.into_any_element(), Some(actions.into_any_element()))
             }
-        }
-        body
+        };
+        let cap =
+            matches!(self.kind, DialogKind::Properties(_)).then_some(px(PROPERTIES_MAX_HEIGHT));
+        root.child(DialogHeight::new(window, cx, false, cap).layout(body, actions))
     }
 }
 fn dialog_text(text: impl Into<SharedString>) -> gpui::Div {
@@ -1462,8 +1465,16 @@ mod tests {
                 }
             });
             window.simulate_resize(size(px(width), px(height)));
-            window.run_until_parked();
+            let height = f32::from(crate::dialog_height::settle_dialog_height(window).height);
             let bounds = window.debug_bounds(action).unwrap();
+            if is_properties {
+                assert!(height <= PROPERTIES_MAX_HEIGHT);
+                let content = window.debug_bounds("trash-properties-details").unwrap();
+                let scroll = window.debug_bounds("dialog-scroll-body").unwrap();
+                if height == PROPERTIES_MAX_HEIGHT {
+                    assert!(content.size.height > scroll.size.height);
+                }
+            }
             if is_purge {
                 let yes = window.debug_bounds("trash-confirm-delete").unwrap();
                 assert_eq!(bounds.size, size(px(84.0), px(28.0)));

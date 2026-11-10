@@ -1,9 +1,11 @@
+use crate::dialog_height::DialogHeight;
 use gpui::{
     AnyElement, AnyWindowHandle, App, ClickEvent, Context, Entity, FocusHandle, Focusable,
     IntoElement, LineFragment, MouseButton, Render, SharedString, Task, TextRun, TitlebarOptions,
     WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, actions, div,
     prelude::*, px, rgb, size,
 };
+
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -691,6 +693,17 @@ impl ExplorerDialog {
 
 impl Render for ExplorerDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (body, actions) = match self.kind.clone() {
+            ExplorerDialogKind::PermanentDelete(pending) => {
+                self.render_permanent_delete(pending, window, cx)
+            }
+            ExplorerDialogKind::Trash(pending) => self.render_trash(pending, window, cx),
+            ExplorerDialogKind::FileConflict(conflicts) => self.render_file_conflict(conflicts, cx),
+            ExplorerDialogKind::FileOperation(_) => self.render_file_operation(window, cx),
+            ExplorerDialogKind::RemoteDeleteOperation(_) => {
+                self.render_remote_delete_operation(window, cx)
+            }
+        };
         shell_dialog_body(self.font.clone())
             .key_context("ExplorerDialog")
             .track_focus(&self.focus_handle)
@@ -698,19 +711,7 @@ impl Render for ExplorerDialog {
             .on_action(cx.listener(Self::handle_confirm))
             .on_action(cx.listener(Self::handle_focus_primary))
             .on_action(cx.listener(Self::handle_focus_secondary))
-            .child(match self.kind.clone() {
-                ExplorerDialogKind::PermanentDelete(pending) => {
-                    self.render_permanent_delete(pending, window, cx)
-                }
-                ExplorerDialogKind::Trash(pending) => self.render_trash(pending, window, cx),
-                ExplorerDialogKind::FileConflict(conflicts) => {
-                    self.render_file_conflict(conflicts, cx)
-                }
-                ExplorerDialogKind::FileOperation(_) => self.render_file_operation(window, cx),
-                ExplorerDialogKind::RemoteDeleteOperation(_) => {
-                    self.render_remote_delete_operation(window, cx)
-                }
-            })
+            .child(DialogHeight::new(window, cx, false, None).layout(body, actions))
             .when(self.file_operation_terminate_tooltip, |this| {
                 this.child(
                     div()
@@ -737,7 +738,7 @@ impl ExplorerDialog {
         pending: PendingPermanentDelete,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (AnyElement, Option<AnyElement>) {
         let icon_kind = delete_dialog_icon_kind(&pending.paths);
         let mut text = permanent_delete_dialog_text_with_format(&pending, &self.date_format);
         if let Some(path) = text.folder_size_path.as_deref() {
@@ -781,8 +782,6 @@ impl ExplorerDialog {
                 cx.stop_propagation();
             })),
         )
-        .id("permanent-delete-confirmation")
-        .into_any_element()
     }
 
     fn render_trash(
@@ -790,7 +789,7 @@ impl ExplorerDialog {
         pending: PendingTrash,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (AnyElement, Option<AnyElement>) {
         let icon_kind = delete_dialog_icon_kind(&pending.paths);
         let text = trash_dialog_text(&pending);
         delete_confirmation(
@@ -831,18 +830,16 @@ impl ExplorerDialog {
                 cx.stop_propagation();
             })),
         )
-        .id("trash-confirmation")
-        .into_any_element()
     }
 
     fn render_file_conflict(
         &self,
         conflicts: FileConflictBatch,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (AnyElement, Option<AnyElement>) {
         let text = file_conflict_dialog_text(&conflicts);
 
-        div()
+        let body = div()
             .id("file-conflict-dialog")
             .flex()
             .flex_col()
@@ -854,47 +851,47 @@ impl ExplorerDialog {
                     .text_size(px(CONFLICT_TITLE_TEXT_SIZE))
                     .child(SharedString::from(text.title)),
             )
+            .into_any_element();
+        let actions = div()
+            .flex()
+            .flex_col()
+            .gap(px(CONFLICT_COMMAND_GAP))
+            .mt(px(CONFLICT_COMMANDS_TOP_MARGIN))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(CONFLICT_COMMAND_GAP))
-                    .mt(px(CONFLICT_COMMANDS_TOP_MARGIN))
-                    .child(
-                        dialog_command_row(
-                            "file-conflict-replace",
-                            "✓",
-                            EXPLORER_COPY_GREEN,
-                            text.replace_label,
-                            self.focused_choice == Some(DialogChoice::Primary),
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.replace_conflicts(window, cx);
-                                cx.stop_propagation();
-                            },
-                        )),
-                    )
-                    .child(
-                        dialog_command_row(
-                            "file-conflict-skip",
-                            "↶",
-                            SHELL_DIALOG_LINK_BLUE,
-                            text.skip_label,
-                            self.focused_choice == Some(DialogChoice::Secondary),
-                        )
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.cancel(window, cx);
-                                cx.stop_propagation();
-                            },
-                        )),
-                    ),
+                dialog_command_row(
+                    "file-conflict-replace",
+                    "✓",
+                    EXPLORER_COPY_GREEN,
+                    text.replace_label,
+                    self.focused_choice == Some(DialogChoice::Primary),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.replace_conflicts(window, cx);
+                    cx.stop_propagation();
+                })),
             )
-            .into_any_element()
+            .child(
+                dialog_command_row(
+                    "file-conflict-skip",
+                    "↶",
+                    SHELL_DIALOG_LINK_BLUE,
+                    text.skip_label,
+                    self.focused_choice == Some(DialogChoice::Secondary),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.cancel(window, cx);
+                    cx.stop_propagation();
+                })),
+            )
+            .into_any_element();
+        (body, Some(actions))
     }
 
-    fn render_file_operation(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_file_operation(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, Option<AnyElement>) {
         let progress = self.file_operation_progress.clone();
         let title = progress
             .as_ref()
@@ -916,7 +913,7 @@ impl ExplorerDialog {
             progress.kind == FileOperationKind::Copy && progress.cancellable
         });
 
-        div()
+        let body = div()
             .id("file-operation-progress")
             .flex()
             .flex_col()
@@ -954,17 +951,17 @@ impl ExplorerDialog {
                         this.child(div().flex_shrink_0().child(SharedString::from(speed_label)))
                     }),
             )
-            .when(cancellable, |this| {
-                this.child(self.render_file_operation_buttons(show_terminate, window, cx))
-            })
-            .into_any_element()
+            .into_any_element();
+        let actions =
+            cancellable.then(|| self.render_file_operation_buttons(show_terminate, window, cx));
+        (body, actions)
     }
 
     fn render_remote_delete_operation(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (AnyElement, Option<AnyElement>) {
         let progress = self.remote_delete_progress.as_ref();
         let current_item = progress
             .and_then(|progress| progress.current_item.as_deref())
@@ -975,7 +972,7 @@ impl ExplorerDialog {
             .unwrap_or_else(|| "Preparing to delete".to_owned());
         let percent = progress.map(RemoteDeleteProgress::percent).unwrap_or(0.0);
 
-        div()
+        let body = div()
             .id("remote-delete-progress")
             .debug_selector(|| "remote-delete-progress".to_owned())
             .flex()
@@ -1003,28 +1000,26 @@ impl ExplorerDialog {
                     .text_color(rgb(0x595959))
                     .child(SharedString::from(status)),
             )
+            .into_any_element();
+        let actions = div()
+            .flex()
+            .justify_end()
+            .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .mt(px(PROGRESS_DIALOG_BUTTONS_TOP_MARGIN))
-                    .child(
-                        dialog_button(
-                            "remote-delete-cancel",
-                            "Cancel",
-                            false,
-                            window.scale_factor(),
-                        )
-                        .tooltip(explorer_tooltip("Cancel deletion"))
-                        .on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.cancel(window, cx);
-                                cx.stop_propagation();
-                            },
-                        )),
-                    ),
+                dialog_button(
+                    "remote-delete-cancel",
+                    "Cancel",
+                    false,
+                    window.scale_factor(),
+                )
+                .tooltip(explorer_tooltip("Cancel deletion"))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.cancel(window, cx);
+                    cx.stop_propagation();
+                })),
             )
-            .into_any_element()
+            .into_any_element();
+        (body, Some(actions))
     }
 
     fn render_file_operation_buttons(
@@ -1111,7 +1106,7 @@ fn dialog_window_options(
 
     WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
-        window_min_size: Some(size(px(width), px(height))),
+        window_min_size: Some(size(px(width), px(0.0))),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from(kind.window_title())),
             ..Default::default()
@@ -1417,7 +1412,7 @@ pub(super) fn delete_confirmation(
     window: &Window,
     yes: impl IntoElement,
     no: impl IntoElement,
-) -> gpui::Div {
+) -> (AnyElement, Option<AnyElement>) {
     let item_name = text
         .item_name
         .as_deref()
@@ -1428,16 +1423,16 @@ pub(super) fn delete_confirmation(
         render_permanent_delete_compact_body(text.message, icon_kind)
     };
 
-    div().flex().flex_col().w_full().child(body).child(
-        div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .gap(px(DELETE_DIALOG_BUTTON_GAP))
-            .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
-            .child(yes)
-            .child(no),
-    )
+    let actions = div()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .gap(px(DELETE_DIALOG_BUTTON_GAP))
+        .mt(px(DELETE_DIALOG_BUTTONS_TOP_MARGIN))
+        .child(yes)
+        .child(no)
+        .into_any_element();
+    (body, Some(actions))
 }
 
 fn render_permanent_delete_file_body(
@@ -1825,6 +1820,7 @@ fn dialog_command_row(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .h(px(CONFLICT_COMMAND_ROW_HEIGHT))
         .w_full()
         .flex()
@@ -3015,13 +3011,23 @@ mod tests {
 
     #[gpui::test]
     fn file_operation_dialog_copy_shows_terminate_and_cancel(cx: &mut TestAppContext) {
-        let (_explorer, _dialog, cx) =
+        let (_explorer, dialog, cx) =
             test_dialog_entity(cx, ExplorerDialogKind::FileOperation(test_progress()));
 
-        cx.run_until_parked();
+        let fitted = crate::dialog_height::settle_dialog_height(cx);
+        dialog.update(cx, |dialog, cx| {
+            let progress = dialog.file_operation_progress.as_mut().unwrap();
+            progress.completed_files += 1;
+            progress.current_item = Some(PathBuf::from("example.txt"));
+            cx.notify();
+        });
+        assert_eq!(crate::dialog_height::settle_dialog_height(cx), fitted);
 
         assert!(cx.debug_bounds("file-operation-terminate").is_some());
-        assert!(cx.debug_bounds("file-operation-cancel").is_some());
+        let cancel = cx.debug_bounds("file-operation-cancel").unwrap();
+        assert!(
+            (fitted.height - cancel.bottom() - px(SHELL_DIALOG_BOTTOM_PADDING)).abs() <= px(1.0)
+        );
     }
 
     #[gpui::test]
@@ -3109,6 +3115,30 @@ mod tests {
             test_dialog_entity(cx, ExplorerDialogKind::FileOperation(test_progress()));
 
         hover_selector_until_tooltip(cx, "file-operation-terminate");
+    }
+
+    #[gpui::test]
+    fn file_conflict_dialog_grows_for_wrapped_warning(cx: &mut TestAppContext) {
+        use crate::dialog_height::settle_dialog_height;
+
+        let (_explorer, dialog, cx) = test_dialog_entity(
+            cx,
+            ExplorerDialogKind::FileConflict(single_conflict_batch()),
+        );
+        cx.simulate_resize(size(px(CONFLICT_DIALOG_WIDTH), px(300.0)));
+        let compact = settle_dialog_height(cx);
+        let filename = format!("{}report.txt", "long report name ".repeat(8));
+        let conflicts = conflict_batch(&[&filename], move_paths_to_directory);
+        dialog.update(cx, |dialog, cx| {
+            dialog.kind = ExplorerDialogKind::FileConflict(conflicts);
+            cx.notify();
+        });
+        let wrapped = settle_dialog_height(cx);
+        assert!(wrapped.height > compact.height);
+        let skip = cx.debug_bounds("file-conflict-skip").unwrap();
+        assert!(
+            (wrapped.height - skip.bottom() - px(SHELL_DIALOG_BOTTOM_PADDING)).abs() <= px(1.0)
+        );
     }
 
     #[gpui::test]

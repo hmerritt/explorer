@@ -1,3 +1,4 @@
+use crate::dialog_height::DialogHeight;
 use std::path::PathBuf;
 
 use gpui::{
@@ -45,7 +46,7 @@ impl ExplorerView {
         let dialog_size = size(px(500.0), px(265.0));
         let mut options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(dialog_size, cx)),
-            window_min_size: Some(dialog_size),
+            window_min_size: Some(size(dialog_size.width, px(0.0))),
             titlebar: Some(TitlebarOptions {
                 title: Some("Create Shortcut".into()),
                 ..Default::default()
@@ -310,19 +311,16 @@ impl ShortcutDialog {
 }
 
 impl Render for ShortcutDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let naming = self.target.is_some();
         let enabled = !self.pending;
         let input = self.input().clone();
         let can_advance = enabled && !input.read(cx).content().trim().is_empty();
         let mixed_picker = cx.can_select_mixed_files_and_dirs();
-        div()
+        let root = div()
             .key_context("ExplorerRenameInput")
             .font(crate::settings::current_app_font(cx))
             .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
             .p(px(20.0))
             .bg(rgb(0xffffff))
             .text_size(px(12.0))
@@ -348,7 +346,11 @@ impl Render for ShortcutDialog {
             .on_action(cx.listener(|dialog, _: &RenameCancel, window, cx| {
                 dialog.cancel(window);
                 cx.stop_propagation();
-            }))
+            }));
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
             .child(div().text_size(px(16.0)).child(if naming {
                 "What would you like to name the shortcut?"
             } else {
@@ -401,43 +403,39 @@ impl Render for ShortcutDialog {
             )
             .when_some(self.error.clone(), |dialog, error| {
                 dialog.child(div().text_color(rgb(0x9b1c1c)).child(error))
+            });
+        let actions = div()
+            .mt(px(12.0))
+            .flex()
+            .justify_end()
+            .gap(px(8.0))
+            .when(naming, |row| {
+                row.child(dialog_button("shortcut-back", "Back", 3, enabled).on_click(
+                    cx.listener(|dialog, _: &ClickEvent, window, cx| dialog.back(window, cx)),
+                ))
             })
             .child(
-                div()
-                    .mt_auto()
-                    .flex()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .when(naming, |row| {
-                        row.child(dialog_button("shortcut-back", "Back", 3, enabled).on_click(
-                            cx.listener(|dialog, _: &ClickEvent, window, cx| {
-                                dialog.back(window, cx)
-                            }),
-                        ))
-                    })
-                    .child(
-                        dialog_button(
-                            if naming {
-                                "shortcut-finish"
-                            } else {
-                                "shortcut-next"
-                            },
-                            if naming { "Finish" } else { "Next" },
-                            4,
-                            can_advance,
-                        )
-                        .on_click(cx.listener(
-                            |dialog, _: &ClickEvent, window, cx| {
-                                dialog.advance(window, cx);
-                            },
-                        )),
-                    )
-                    .child(
-                        dialog_button("shortcut-cancel", "Cancel", 5, !self.saving()).on_click(
-                            cx.listener(|dialog, _: &ClickEvent, window, _| dialog.cancel(window)),
-                        ),
-                    ),
+                dialog_button(
+                    if naming {
+                        "shortcut-finish"
+                    } else {
+                        "shortcut-next"
+                    },
+                    if naming { "Finish" } else { "Next" },
+                    4,
+                    can_advance,
+                )
+                .on_click(cx.listener(|dialog, _: &ClickEvent, window, cx| {
+                    dialog.advance(window, cx);
+                })),
             )
+            .child(
+                dialog_button("shortcut-cancel", "Cancel", 5, !self.saving()).on_click(
+                    cx.listener(|dialog, _: &ClickEvent, window, _| dialog.cancel(window)),
+                ),
+            )
+            .into_any_element();
+        root.child(DialogHeight::new(window, cx, false, None).layout(body, Some(actions)))
     }
 }
 
@@ -473,6 +471,7 @@ fn dialog_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialog_height::settle_dialog_height;
     use crate::explorer::{
         RenamePaste, RenameSelectAll,
         test_support::{TempDir, test_view_entity_at_path},
@@ -513,6 +512,9 @@ mod tests {
         let handle = open_wizard(cx);
         let wizard = handle.downcast::<ShortcutDialog>().unwrap();
         let mut dialog_cx = VisualTestContext::from_window(handle, cx);
+        let initial = settle_dialog_height(&mut dialog_cx);
+        let cancel = dialog_cx.debug_bounds("shortcut-cancel").unwrap();
+        assert!((initial.height - cancel.bottom() - px(20.0)).abs() <= px(1.0));
         dialog_cx.write_to_clipboard(ClipboardItem::new_string("missing.txt".into()));
         dialog_cx.dispatch_action(RenamePaste);
         dialog_cx.simulate_keystrokes("enter");
@@ -521,12 +523,17 @@ mod tests {
                 assert!(wizard.error.is_some());
             })
             .unwrap();
+        let with_error = settle_dialog_height(&mut dialog_cx);
+        assert!(with_error.height > initial.height);
 
         dialog_cx.dispatch_action(RenameSelectAll);
         dialog_cx.write_to_clipboard(ClipboardItem::new_string("source.txt".into()));
         dialog_cx.dispatch_action(RenamePaste);
         dialog_cx.simulate_keystrokes("enter");
-        assert!(dialog_cx.debug_bounds("shortcut-finish").is_some());
+        let naming = settle_dialog_height(&mut dialog_cx);
+        let finish = dialog_cx.debug_bounds("shortcut-finish").unwrap();
+        assert!(naming.height < with_error.height);
+        assert!((naming.height - finish.bottom() - px(20.0)).abs() <= px(1.0));
         click(&mut dialog_cx, "shortcut-back");
         wizard
             .update(&mut dialog_cx, |wizard, _, cx| {

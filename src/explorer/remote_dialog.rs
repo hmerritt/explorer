@@ -1,3 +1,4 @@
+use crate::dialog_height::DialogHeight;
 use std::{ops::Range, path::Path};
 
 use gpui::{
@@ -75,9 +76,8 @@ pub(super) fn open_site_dialog(
     let mut options = remote_window_options("Connect to SFTP server", SITE_INITIAL_HEIGHT, cx);
     placement.apply(&mut options);
     cx.open_window(options, move |window, cx| {
-        let name = cx.new(|cx| {
-            DialogTextInput::new(name, "Site name (optional)", false, cx.focus_handle())
-        });
+        let name = cx
+            .new(|cx| DialogTextInput::new(name, "Site name (optional)", false, cx.focus_handle()));
         let address = cx.new(|cx| {
             DialogTextInput::new(address, "sftp://user@host/folder", false, cx.focus_handle())
         });
@@ -140,9 +140,8 @@ pub(super) fn open_remote_credentials_dialog(
     placement.apply(&mut options);
     let handle = cx
         .open_window(options, move |window, cx| {
-            let username_input = cx.new(|cx| {
-                DialogTextInput::new(username, "Username", false, cx.focus_handle())
-            });
+            let username_input =
+                cx.new(|cx| DialogTextInput::new(username, "Username", false, cx.focus_handle()));
             let password_input = cx.new(|cx| {
                 DialogTextInput::new(
                     String::new(),
@@ -406,8 +405,8 @@ impl RemoteDownloadDialog {
         address: Entity<DialogTextInput>,
         error: Option<String>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
+    ) -> (AnyElement, AnyElement) {
+        let body = div()
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -420,50 +419,46 @@ impl RemoteDownloadDialog {
             .when_some(error, |this, error| {
                 this.child(div().text_color(rgb(0x9b1c1c)).child(error))
             })
+            .into_any_element();
+        let actions = div()
+            .flex()
+            .justify_end()
+            .gap(px(8.0))
+            .mt(px(18.0))
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .mt(px(10.0))
-                    .child(
-                        remote_button("site-forget", "Forget site").on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                if let RemoteDialogKind::Site {
-                                    original, error, ..
-                                } = &mut this.kind
-                                {
-                                    if let Err(message) =
-                                        crate::settings::update_remote_sidebar_item(
-                                            original.as_ref(),
-                                            None,
-                                            cx,
-                                        )
-                                    {
-                                        *error = Some(message);
-                                        cx.notify();
-                                        return;
-                                    }
-                                }
-                                let _ = this.explorer.update(cx, |view, cx| {
-                                    view.reload_with_entry_metadata_resolution(cx);
-                                });
-                                this.cancel_inner(window, cx);
-                            },
-                        )),
-                    )
-                    .child(
-                        remote_button("site-connect", "Connect").on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.submit(&RenameCommit, window, cx)
-                            },
-                        )),
-                    )
-                    .child(remote_button("site-cancel", "Cancel").on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| this.cancel_inner(window, cx),
-                    ))),
+                remote_button("site-forget", "Forget site").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        if let RemoteDialogKind::Site {
+                            original, error, ..
+                        } = &mut this.kind
+                        {
+                            if let Err(message) = crate::settings::update_remote_sidebar_item(
+                                original.as_ref(),
+                                None,
+                                cx,
+                            ) {
+                                *error = Some(message);
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        let _ = this.explorer.update(cx, |view, cx| {
+                            view.reload_with_entry_metadata_resolution(cx);
+                        });
+                        this.cancel_inner(window, cx);
+                    },
+                )),
             )
-            .into_any_element()
+            .child(
+                remote_button("site-connect", "Connect").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| this.submit(&RenameCommit, window, cx),
+                )),
+            )
+            .child(remote_button("site-cancel", "Cancel").on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.cancel_inner(window, cx)),
+            ))
+            .into_any_element();
+        (body, actions)
     }
 
     fn render_credentials(
@@ -473,8 +468,8 @@ impl RemoteDownloadDialog {
         username: Entity<DialogTextInput>,
         password: Entity<DialogTextInput>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
+    ) -> (AnyElement, AnyElement) {
+        let body = div()
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -503,32 +498,36 @@ impl RemoteDownloadDialog {
                 },
             )
             .child(password)
+            .into_any_element();
+        let actions = div()
+            .flex()
+            .justify_end()
+            .gap(px(10.0))
+            .mt(px(18.0))
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(10.0))
-                    .mt(px(10.0))
-                    .child(
-                        remote_button("remote-sign-in", "Sign in").on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.submit(&RenameCommit, window, cx);
-                            },
-                        )),
-                    )
-                    .child(
-                        remote_button("remote-cancel", "Cancel").on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
-                                this.cancel_inner(window, cx);
-                            },
-                        )),
-                    ),
+                remote_button("remote-sign-in", "Sign in").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.submit(&RenameCommit, window, cx);
+                    },
+                )),
             )
-            .into_any_element()
+            .child(
+                remote_button("remote-cancel", "Cancel").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.cancel_inner(window, cx);
+                    },
+                )),
+            )
+            .into_any_element();
+        (body, actions)
     }
 
-    fn render_host_key(&self, key: &RemoteHostKey, cx: &mut Context<Self>) -> AnyElement {
-        div()
+    fn render_host_key(
+        &self,
+        key: &RemoteHostKey,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, AnyElement) {
+        let body = div()
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -544,30 +543,34 @@ impl RemoteDownloadDialog {
                     .text_size(px(11.0))
                     .child(key.fingerprint.clone()),
             )
+            .into_any_element();
+        let actions = div()
+            .flex()
+            .justify_end()
+            .gap(px(10.0))
+            .mt(px(24.0))
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(10.0))
-                    .mt(px(14.0))
-                    .child(remote_button("remote-connect", "Connect").on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.submit(&RenameCommit, window, cx);
-                        },
-                    )))
-                    .child(remote_button("remote-host-cancel", "Cancel").on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| {
-                            this.cancel_inner(window, cx);
-                        },
-                    ))),
+                remote_button("remote-connect", "Connect").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.submit(&RenameCommit, window, cx);
+                    },
+                )),
             )
-            .into_any_element()
+            .child(
+                remote_button("remote-host-cancel", "Cancel").on_click(cx.listener(
+                    |this, _: &ClickEvent, window, cx| {
+                        this.cancel_inner(window, cx);
+                    },
+                )),
+            )
+            .into_any_element();
+        (body, actions)
     }
 }
 
 impl Render for RemoteDownloadDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match &self.kind {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (body, actions) = match &self.kind {
             RemoteDialogKind::Site {
                 name,
                 address,
@@ -601,16 +604,7 @@ impl Render for RemoteDownloadDialog {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::cancel))
-            .on_children_prepainted(|children, window, cx| {
-                let height = (children[0].size.height + px(2.0 * DIALOG_PADDING)).ceil();
-                if (window.viewport_size().height - height).abs() > px(1.0) {
-                    window.defer(cx, move |window, _| {
-                        let viewport = window.viewport_size();
-                        window.resize(size(viewport.width, height));
-                    });
-                }
-            })
-            .child(content)
+            .child(DialogHeight::new(window, cx, false, None).layout(body, Some(actions)))
     }
 }
 
@@ -1197,8 +1191,7 @@ mod tests {
         let mut cx = gpui::VisualTestContext::from_window(window, cx);
 
         let check_bottom_padding = |cx: &mut gpui::VisualTestContext| {
-            cx.run_until_parked();
-            let height = cx.update(|window, _| window.bounds().size.height);
+            let height = crate::dialog_height::settle_dialog_height(cx).height;
             for id in ["site-forget", "site-connect", "site-cancel"] {
                 let bottom = cx.debug_bounds(id).unwrap().bottom();
                 assert!((height - bottom - px(DIALOG_PADDING)).abs() <= px(1.0));

@@ -48,6 +48,7 @@ use windows::{
     core::{GUID, HSTRING, PCWSTR, w},
 };
 
+use crate::dialog_height::DialogHeight;
 use crate::update_check::{UpdateCheckError, UpdateCheckResult, check_latest_release};
 use crate::window_chrome::{
     TITLEBAR_HEIGHT, WindowDragState, render_titlebar_drag_region, render_window_controls,
@@ -321,55 +322,67 @@ impl AboutUpdateWindow {
             .into_any_element()
     }
 
-    fn render_update(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let content = match &self.update {
-            UpdatePanelState::Idle => div().child("Ready to check for updates."),
-            UpdatePanelState::Checking => div().child("Checking for updates…"),
+    fn render_update(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> (gpui::AnyElement, Option<gpui::AnyElement>) {
+        let (content, action) = match &self.update {
+            UpdatePanelState::Idle => (div().child("Ready to check for updates."), None),
+            UpdatePanelState::Checking => (div().child("Checking for updates…"), None),
             UpdatePanelState::Complete(UpdateCheckResult::UpdateAvailable {
                 current,
                 latest,
                 release_url,
             }) => {
                 let release_url = release_url.clone();
-                div()
+                let content = div()
                     .flex()
                     .flex_col()
                     .gap(px(14.0))
                     .child(div().child("An Explorer update is available."))
-                    .child(div().child(format!("Installed: {current}    Latest: {latest}")))
-                    .child(
-                        tray_button("open-release-page", "Open release page").on_click(
-                            cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&release_url)),
-                        ),
-                    )
+                    .child(div().child(format!("Installed: {current}    Latest: {latest}")));
+                let action = tray_button("open-release-page", "Open release page").on_click(
+                    cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&release_url)),
+                );
+                (content, Some(action))
             }
-            UpdatePanelState::Complete(UpdateCheckResult::UpToDate { current, latest }) => div()
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .child(if current > latest {
-                    "This Explorer build is newer than the latest published release."
-                } else {
-                    "Explorer is up to date."
-                })
-                .child(format!("Installed: {current}    Latest: {latest}")),
-            UpdatePanelState::Failed(error) => div()
-                .flex()
-                .flex_col()
-                .gap(px(14.0))
-                .child("The update check failed.")
-                .child(div().text_color(rgb(0x9c1c1c)).child(error.to_string()))
-                .child(tray_button("retry-update-check", "Try again").on_click(
+            UpdatePanelState::Complete(UpdateCheckResult::UpToDate { current, latest }) => (
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(if current > latest {
+                        "This Explorer build is newer than the latest published release."
+                    } else {
+                        "Explorer is up to date."
+                    })
+                    .child(format!("Installed: {current}    Latest: {latest}")),
+                None,
+            ),
+            UpdatePanelState::Failed(error) => {
+                let content = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.0))
+                    .child("The update check failed.")
+                    .child(div().text_color(rgb(0x9c1c1c)).child(error.to_string()));
+                let action = tray_button("retry-update-check", "Try again").on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| this.begin_update_check(cx)),
-                )),
+                );
+                (content, Some(action))
+            }
         };
-        div()
+        let body = div()
             .flex()
             .flex_col()
             .gap(px(14.0))
             .child(div().text_size(px(20.0)).child("Explorer updates"))
             .child(content)
-            .into_any_element()
+            .into_any_element();
+        (
+            body,
+            action.map(|action| div().mt(px(14.0)).child(action).into_any_element()),
+        )
     }
 }
 
@@ -387,8 +400,8 @@ impl WindowDragState for AboutUpdateWindow {
 
 impl Render for AboutUpdateWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.mode {
-            AboutMode::About => self.render_about(),
+        let (body, actions) = match self.mode {
+            AboutMode::About => (self.render_about(), None),
             AboutMode::CheckForUpdates => self.render_update(cx),
         };
         let titlebar = div()
@@ -415,13 +428,20 @@ impl Render for AboutUpdateWindow {
             .text_size(px(13.0))
             .text_color(rgb(0x202020))
             .child(titlebar)
-            .child(div().flex_1().p(px(24.0)).child(content))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .p(px(24.0))
+                    .child(DialogHeight::new(window, cx, true, None).layout(body, actions)),
+            )
     }
 }
 
 fn tray_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .min_w(px(110.0))
         .h(px(30.0))
         .px(px(12.0))
@@ -456,7 +476,7 @@ fn open_about_window(mode: AboutMode, cx: &mut App) {
                 size(px(470.0), px(260.0)),
                 cx,
             ))),
-            window_min_size: Some(size(px(420.0), px(220.0))),
+            window_min_size: Some(size(px(420.0), px(140.0))),
             titlebar: Some(TitlebarOptions {
                 title: Some(SharedString::from("About Explorer")),
                 appears_transparent: true,
@@ -1102,6 +1122,32 @@ mod tests {
             .expect("Windows caption control bounds");
         cx.debug_bounds("explorer-window-close")
             .expect("close caption button bounds");
+    }
+
+    #[gpui::test]
+    fn about_update_window_fits_update_errors_and_keeps_retry_visible(cx: &mut TestAppContext) {
+        use crate::dialog_height::settle_dialog_height;
+
+        let dialog = cx.update(|cx| {
+            cx.set_global(AboutWindowRegistry { handle: None });
+            open_about_window(AboutMode::About, cx);
+            cx.global::<AboutWindowRegistry>().handle.unwrap()
+        });
+        let mut cx = gpui::VisualTestContext::from_window(dialog.into(), cx);
+        let about = settle_dialog_height(&mut cx);
+        dialog
+            .update(&mut cx, |dialog, _, cx| {
+                dialog.mode = AboutMode::CheckForUpdates;
+                dialog.update = UpdatePanelState::Failed(UpdateCheckError::Network(
+                    "The release server did not respond. ".repeat(10),
+                ));
+                cx.notify();
+            })
+            .unwrap();
+        let failed = settle_dialog_height(&mut cx);
+        assert!(failed.height > about.height);
+        let retry = cx.debug_bounds("retry-update-check").unwrap();
+        assert!((failed.height - retry.bottom() - px(24.0)).abs() <= px(1.0));
     }
 
     #[gpui::test]
