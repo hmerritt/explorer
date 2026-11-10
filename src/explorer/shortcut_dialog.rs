@@ -2,9 +2,9 @@ use crate::dialog_height::DialogHeight;
 use std::path::PathBuf;
 
 use gpui::{
-    AnyWindowHandle, ClickEvent, Context, Div, Entity, Focusable, KeyDownEvent, PathPromptOptions,
-    Render, Stateful, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations,
-    WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
+    AnyWindowHandle, ClickEvent, Context, Div, Entity, Focusable, KeyDownEvent, Render, Stateful,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions, div, prelude::*, px, rgb, size,
 };
 
 use super::{
@@ -21,7 +21,6 @@ struct ShortcutDialog {
     directory: PathBuf,
     destination: Entity<DialogTextInput>,
     name: Entity<DialogTextInput>,
-    browsed_path: Option<PathBuf>,
     target: Option<ShortcutTarget>,
     pending: bool,
     error: Option<String>,
@@ -96,7 +95,6 @@ impl ExplorerView {
                     directory,
                     destination,
                     name,
-                    browsed_path: None,
                     target: None,
                     pending: false,
                     error: None,
@@ -157,24 +155,13 @@ impl ShortcutDialog {
         }
 
         let directory = self.directory.clone();
-        let browsed_path = self
-            .browsed_path
-            .as_ref()
-            .filter(|path| path.to_string_lossy() == input)
-            .cloned();
         self.pending = true;
         self.error = None;
         cx.spawn_in(window, async move |this, cx| {
             let original_input = input.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    if let Some(path) = browsed_path {
-                        ShortcutTarget::from_path(path)
-                    } else {
-                        ShortcutTarget::parse(&input, &directory)
-                    }
-                })
+                .spawn(async move { ShortcutTarget::parse(&input, &directory) })
                 .await;
             let _ = this.update_in(cx, |dialog, window, cx| {
                 dialog.pending = false;
@@ -263,51 +250,6 @@ impl ShortcutDialog {
         .detach();
         cx.notify();
     }
-
-    fn browse(
-        &mut self,
-        files: bool,
-        directories: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pending || self.target.is_some() {
-            return;
-        }
-        self.pending = true;
-        self.error = None;
-        let prompt = cx.prompt_for_paths(PathPromptOptions {
-            files,
-            directories,
-            multiple: false,
-            prompt: Some("Browse for a shortcut destination".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = prompt.await;
-            let _ = this.update_in(cx, |dialog, window, cx| {
-                dialog.pending = false;
-                match result {
-                    Ok(Ok(Some(paths))) => {
-                        if let Some(path) = paths.into_iter().next() {
-                            let text = path.to_string_lossy().into_owned();
-                            dialog.destination.update(cx, |input, cx| {
-                                input.set_content(text, false);
-                                cx.notify();
-                            });
-                            dialog.browsed_path = Some(path);
-                        }
-                    }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => dialog.error = Some(format!("Could not browse: {error}")),
-                    Err(_) => dialog.error = Some("Could not open the file picker.".into()),
-                }
-                dialog.destination.read(cx).focus_handle(cx).focus(window);
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
 }
 
 impl Render for ShortcutDialog {
@@ -316,7 +258,6 @@ impl Render for ShortcutDialog {
         let enabled = !self.pending;
         let input = self.input().clone();
         let can_advance = enabled && !input.read(cx).content().trim().is_empty();
-        let mixed_picker = cx.can_select_mixed_files_and_dirs();
         let root = div()
             .key_context("ExplorerRenameInput")
             .font(crate::settings::current_app_font(cx))
@@ -354,53 +295,14 @@ impl Render for ShortcutDialog {
             .child(div().text_size(px(16.0)).child(if naming {
                 "What would you like to name the shortcut?"
             } else {
-                "What item would you like to create a shortcut for?"
+                "Create Shortcut"
             }))
             .child(if naming {
                 "Type a name for this shortcut."
             } else {
                 "Type the location of a file, folder, or Internet address."
             })
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.0))
-                    .child(div().flex_1().min_w(px(0.0)).child(input))
-                    .when(!naming, |row| {
-                        row.child(
-                            dialog_button(
-                                "shortcut-browse",
-                                if mixed_picker {
-                                    "Browse…"
-                                } else {
-                                    "Browse files…"
-                                },
-                                1,
-                                enabled,
-                            )
-                            .on_click(cx.listener(
-                                move |dialog, _: &ClickEvent, window, cx| {
-                                    dialog.browse(true, mixed_picker, window, cx);
-                                },
-                            )),
-                        )
-                        .when(!mixed_picker, |row| {
-                            row.child(
-                                dialog_button(
-                                    "shortcut-browse-folders",
-                                    "Browse folders…",
-                                    2,
-                                    enabled,
-                                )
-                                .on_click(cx.listener(
-                                    |dialog, _: &ClickEvent, window, cx| {
-                                        dialog.browse(false, true, window, cx);
-                                    },
-                                )),
-                            )
-                        })
-                    }),
-            )
+            .child(input)
             .when_some(self.error.clone(), |dialog, error| {
                 dialog.child(div().text_color(rgb(0x9b1c1c)).child(error))
             });
@@ -410,7 +312,7 @@ impl Render for ShortcutDialog {
             .justify_end()
             .gap(px(8.0))
             .when(naming, |row| {
-                row.child(dialog_button("shortcut-back", "Back", 3, enabled).on_click(
+                row.child(dialog_button("shortcut-back", "Back", 1, enabled).on_click(
                     cx.listener(|dialog, _: &ClickEvent, window, cx| dialog.back(window, cx)),
                 ))
             })
@@ -422,7 +324,7 @@ impl Render for ShortcutDialog {
                         "shortcut-next"
                     },
                     if naming { "Finish" } else { "Next" },
-                    4,
+                    2,
                     can_advance,
                 )
                 .on_click(cx.listener(|dialog, _: &ClickEvent, window, cx| {
@@ -430,7 +332,7 @@ impl Render for ShortcutDialog {
                 })),
             )
             .child(
-                dialog_button("shortcut-cancel", "Cancel", 5, !self.saving()).on_click(
+                dialog_button("shortcut-cancel", "Cancel", 3, !self.saving()).on_click(
                     cx.listener(|dialog, _: &ClickEvent, window, _| dialog.cancel(window)),
                 ),
             )
@@ -500,6 +402,10 @@ mod tests {
         let (explorer, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
         let open_wizard = |cx: &mut VisualTestContext| {
             click(cx, "utility-new");
+            let folder = cx.debug_bounds("utility-new-folder").unwrap();
+            let file = cx.debug_bounds("utility-new-file").unwrap();
+            let shortcut = cx.debug_bounds("utility-new-shortcut").unwrap();
+            assert!(folder.top() < file.top() && file.top() < shortcut.top());
             click(cx, "utility-new-shortcut");
             cx.read_entity(&explorer, |view, _| view.active_dialog_window.unwrap())
         };
@@ -513,6 +419,8 @@ mod tests {
         let wizard = handle.downcast::<ShortcutDialog>().unwrap();
         let mut dialog_cx = VisualTestContext::from_window(handle, cx);
         let initial = settle_dialog_height(&mut dialog_cx);
+        assert!(dialog_cx.debug_bounds("shortcut-browse").is_none());
+        assert!(dialog_cx.debug_bounds("shortcut-browse-folders").is_none());
         let cancel = dialog_cx.debug_bounds("shortcut-cancel").unwrap();
         assert!((initial.height - cancel.bottom() - px(20.0)).abs() <= px(1.0));
         dialog_cx.write_to_clipboard(ClipboardItem::new_string("missing.txt".into()));

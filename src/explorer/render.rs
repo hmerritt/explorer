@@ -1092,6 +1092,19 @@ impl ExplorerView {
                         cx.notify();
                     }),
                 ))
+                .child(utility_menu_row(
+                    "utility-new-file",
+                    Some(file_icon().into_any_element()),
+                    "File",
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_utility_menu = None;
+                        if this.commit_active_rename_before_interaction(window, cx) {
+                            this.create_new_file(window, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ))
                 .when(self.can_create_shortcut(), |menu| {
                     menu.child(utility_menu_row(
                         "utility-new-shortcut",
@@ -1106,20 +1119,7 @@ impl ExplorerView {
                             cx.notify();
                         }),
                     ))
-                })
-                .child(utility_menu_row(
-                    "utility-new-file",
-                    Some(file_icon().into_any_element()),
-                    "File",
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_utility_menu = None;
-                        if this.commit_active_rename_before_interaction(window, cx) {
-                            this.create_new_file(window, cx);
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )),
+                }),
             UtilityMenu::View => utility_dropdown()
                 .child(utility_menu_row(
                     "utility-large-icons",
