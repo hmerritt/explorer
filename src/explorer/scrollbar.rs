@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Div, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, canvas,
-    div, point, prelude::*, px, rgb,
+    AnyElement, Context, Div, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, canvas, div, point, prelude::*, px, rgb,
 };
 
 use crate::explorer::{
@@ -416,12 +416,12 @@ impl ExplorerView {
         let entity = cx.entity();
 
         canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+            move |bounds, hitbox, window, _| {
                 window.on_mouse_event({
                     let entity = entity.clone();
-                    move |event: &MouseDownEvent, _, _, cx| {
-                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                    move |event: &MouseDownEvent, _, window, cx| {
+                        if event.button != MouseButton::Left || !hitbox.is_hovered(window) {
                             return;
                         }
 
@@ -536,12 +536,12 @@ impl ExplorerView {
         let entity = cx.entity();
 
         canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+            move |bounds, hitbox, window, _| {
                 window.on_mouse_event({
                     let entity = entity.clone();
-                    move |event: &MouseDownEvent, _, _, cx| {
-                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                    move |event: &MouseDownEvent, _, window, cx| {
+                        if event.button != MouseButton::Left || !hitbox.is_hovered(window) {
                             return;
                         }
 

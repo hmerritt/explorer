@@ -1,8 +1,10 @@
 use std::{
     any::Any,
+    cell::Cell,
     collections::{BTreeSet, HashMap},
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
     time::Duration,
 };
@@ -11,11 +13,11 @@ use crate::window_chrome::TITLEBAR_HEIGHT;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context,
     CursorStyle, DispatchPhase, Div, DragMoveEvent, Entity, ExternalPaths,
-    ExternalPathsDragCallback, FocusHandle, Focusable, FontWeight, Image, IntoElement,
-    ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    ExternalPathsDragCallback, FocusHandle, Focusable, FontWeight, HitboxBehavior, Image,
+    IntoElement, ListHorizontalSizingBehavior, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NavigationDirection, ObjectFit, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font, list,
-    prelude::*, px, rgb, transparent_black, uniform_list,
+    ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, deferred, div, font, list,
+    prelude::*, px, rgb, uniform_list,
 };
 
 #[cfg(test)]
@@ -381,6 +383,12 @@ pub(super) struct ExplorerSharedChrome {
     pub(super) overlays: Vec<AnyElement>,
 }
 
+#[derive(Default)]
+struct UtilityMenuBounds {
+    popup: Cell<Option<Bounds<Pixels>>>,
+    trigger: Cell<Option<Bounds<Pixels>>>,
+}
+
 fn address_suggestions_top(shared_chrome_hosted: bool) -> f32 {
     let host_offset = if shared_chrome_hosted {
         TITLEBAR_HEIGHT
@@ -689,6 +697,7 @@ impl ExplorerView {
         &self,
         sidebar_auto_hide_active: bool,
         sidebar_visible: bool,
+        menu_bounds: Option<&Rc<UtilityMenuBounds>>,
         cx: &mut Context<Self>,
     ) -> Div {
         let selected = !self.selection.selected_indices.is_empty();
@@ -761,7 +770,7 @@ impl ExplorerView {
                         }),
                     ))
                     .child(utility_separator())
-                    .child(self.render_view_utility_button(true, cx))
+                    .child(self.render_view_utility_button(true, menu_bounds, cx))
                     .child(utility_separator())
                     .child(bin_action_button(
                         "utility-bin-restore",
@@ -789,13 +798,19 @@ impl ExplorerView {
             )
     }
 
-    fn render_view_utility_button(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_view_utility_button(
+        &self,
+        enabled: bool,
+        menu_bounds: Option<&Rc<UtilityMenuBounds>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         utility_text_button(
             "utility-view",
             Some(utility_view_icon().into_any_element()),
             "View",
             self.open_utility_menu == Some(UtilityMenu::View),
             enabled,
+            menu_bounds,
             cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.close_context_menu();
                 this.cancel_pending_click_rename();
@@ -814,10 +829,15 @@ impl ExplorerView {
         &self,
         sidebar_auto_hide_active: bool,
         sidebar_visible: bool,
+        menu_bounds: Option<&Rc<UtilityMenuBounds>>,
         cx: &mut Context<Self>,
     ) -> Div {
+        let dismissal =
+            menu_bounds.map(|bounds| self.render_utility_menu_dismissal(bounds.clone(), cx));
         if self.is_trash_view() {
-            return self.render_bin_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx);
+            return self
+                .render_bin_utility_bar(sidebar_auto_hide_active, sidebar_visible, menu_bounds, cx)
+                .children(dismissal);
         }
         let has_selection = !self.selection.selected_indices.is_empty();
         let can_rename = self.can_start_selected_rename();
@@ -842,6 +862,7 @@ impl ExplorerView {
             .border_color(rgb(0xe9e9e9))
             .px(px(UTILITY_BAR_HORIZONTAL_PADDING))
             .gap(px(UTILITY_BAR_ITEM_GAP))
+            .children(dismissal)
             .when(sidebar_auto_hide_active, |this| {
                 this.child(utility_icon_button(
                     "utility-sidebar-toggle",
@@ -869,6 +890,7 @@ impl ExplorerView {
                 "New",
                 self.open_utility_menu == Some(UtilityMenu::New),
                 can_mutate_location,
+                menu_bounds,
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.close_context_menu();
                     this.cancel_pending_click_rename();
@@ -888,6 +910,7 @@ impl ExplorerView {
                 "Connect",
                 false,
                 true,
+                None,
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     let _ = window;
                     if this.active_dialog_window.is_none() {
@@ -982,7 +1005,7 @@ impl ExplorerView {
                 }),
             ))
             .child(utility_separator())
-            .child(self.render_view_utility_button(!read_only_group, cx))
+            .child(self.render_view_utility_button(!read_only_group, menu_bounds, cx))
             .when(can_extract, |this| {
                 this.child(utility_separator()).child(utility_action_button(
                     "utility-extract",
@@ -1044,8 +1067,14 @@ impl ExplorerView {
             self.sidebar_auto_hide_expanded,
         );
 
+        let menu_bounds = self
+            .open_utility_menu
+            .map(|_| Rc::new(UtilityMenuBounds::default()));
         let mut overlays = Vec::new();
-        if let Some(menu) = self.render_utility_menu_overlay(sidebar_auto_hide_active, cx) {
+        if let Some(bounds) = &menu_bounds
+            && let Some(menu) =
+                self.render_utility_menu_overlay(sidebar_auto_hide_active, bounds.clone(), cx)
+        {
             overlays.push(menu);
         }
         if let Some(suggestions) = self.render_address_suggestions_overlay(window, cx) {
@@ -1063,7 +1092,12 @@ impl ExplorerView {
         ExplorerSharedChrome {
             navbar: self.render_navbar(window, cx).into_any_element(),
             utility_bar: self
-                .render_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx)
+                .render_utility_bar(
+                    sidebar_auto_hide_active,
+                    sidebar_visible,
+                    menu_bounds.as_ref(),
+                    cx,
+                )
                 .into_any_element(),
             sidebar: sidebar_visible.then(|| self.render_sidebar(cx)),
             status_bar: self.render_status_bar(cx),
@@ -1071,9 +1105,49 @@ impl ExplorerView {
         }
     }
 
+    fn render_utility_menu_dismissal(
+        &self,
+        bounds: Rc<UtilityMenuBounds>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dismiss = cx.listener(|this, _: &MouseDownEvent, _, cx| {
+            if this.open_utility_menu.take().is_some() {
+                this.cancel_pending_click_rename();
+                cx.notify();
+            }
+        });
+        // Register before the pane's capture handlers, which can stop propagation
+        // when starting a resize. The canvas itself adds no hitbox.
+        canvas(
+            |_, _, _| (),
+            move |_, _, window, _| {
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture
+                        || bounds
+                            .popup
+                            .get()
+                            .is_some_and(|b| b.contains(&event.position))
+                        || (event.button == MouseButton::Left
+                            && bounds
+                                .trigger
+                                .get()
+                                .is_some_and(|b| b.contains(&event.position)))
+                    {
+                        return;
+                    }
+                    dismiss(event, window, cx);
+                });
+            },
+        )
+        .absolute()
+        .size(px(0.0))
+        .into_any_element()
+    }
+
     fn render_utility_menu_overlay(
         &self,
         sidebar_auto_hide_active: bool,
+        bounds: Rc<UtilityMenuBounds>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let menu = self.open_utility_menu?;
@@ -1213,31 +1287,25 @@ impl ExplorerView {
                 )),
         };
 
-        let click_catcher = div()
-            .id("utility-menu-click-catcher")
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .size_full()
-            .cursor_default()
-            .bg(transparent_black())
-            .occlude()
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.cancel_pending_click_rename();
-                this.open_utility_menu = None;
-                cx.stop_propagation();
-                cx.notify();
-            }));
-
         Some(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
-                .size_full()
-                .child(click_catcher)
-                .child(menu.absolute().left(px(left)).top(px(top)))
-                .into_any_element(),
+            deferred(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(0.0))
+                    .size_full()
+                    .overflow_hidden()
+                    .on_children_prepainted(move |children, window, _| {
+                        bounds.popup.set(
+                            children
+                                .first()
+                                .map(|child| child.intersect(&window.content_mask().bounds))
+                                .filter(|child| !child.is_empty()),
+                        );
+                    })
+                    .child(menu.absolute().left(px(left)).top(px(top))),
+            )
+            .into_any_element(),
         )
     }
 
@@ -1718,12 +1786,12 @@ impl ExplorerView {
         let entity = cx.entity();
 
         canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+            move |bounds, hitbox, window, _| {
                 window.on_mouse_event({
                     let entity = entity.clone();
-                    move |event: &MouseDownEvent, _, _, cx| {
-                        if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                    move |event: &MouseDownEvent, _, window, cx| {
+                        if event.button != MouseButton::Left || !hitbox.is_hovered(window) {
                             return;
                         }
 
@@ -2184,14 +2252,12 @@ impl ExplorerView {
             .cursor(CursorStyle::ResizeColumn)
             .child(
                 canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
+                    |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+                    move |_, hitbox, window, _| {
                         window.on_mouse_event({
                             let entity = entity.clone();
-                            move |event: &MouseDownEvent, _, _, cx| {
-                                if event.button != MouseButton::Left
-                                    || !bounds.contains(&event.position)
-                                {
+                            move |event: &MouseDownEvent, _, window, cx| {
+                                if event.button != MouseButton::Left || !hitbox.is_hovered(window) {
                                     return;
                                 }
 
@@ -2224,8 +2290,8 @@ impl ExplorerView {
                             }
                         });
 
-                        window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
-                            match event.button {
+                        window.on_mouse_event(
+                            move |event: &MouseUpEvent, _, window, cx| match event.button {
                                 MouseButton::Left => {
                                     let _ = entity.update(cx, |this, cx| {
                                         let Some(width) = this.finish_sidebar_resize() else {
@@ -2237,7 +2303,7 @@ impl ExplorerView {
                                         cx.notify();
                                     });
                                 }
-                                MouseButton::Right if bounds.contains(&event.position) => {
+                                MouseButton::Right if hitbox.is_hovered(window) => {
                                     let _ = entity.update(cx, |this, cx| {
                                         this.close_context_menu();
                                         let width = this.reset_sidebar_width();
@@ -2247,8 +2313,8 @@ impl ExplorerView {
                                     });
                                 }
                                 _ => {}
-                            }
-                        });
+                            },
+                        );
                     },
                 )
                 .size_full(),
@@ -3981,14 +4047,17 @@ impl ExplorerView {
         let entity = cx.entity();
 
         canvas(
-            |_, _, _| (),
-            move |bounds, _, window, _| {
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+            move |bounds, hitbox, window, _| {
                 window.on_mouse_event({
                     let entity = entity.clone();
-                    move |event: &MouseMoveEvent, _, _, cx| {
+                    move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
                         entity.update(cx, |this, cx| {
                             let changed =
-                                if event.pressed_button.is_some() || !bounds.contains(&event.position)
+                                if event.pressed_button.is_some() || !hitbox.is_hovered(window)
                                 {
                                     this.clear_hovered_entry()
                                 } else {
@@ -4011,7 +4080,7 @@ impl ExplorerView {
                             return;
                         }
                         if !matches!(event.button, MouseButton::Left | MouseButton::Right)
-                            || !bounds.contains(&event.position)
+                            || !hitbox.is_hovered(window)
                         {
                             return;
                         }
@@ -4278,6 +4347,8 @@ impl Render for ExplorerView {
         } else {
             self.render_context_menu_overlay(window, cx)
         };
+        let menu_bounds = (!self.shared_chrome_hosted && self.open_utility_menu.is_some())
+            .then(|| Rc::new(UtilityMenuBounds::default()));
 
         div()
             .key_context(key_context)
@@ -4447,7 +4518,12 @@ impl Render for ExplorerView {
             .overflow_hidden()
             .when(!self.shared_chrome_hosted, |this| {
                 this.child(self.render_navbar(window, cx))
-                    .child(self.render_utility_bar(sidebar_auto_hide_active, sidebar_visible, cx))
+                    .child(self.render_utility_bar(
+                        sidebar_auto_hide_active,
+                        sidebar_visible,
+                        menu_bounds.as_ref(),
+                        cx,
+                    ))
             })
             .child(if self.shared_chrome_hosted {
                 self.render_pane_body(window, cx)
@@ -4474,7 +4550,9 @@ impl Render for ExplorerView {
             )
             .when(!self.shared_chrome_hosted, |this| {
                 this.when_some(
-                    self.render_utility_menu_overlay(sidebar_auto_hide_active, cx),
+                    menu_bounds.and_then(|bounds| {
+                        self.render_utility_menu_overlay(sidebar_auto_hide_active, bounds, cx)
+                    }),
                     |this, menu| this.child(menu),
                 )
                 .when_some(
@@ -5657,9 +5735,30 @@ fn utility_text_button(
     label: &'static str,
     is_open: bool,
     enabled: bool,
+    menu_bounds: Option<&Rc<UtilityMenuBounds>>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     utility_text_button_base(id, left_icon, label, is_open, true, enabled, on_click)
+        .when_some(
+            menu_bounds.filter(|_| is_open && enabled),
+            |button, bounds| {
+                let bounds = bounds.clone();
+                button.relative().child(
+                    canvas(
+                        move |trigger, window, _| {
+                            let trigger = trigger.intersect(&window.content_mask().bounds);
+                            bounds.trigger.set((!trigger.is_empty()).then_some(trigger));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                )
+            },
+        )
+        .into_any_element()
 }
 
 fn utility_action_button(
@@ -5668,7 +5767,7 @@ fn utility_action_button(
     label: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    utility_text_button_base(id, left_icon, label, false, false, true, on_click)
+    utility_text_button_base(id, left_icon, label, false, false, true, on_click).into_any_element()
 }
 
 fn utility_text_button_base(
@@ -5679,7 +5778,7 @@ fn utility_text_button_base(
     show_chevron: bool,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
+) -> gpui::Stateful<Div> {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -5720,7 +5819,6 @@ fn utility_text_button_base(
                     .child(UTILITY_ICON_CHEVRON_DOWN),
             )
         })
-        .into_any_element()
 }
 
 fn utility_menu_left(menu: UtilityMenu, sidebar_toggle_visible: bool, bin: bool) -> f32 {
@@ -7221,14 +7319,12 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
         .cursor(CursorStyle::ResizeColumn)
         .child(
             canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
+                |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+                move |_, hitbox, window, _| {
                     window.on_mouse_event({
                         let entity = entity.clone();
-                        move |event: &MouseDownEvent, _, _, cx| {
-                            if event.button != MouseButton::Left
-                                || !bounds.contains(&event.position)
-                            {
+                        move |event: &MouseDownEvent, _, window, cx| {
+                            if event.button != MouseButton::Left || !hitbox.is_hovered(window) {
                                 return;
                             }
 
@@ -7261,7 +7357,7 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
                         }
                     });
 
-                    window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    window.on_mouse_event(move |event: &MouseUpEvent, _, window, cx| {
                         match event.button {
                             MouseButton::Left => {
                                 let _ = entity.update(cx, |this, cx| {
@@ -7288,7 +7384,7 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
                                 });
                             }
                             MouseButton::Right | MouseButton::Middle
-                                if bounds.contains(&event.position) =>
+                                if hitbox.is_hovered(window) =>
                             {
                                 let _ = entity.update(cx, |this, cx| {
                                     this.close_context_menu();
@@ -7362,14 +7458,12 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
         .cursor(CursorStyle::ResizeColumn)
         .child(
             canvas(
-                |_, _, _| (),
-                move |bounds, _, window, _| {
+                |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+                move |_, hitbox, window, _| {
                     window.on_mouse_event({
                         let entity = entity.clone();
-                        move |event: &MouseDownEvent, _, _, cx| {
-                            if event.button != MouseButton::Left
-                                || !bounds.contains(&event.position)
-                            {
+                        move |event: &MouseDownEvent, _, window, cx| {
+                            if event.button != MouseButton::Left || !hitbox.is_hovered(window) {
                                 return;
                             }
 
@@ -7402,7 +7496,7 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
                         }
                     });
 
-                    window.on_mouse_event(move |event: &MouseUpEvent, _, _, cx| {
+                    window.on_mouse_event(move |event: &MouseUpEvent, _, window, cx| {
                         match event.button {
                             MouseButton::Left => {
                                 let _ = entity.update(cx, |this, cx| {
@@ -7429,7 +7523,7 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
                                 });
                             }
                             MouseButton::Right | MouseButton::Middle
-                                if bounds.contains(&event.position) =>
+                                if hitbox.is_hovered(window) =>
                             {
                                 let _ = entity.update(cx, |this, cx| {
                                     this.close_context_menu();
@@ -9255,6 +9349,96 @@ mod tests {
 
         cx.read_entity(&view, |view, _| {
             assert_eq!(hovered_entry_name(view).as_deref(), Some("b.txt"));
+        });
+    }
+
+    #[gpui::test]
+    fn utility_menu_blocks_hover_only_where_it_covers_a_details_row(cx: &mut gpui::TestAppContext) {
+        let (_temp, view, cx) =
+            test_view_entity_with_mode(cx, &["a.txt", "b.txt"], FileViewMode::Details);
+        cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(600.0)));
+        let trigger = run_until_debug_bounds(cx, "utility-view").center();
+        cx.simulate_click(trigger, Modifiers::default());
+        let popup = run_until_debug_bounds(cx, "utility-menu");
+        let row = run_until_debug_bounds(cx, "explorer-entry-1");
+        let covered = gpui::point(popup.center().x, row.center().y);
+        let exposed = gpui::point(popup.right() + gpui::px(8.0), row.center().y);
+        assert!(popup.contains(&covered) && row.contains(&covered) && row.contains(&exposed));
+
+        for (position, expected) in [
+            (exposed, Some("b.txt")),
+            (covered, None),
+            (exposed, Some("b.txt")),
+        ] {
+            cx.simulate_mouse_move(position, None, Modifiers::default());
+            cx.run_until_parked();
+            cx.read_entity(&view, |view, _| {
+                assert_eq!(hovered_entry_name(view).as_deref(), expected);
+                assert!(view.open_utility_menu.is_some());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn utility_menu_blocks_hover_and_selection_on_a_covered_large_icon(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_temp, view, cx) = test_view_entity_with_mode(
+            cx,
+            &["a.txt", "b.txt", "c.txt", "d.txt"],
+            FileViewMode::LargeIcons,
+        );
+        cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(600.0)));
+        let trigger = run_until_debug_bounds(cx, "utility-view").center();
+        cx.simulate_click(trigger, Modifiers::default());
+        let popup = run_until_debug_bounds(cx, "utility-menu");
+        let details = run_until_debug_bounds(cx, "utility-details");
+        let dot_items = run_until_debug_bounds(cx, "utility-dot-items");
+        let separator_y = (details.bottom() + dot_items.top()) / 2.0;
+        let tiles = [
+            "explorer-large-icon-entry-0",
+            "explorer-large-icon-entry-1",
+            "explorer-large-icon-entry-2",
+            "explorer-large-icon-entry-3",
+        ]
+        .map(|selector| run_until_debug_bounds(cx, selector));
+        let covered = tiles
+            .iter()
+            .find_map(|tile| {
+                let overlap = tile.intersect(&popup);
+                let point = gpui::point(overlap.center().x, separator_y);
+                (!overlap.is_empty() && overlap.contains(&point)).then_some(point)
+            })
+            .expect("a tile behind the menu separator");
+        let (exposed, exposed_name) = tiles
+            .iter()
+            .map(Bounds::center)
+            .zip(["a.txt", "b.txt", "c.txt", "d.txt"])
+            .find(|(center, _)| !popup.contains(center))
+            .expect("an exposed tile center");
+
+        cx.simulate_mouse_move(exposed, None, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view).as_deref(), Some(exposed_name));
+        });
+
+        cx.simulate_mouse_move(covered, None, Modifiers::default());
+        cx.simulate_mouse_down(covered, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(hovered_entry_name(view), None);
+            assert!(selected_names(view).is_empty());
+            assert!(view.mouse_selection_drag.is_none());
+            assert!(view.open_utility_menu.is_some());
+        });
+        cx.simulate_mouse_up(covered, MouseButton::Left, Modifiers::default());
+
+        cx.simulate_click(exposed, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(selected_names(view), vec![exposed_name]);
+            assert!(view.open_utility_menu.is_none());
         });
     }
 

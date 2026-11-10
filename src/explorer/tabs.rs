@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity,
-    ExternalPaths, FileDropEvent, FocusHandle, Focusable, IntoElement, Modifiers,
+    ExternalPaths, FileDropEvent, FocusHandle, Focusable, HitboxBehavior, IntoElement, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, Styled, Window, canvas, div,
     font, prelude::*, px, relative, rgb, rgba,
@@ -2569,14 +2569,12 @@ impl ExplorerTabs {
             })
             .child(
                 canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
+                    |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
+                    move |_, hitbox, window, _| {
                         window.on_mouse_event({
                             let entity = entity.clone();
-                            move |event: &MouseDownEvent, _, _, cx| {
-                                if event.button != MouseButton::Left
-                                    || !bounds.contains(&event.position)
-                                {
+                            move |event: &MouseDownEvent, _, window, cx| {
+                                if event.button != MouseButton::Left || !hitbox.is_hovered(window) {
                                     return;
                                 }
                                 let _ = entity.update(cx, |this, cx| {
@@ -8258,6 +8256,59 @@ mod tests {
                 assert!(view.open_utility_menu.is_none(), "{selector}");
             });
         }
+    }
+
+    #[gpui::test]
+    fn hosted_utility_menu_dismisses_and_performs_the_outside_click(cx: &mut TestAppContext) {
+        use crate::settings::{FileSortColumn, FileViewMode};
+
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (_temp, tabs, cx) = test_tabs_with_directories_and_files(cx, &[], &["file.txt"]);
+        let view = active_test_view(&tabs, cx);
+        cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+        cx.run_until_parked();
+
+        for (button, expected) in [
+            ("utility-new", Some(UtilityMenu::New)),
+            ("utility-view", Some(UtilityMenu::View)),
+            ("utility-view", None),
+            ("utility-new", Some(UtilityMenu::New)),
+        ] {
+            click_selector(cx, button);
+            cx.run_until_parked();
+            cx.read_entity(&view, |view, _| {
+                assert_eq!(view.open_utility_menu, expected)
+            });
+        }
+
+        let menu = cx.debug_bounds("utility-menu").expect("New menu bounds");
+        let entry = entry_name_hit_position(cx, "explorer-entry-name-hit-0");
+        assert!(!menu.contains(&entry));
+        cx.simulate_click(entry, Modifiers::default());
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_utility_menu.is_none());
+            assert_eq!(selected_names(view), vec!["file.txt"]);
+        });
+
+        click_selector(cx, "utility-new");
+        cx.run_until_parked();
+        click_selector(cx, "explorer-header-date-modified");
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_utility_menu.is_none());
+            assert_eq!(view.file_sort.column, FileSortColumn::DateModified);
+        });
+
+        click_selector(cx, "utility-view");
+        cx.run_until_parked();
+        click_selector(cx, "utility-large-icons");
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            assert!(view.open_utility_menu.is_none());
+            assert_eq!(view.view_mode, FileViewMode::LargeIcons);
+            assert_eq!(selected_names(view), vec!["file.txt"]);
+        });
     }
 
     #[gpui::test]
