@@ -1291,6 +1291,7 @@ mod tests {
             cx.simulate_resize(size(px(width), px(600.0)));
             cx.run_until_parked();
             let controls = [
+                "utility-new",
                 "utility-bin-cut",
                 "utility-bin-delete",
                 "utility-view",
@@ -1306,6 +1307,7 @@ mod tests {
                 assert!(pair[0].right() < pair[1].left());
             }
             for removed in [
+                "utility-connect-sftp",
                 "utility-bin-restore-all",
                 "utility-bin-properties",
                 "utility-bin-details",
@@ -1313,6 +1315,30 @@ mod tests {
             ] {
                 assert!(cx.debug_bounds(removed).is_none());
             }
+            let new_button = cx.debug_bounds("utility-new").unwrap();
+            cx.simulate_click(new_button.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            let connect = cx.debug_bounds("utility-new-connect").unwrap();
+            assert!((connect.left() - new_button.left()).abs() <= px(16.0));
+            for row in [
+                "utility-new-folder",
+                "utility-new-file",
+                "utility-new-shortcut",
+            ] {
+                assert!(cx.debug_bounds(row).is_none());
+            }
+            cx.simulate_click(connect.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+            let dialog = cx.read_entity(&view, |view, _| {
+                assert!(view.open_utility_menu.is_none());
+                view.active_dialog_window.unwrap()
+            });
+            cx.cx.update(|app| {
+                dialog
+                    .update(app, |_, window, _| window.remove_window())
+                    .unwrap();
+            });
+            cx.run_until_parked();
             let view_button = cx.debug_bounds("utility-view").unwrap();
             cx.simulate_click(view_button.center(), gpui::Modifiers::default());
             cx.run_until_parked();

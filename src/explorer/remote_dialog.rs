@@ -68,7 +68,7 @@ pub(super) struct DialogTextInput {
 pub(super) fn open_site_dialog(
     explorer: Entity<ExplorerView>,
     placement: super::dialog_placement::DialogPlacement,
-    path: &Path,
+    path: Option<&Path>,
     remote: &[RemoteSidebarItem],
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
@@ -103,10 +103,10 @@ pub(super) fn open_site_dialog(
 }
 
 fn site_dialog_initial_values(
-    path: &Path,
+    path: Option<&Path>,
     remote: &[RemoteSidebarItem],
 ) -> (Option<RemoteSidebarItem>, String, String) {
-    let location = super::remote_fs::RemoteLocation::from_provider(path);
+    let location = path.and_then(super::remote_fs::RemoteLocation::from_provider);
     let original = location.as_ref().and_then(|location| {
         remote
             .iter()
@@ -1170,7 +1170,129 @@ impl Element for RemoteTextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::explorer::{
+        filesystem::NetworkDriveState,
+        remote_fs::RemoteLocation,
+        sidebar::{SidebarItem, SidebarItemKind},
+        test_support::TempDir,
+    };
+    use crate::settings::SidebarGroupKind;
     use crate::settings::{ExplorerSettings, SettingsState};
+
+    #[gpui::test]
+    fn connect_menu_starts_fresh_and_toolbar_prefills_saved_site(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let path = temp.path().to_path_buf();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window);
+            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus);
+            view.sidebar_sections.network_drives.clear();
+            view
+        });
+        let address = "sftp://alice@example.com:2222/team";
+        let remote = RemoteLocation::parse(address).unwrap();
+        let saved = RemoteSidebarItem {
+            address: remote.site.trim_end_matches('/').to_owned(),
+            path: remote.path.clone(),
+            label: Some("Team files".into()),
+        };
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("explorer-sidebar-group-network").is_none());
+        assert!(cx.debug_bounds("utility-connect-sftp").is_none());
+
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let position = cx.debug_bounds(selector).expect(selector).center();
+            cx.simulate_click(position, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        let check_dialog = |cx: &mut gpui::VisualTestContext, prefilled: bool| {
+            assert_eq!(cx.windows().len(), 2);
+            let dialog = cx.read_entity(&view, |view, _| {
+                assert!(view.open_utility_menu.is_none());
+                view.active_dialog_window.unwrap()
+            });
+            cx.cx.update(|app| {
+                dialog
+                    .downcast::<RemoteDownloadDialog>()
+                    .unwrap()
+                    .update(app, |dialog, window, cx| {
+                        let RemoteDialogKind::Site {
+                            original,
+                            name,
+                            address: input,
+                            ..
+                        } = &dialog.kind
+                        else {
+                            panic!("expected the SFTP site dialog");
+                        };
+                        assert_eq!(original.as_ref(), prefilled.then_some(&saved));
+                        assert_eq!(
+                            name.read(cx).text.content.as_str(),
+                            if prefilled { "Team files" } else { "" }
+                        );
+                        assert_eq!(
+                            input.read(cx).text.content.as_str(),
+                            if prefilled { address } else { "sftp://" }
+                        );
+                        window.remove_window();
+                    })
+                    .unwrap();
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.windows().len(), 1);
+        };
+
+        click(cx, "utility-new");
+        let connect = cx.debug_bounds("utility-new-connect").unwrap();
+        for row in [
+            "utility-new-folder",
+            "utility-new-file",
+            "utility-new-shortcut",
+        ] {
+            assert!(cx.debug_bounds(row).unwrap().bottom() < connect.top());
+        }
+        click(cx, "utility-new-connect");
+        check_dialog(cx, false);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.path = remote.provider_path();
+                view.sidebar_settings.remote = vec![saved.clone()];
+                view.sidebar_sections.network_drives = vec![SidebarItem {
+                    path: view.path.clone(),
+                    label: "Team files".into(),
+                    kind: SidebarItemKind::Remote(NetworkDriveState::Disconnected),
+                    configured_index: None,
+                }];
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        click(cx, "utility-connect-sftp");
+        check_dialog(cx, true);
+        click(cx, "utility-new");
+        click(cx, "utility-new-connect");
+        check_dialog(cx, false);
+
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.navigate_to_sidebar_group(SidebarGroupKind::Network, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        click(cx, "utility-connect-sftp");
+        check_dialog(cx, false);
+        click(cx, "utility-new");
+        let menu = cx.debug_bounds("utility-menu").unwrap();
+        let connect = cx.debug_bounds("utility-new-connect").unwrap();
+        assert!(connect.top() - menu.top() <= px(8.0));
+        assert!(menu.bottom() - connect.bottom() <= px(8.0));
+        click(cx, "utility-new-connect");
+        check_dialog(cx, false);
+    }
 
     #[gpui::test]
     fn site_dialog_fits_actions_with_and_without_wrapped_error(cx: &mut gpui::TestAppContext) {
@@ -1185,7 +1307,7 @@ mod tests {
             )
         });
         let window = explorer.update(cx, |_, cx| {
-            open_site_dialog(explorer.clone(), Default::default(), path, &[], cx).unwrap()
+            open_site_dialog(explorer.clone(), Default::default(), Some(path), &[], cx).unwrap()
         });
         let dialog = window.downcast::<RemoteDownloadDialog>().unwrap();
         let mut cx = gpui::VisualTestContext::from_window(window, cx);
@@ -1214,7 +1336,8 @@ mod tests {
 
     #[test]
     fn local_folder_starts_with_blank_site_name_and_address() {
-        let (original, name, address) = site_dialog_initial_values(Path::new("local-folder"), &[]);
+        let (original, name, address) =
+            site_dialog_initial_values(Some(Path::new("local-folder")), &[]);
         assert!(original.is_none());
         assert!(name.is_empty());
         assert_eq!(address, "sftp://");
@@ -1231,7 +1354,7 @@ mod tests {
             label: Some("Team files".to_owned()),
         };
         let (original, name, address) =
-            site_dialog_initial_values(&location.provider_path(), &[saved.clone()]);
+            site_dialog_initial_values(Some(&location.provider_path()), &[saved.clone()]);
         assert_eq!(original, Some(saved));
         assert_eq!(name, "Team files");
         assert_eq!(address, "sftp://alice@example.com:2222/team");

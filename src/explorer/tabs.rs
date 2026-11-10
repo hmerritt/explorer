@@ -8222,6 +8222,57 @@ mod tests {
     }
 
     #[gpui::test]
+    fn hosted_toolbar_connect_follows_active_tab_and_navigation_history(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                tabs.tabs[1].view.update(cx, |view, cx| {
+                    view.navigate_to_sidebar_group(SidebarGroupKind::Network, cx);
+                    cx.notify();
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("utility-connect-sftp").is_none());
+        let cut_without_connect = cx.debug_bounds("utility-cut").unwrap().left();
+
+        let select_tab = |cx: &mut gpui::VisualTestContext, index: usize| {
+            cx.update(|window, app| {
+                tabs.update(app, |tabs, cx| {
+                    tabs.activate_tab(tabs.tabs[index].id, window, cx)
+                });
+            });
+            cx.run_until_parked();
+        };
+        select_tab(cx, 1);
+        assert!(cx.debug_bounds("utility-connect-sftp").is_some());
+        let cut_with_connect = cx.debug_bounds("utility-cut").unwrap().left();
+        assert!(cut_with_connect > cut_without_connect);
+
+        // GPUI retains debug bounds for removed elements. Check the live position of Cut.
+        click_selector(cx, "back");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("utility-cut").unwrap().left(),
+            cut_without_connect
+        );
+        click_selector(cx, "forward");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("utility-cut").unwrap().left(),
+            cut_with_connect
+        );
+        select_tab(cx, 0);
+        assert_eq!(
+            cx.debug_bounds("utility-cut").unwrap().left(),
+            cut_without_connect
+        );
+    }
+
+    #[gpui::test]
     fn hosted_utility_menus_render_below_their_toolbar_buttons(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let (_temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
@@ -9576,7 +9627,7 @@ mod tests {
                 super::super::remote_dialog::open_site_dialog(
                     cx.entity(),
                     view.dialog_placement,
-                    &view.path,
+                    Some(&view.path),
                     &view.sidebar_settings.remote,
                     cx,
                 )

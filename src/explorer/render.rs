@@ -70,7 +70,10 @@ use crate::explorer::{
         drop_indicator_origin, row_drop_destination_for_entry,
     },
     entry::FileEntry,
-    filesystem::{NetworkDriveState, drive_root_is_ejectable, wsl_distro_kind_for_path},
+    filesystem::{
+        NetworkDriveState, drive_root_is_ejectable, path_is_same_or_descendant,
+        wsl_distro_kind_for_path,
+    },
     formatting::{format_size, format_timestamp},
     git_status::{GitDivergence, GitEntryMarker, GitRepositoryStatus},
     icons::{
@@ -294,10 +297,9 @@ const UTILITY_CONNECT_BUTTON_WIDTH: f32 = 100.0;
 const UTILITY_NEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING;
 const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
     + UTILITY_NEW_BUTTON_WIDTH
-    + UTILITY_CONNECT_BUTTON_WIDTH
-    + (UTILITY_SEPARATOR_WIDTH * 3.0)
+    + (UTILITY_SEPARATOR_WIDTH * 2.0)
     + (UTILITY_ICON_BUTTON_SIZE * 5.0)
-    + (UTILITY_BAR_ITEM_GAP * 10.0);
+    + (UTILITY_BAR_ITEM_GAP * 8.0);
 const UTILITY_SIDEBAR_TOGGLE_MENU_OFFSET: f32 =
     UTILITY_ICON_BUTTON_SIZE + UTILITY_SEPARATOR_WIDTH + (UTILITY_BAR_ITEM_GAP * 2.0);
 const UTILITY_ICON_CHEVRON_DOWN: &str = "\u{E70D}";
@@ -743,6 +745,8 @@ impl ExplorerView {
                         ))
                         .child(utility_separator())
                     })
+                    .child(self.render_new_utility_button(menu_bounds, cx))
+                    .child(utility_separator())
                     .child(utility_icon_button(
                         "utility-bin-cut",
                         CUT_ICON.clone(),
@@ -798,6 +802,73 @@ impl ExplorerView {
             )
     }
 
+    fn render_new_utility_button(
+        &self,
+        menu_bounds: Option<&Rc<UtilityMenuBounds>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        utility_text_button(
+            "utility-new",
+            Some(utility_new_icon().into_any_element()),
+            "New",
+            self.open_utility_menu == Some(UtilityMenu::New),
+            true,
+            menu_bounds,
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.close_context_menu();
+                this.cancel_pending_click_rename();
+                this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
+                    None
+                } else {
+                    Some(UtilityMenu::New)
+                };
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+    }
+
+    fn can_mutate_current_location(&self) -> bool {
+        !self.is_sidebar_group_view()
+            && crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path)
+    }
+
+    fn show_toolbar_connect(&self) -> bool {
+        match self.active_sidebar_group() {
+            Some(group) => matches!(group, SidebarGroupKind::Network | SidebarGroupKind::Drives),
+            None => {
+                !self.is_trash_view()
+                    && self.sidebar_sections.network_drives.iter().any(|item| {
+                        if matches!(item.kind, SidebarItemKind::Remote(_)) {
+                            self.path.starts_with(&item.path)
+                        } else {
+                            path_is_same_or_descendant(&self.path, &item.path)
+                        }
+                    })
+            }
+        }
+    }
+
+    fn open_utility_connect_dialog(&mut self, prefill_current_path: bool, cx: &mut Context<Self>) {
+        self.open_utility_menu = None;
+        if self.active_dialog_window.is_none() {
+            let path = (prefill_current_path && !self.is_sidebar_group_view())
+                .then_some(self.path.as_path());
+            match super::remote_dialog::open_site_dialog(
+                cx.entity(),
+                self.dialog_placement,
+                path,
+                &self.sidebar_settings.remote,
+                cx,
+            ) {
+                Ok(handle) => self.active_dialog_window = Some(handle),
+                Err(error) => self.set_error_notice(error),
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn render_view_utility_button(
         &self,
         enabled: bool,
@@ -844,8 +915,7 @@ impl ExplorerView {
         let can_extract = self.selected_archive_paths().is_some();
         let can_mount = self.selected_mountable_image_path().is_some();
         let read_only_group = self.is_sidebar_group_view();
-        let can_mutate_location = !read_only_group
-            && crate::explorer::explorer_fs::ExplorerFs::new().can_mutate(&self.path);
+        let can_mutate_location = self.can_mutate_current_location();
         let clipboard = cx.read_from_clipboard();
         let can_paste = can_mutate_location && clipboard_item_can_paste(clipboard.as_ref());
 
@@ -884,55 +954,28 @@ impl ExplorerView {
                 ))
                 .child(utility_separator())
             })
-            .child(utility_text_button(
-                "utility-new",
-                Some(utility_new_icon().into_any_element()),
-                "New",
-                self.open_utility_menu == Some(UtilityMenu::New),
-                can_mutate_location,
-                menu_bounds,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.close_context_menu();
-                    this.cancel_pending_click_rename();
-                    this.open_utility_menu = if this.open_utility_menu == Some(UtilityMenu::New) {
-                        None
-                    } else {
-                        Some(UtilityMenu::New)
-                    };
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            ))
-            .child(utility_separator().debug_selector(|| "utility-new-connect-separator".into()))
-            .child(utility_text_button(
-                "utility-connect-sftp",
-                Some(
-                    gpui::img(FTP_CONNECT_ICON.clone())
-                        .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-                        .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
-                        .into_any_element(),
-                ),
-                "Connect",
-                false,
-                true,
-                None,
-                cx.listener(|this, _: &ClickEvent, window, cx| {
-                    let _ = window;
-                    if this.active_dialog_window.is_none() {
-                        match super::remote_dialog::open_site_dialog(
-                            cx.entity(),
-                            this.dialog_placement,
-                            &this.path,
-                            &this.sidebar_settings.remote,
-                            cx,
-                        ) {
-                            Ok(handle) => this.active_dialog_window = Some(handle),
-                            Err(error) => this.set_error_notice(error),
-                        }
-                    }
-                    cx.notify();
-                }),
-            ))
+            .child(self.render_new_utility_button(menu_bounds, cx))
+            .when(self.show_toolbar_connect(), |this| {
+                this.child(
+                    utility_separator().debug_selector(|| "utility-new-connect-separator".into()),
+                )
+                .child(utility_text_button(
+                    "utility-connect-sftp",
+                    Some(
+                        gpui::img(FTP_CONNECT_ICON.clone())
+                            .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                            .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                            .into_any_element(),
+                    ),
+                    "Connect",
+                    false,
+                    true,
+                    None,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.open_utility_connect_dialog(true, cx);
+                    }),
+                ))
+            })
             .child(utility_separator())
             .child(utility_icon_button(
                 "utility-cut",
@@ -1156,7 +1199,12 @@ impl ExplorerView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let menu = self.open_utility_menu?;
-        let left = utility_menu_left(menu, sidebar_auto_hide_active, self.is_trash_view());
+        let left = utility_menu_left(
+            menu,
+            sidebar_auto_hide_active,
+            self.is_trash_view(),
+            self.show_toolbar_connect(),
+        );
         let host_offset = if self.shared_chrome_hosted {
             TITLEBAR_HEIGHT
         } else {
@@ -1166,47 +1214,58 @@ impl ExplorerView {
 
         let menu = match menu {
             UtilityMenu::New => utility_dropdown()
-                .child(utility_menu_row(
-                    "utility-new-folder",
-                    Some(folder_icon().into_any_element()),
-                    "Folder",
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_utility_menu = None;
-                        if this.commit_active_rename_before_interaction(window, cx) {
-                            this.create_new_folder(window, cx);
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ))
-                .child(utility_menu_row(
-                    "utility-new-file",
-                    Some(file_icon().into_any_element()),
-                    "File",
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_utility_menu = None;
-                        if this.commit_active_rename_before_interaction(window, cx) {
-                            this.create_new_file(window, cx);
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ))
-                .when(self.can_create_shortcut(), |menu| {
+                .when(self.can_mutate_current_location(), |menu| {
                     menu.child(utility_menu_row(
-                        "utility-new-shortcut",
-                        Some(utility_menu_image_icon(SHORTCUT_ICON.clone())),
-                        "Shortcut",
+                        "utility-new-folder",
+                        Some(folder_icon().into_any_element()),
+                        "Folder",
                         cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.open_utility_menu = None;
                             if this.commit_active_rename_before_interaction(window, cx) {
-                                this.open_create_shortcut_dialog(window, cx);
+                                this.create_new_folder(window, cx);
                             }
                             cx.stop_propagation();
                             cx.notify();
                         }),
                     ))
-                }),
+                    .child(utility_menu_row(
+                        "utility-new-file",
+                        Some(file_icon().into_any_element()),
+                        "File",
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_utility_menu = None;
+                            if this.commit_active_rename_before_interaction(window, cx) {
+                                this.create_new_file(window, cx);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ))
+                    .when(self.can_create_shortcut(), |menu| {
+                        menu.child(utility_menu_row(
+                            "utility-new-shortcut",
+                            Some(utility_menu_image_icon(SHORTCUT_ICON.clone())),
+                            "Shortcut",
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_utility_menu = None;
+                                if this.commit_active_rename_before_interaction(window, cx) {
+                                    this.open_create_shortcut_dialog(window, cx);
+                                }
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        ))
+                    })
+                    .child(utility_menu_separator())
+                })
+                .child(utility_menu_row(
+                    "utility-new-connect",
+                    Some(utility_menu_image_icon(FTP_CONNECT_ICON.clone())),
+                    "Connect",
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.open_utility_connect_dialog(false, cx);
+                    }),
+                )),
             UtilityMenu::View => utility_dropdown()
                 .child(utility_menu_row(
                     "utility-large-icons",
@@ -5826,14 +5885,26 @@ fn utility_text_button_base(
         })
 }
 
-fn utility_menu_left(menu: UtilityMenu, sidebar_toggle_visible: bool, bin: bool) -> f32 {
+fn utility_menu_left(
+    menu: UtilityMenu,
+    sidebar_toggle_visible: bool,
+    bin: bool,
+    show_connect: bool,
+) -> f32 {
     let left = match menu {
         UtilityMenu::New => UTILITY_NEW_MENU_LEFT,
         UtilityMenu::View if bin => {
             UTILITY_BAR_HORIZONTAL_PADDING
+                + UTILITY_NEW_BUTTON_WIDTH
                 + UTILITY_ICON_BUTTON_SIZE * 2.0
+                + UTILITY_SEPARATOR_WIDTH * 2.0
+                + UTILITY_BAR_ITEM_GAP * 5.0
+        }
+        UtilityMenu::View if show_connect => {
+            UTILITY_VIEW_MENU_LEFT
+                + UTILITY_CONNECT_BUTTON_WIDTH
                 + UTILITY_SEPARATOR_WIDTH
-                + UTILITY_BAR_ITEM_GAP * 3.0
+                + UTILITY_BAR_ITEM_GAP * 2.0
         }
         UtilityMenu::View => UTILITY_VIEW_MENU_LEFT,
     };
@@ -12023,6 +12094,12 @@ mod tests {
     fn connect_button_opens_dialog_and_can_reopen_after_close(cx: &mut gpui::TestAppContext) {
         let temp = TempDir::new();
         let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|_, app| {
+            view.update(app, |view, cx| {
+                view.navigate_to_sidebar_group(SidebarGroupKind::Drives, cx);
+                cx.notify();
+            });
+        });
         cx.run_until_parked();
 
         let position = cx
@@ -12057,56 +12134,138 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn new_precedes_separator_and_connect_with_or_without_sidebar_toggle(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn toolbar_connect_matches_network_roots_and_descendants() {
         let temp = TempDir::new();
-        let path = temp.path().to_path_buf();
-        let (_, cx) = cx.add_window_view(move |window, cx| {
-            let focus_handle = cx.focus_handle();
-            focus_handle.focus(window);
-            let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus_handle);
-            view.sidebar_width = 320.0;
-            view
-        });
+        let mut view = ExplorerView::new_unloaded_with_settings_for_test(
+            temp.path().to_path_buf(),
+            None,
+            &crate::settings::ExplorerSettings::default(),
+        );
+        let remote =
+            super::super::remote_fs::RemoteLocation::parse("sftp://example.com/Team").unwrap();
+        let roots = [
+            (
+                temp.path().join("share"),
+                SidebarItemKind::DriveNetwork(NetworkDriveState::Connected),
+            ),
+            (temp.path().join("google"), SidebarItemKind::GoogleDrive),
+            (temp.path().join("onedrive"), SidebarItemKind::OneDrive),
+            (
+                remote.provider_path(),
+                SidebarItemKind::Remote(NetworkDriveState::Disconnected),
+            ),
+        ];
+        view.sidebar_sections.network_drives = roots
+            .iter()
+            .map(|(path, kind)| SidebarItem {
+                label: String::new(),
+                path: path.clone(),
+                kind: *kind,
+                configured_index: None,
+            })
+            .collect();
 
-        for (width, toggle_visible) in [(1000.0, false), (799.0, true)] {
-            cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
-            cx.run_until_parked();
+        for (root, _) in roots {
+            view.path = root.clone();
+            assert!(view.show_toolbar_connect(), "{root:?}");
+            view.path = root.join("child").join("nested");
+            assert!(view.show_toolbar_connect(), "{:?}", view.path);
+        }
 
-            let new = cx.debug_bounds("utility-new").expect("New bounds");
-            let separator = cx
-                .debug_bounds("utility-new-connect-separator")
-                .expect("New/Connect separator bounds");
-            let connect = cx
-                .debug_bounds("utility-connect-sftp")
-                .expect("Connect bounds");
-            let cut = cx.debug_bounds("utility-cut").expect("Cut bounds");
-            assert!(new.right() < separator.left());
-            assert!(separator.right() < connect.left());
-            assert!(connect.right() < cut.left());
+        for path in [
+            temp.path().to_path_buf(),
+            temp.path().join("share-other"),
+            super::super::remote_fs::RemoteLocation::parse("sftp://example.com/team")
+                .unwrap()
+                .provider_path(),
+        ] {
+            view.path = path;
+            assert!(!view.show_toolbar_connect(), "{:?}", view.path);
+        }
 
-            let toggle = cx.debug_bounds("utility-sidebar-toggle");
-            assert_eq!(toggle.is_some(), toggle_visible);
-            if let Some(toggle) = toggle {
-                assert!(toggle.right() < new.left());
-            } else {
-                assert_eq!(new.left(), gpui::px(UTILITY_BAR_HORIZONTAL_PADDING));
-            }
-
-            let view = cx.debug_bounds("utility-view").expect("View bounds");
-            cx.simulate_click(view.center(), Modifiers::default());
-            cx.run_until_parked();
-            let view_menu_row = cx
-                .debug_bounds("utility-large-icons")
-                .expect("View menu row bounds");
-            assert!((view_menu_row.left() - view.left()).abs() <= gpui::px(16.0));
-            cx.simulate_click(
-                gpui::point(gpui::px(width - 20.0), gpui::px(500.0)),
-                Modifiers::default(),
+        view.path = remote.provider_path();
+        for (group, visible) in [
+            (SidebarGroupKind::Network, true),
+            (SidebarGroupKind::Drives, true),
+            (SidebarGroupKind::Pinned, false),
+            (SidebarGroupKind::Wsl, false),
+        ] {
+            view.sidebar_group_view = Some(
+                super::super::sidebar_group_view::SidebarGroupViewState::new(
+                    group,
+                    &view.sidebar_sections,
+                ),
             );
-            cx.run_until_parked();
+            assert_eq!(view.show_toolbar_connect(), visible, "{group:?}");
+        }
+    }
+
+    #[gpui::test]
+    fn toolbar_menus_align_with_and_without_standalone_connect(cx: &mut gpui::TestAppContext) {
+        let temp = TempDir::new();
+        for connect_visible in [false, true] {
+            let path = temp.path().to_path_buf();
+            let (_, cx) = cx.add_window_view(move |window, cx| {
+                let focus = cx.focus_handle();
+                focus.focus(window);
+                let mut view = ExplorerView::new_with_focus_handle_for_test(path, focus);
+                view.sidebar_width = 320.0;
+                view.sidebar_sections.network_drives.clear();
+                if connect_visible {
+                    view.sidebar_sections.network_drives.push(SidebarItem {
+                        label: "Network drive".into(),
+                        path: view.path.clone(),
+                        kind: SidebarItemKind::DriveNetwork(NetworkDriveState::Connected),
+                        configured_index: None,
+                    });
+                }
+                view
+            });
+            for (width, toggle_visible) in [(1000.0, false), (799.0, true)] {
+                cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
+                cx.run_until_parked();
+
+                let new = cx.debug_bounds("utility-new").expect("New bounds");
+                let separator = cx.debug_bounds("utility-new-connect-separator");
+                let connect = cx.debug_bounds("utility-connect-sftp");
+                let cut = cx.debug_bounds("utility-cut").expect("Cut bounds");
+                if connect_visible {
+                    let separator = separator.expect("New/Connect separator bounds");
+                    let connect = connect.expect("Connect bounds");
+                    assert!(new.right() < separator.left());
+                    assert!(separator.right() < connect.left());
+                    assert!(connect.right() < cut.left());
+                } else {
+                    assert!(separator.is_none());
+                    assert!(connect.is_none());
+                    assert!(new.right() < cut.left());
+                }
+
+                let toggle = cx.debug_bounds("utility-sidebar-toggle");
+                assert_eq!(toggle.is_some(), toggle_visible);
+                if let Some(toggle) = toggle {
+                    assert!(toggle.right() < new.left());
+                } else {
+                    assert_eq!(new.left(), gpui::px(UTILITY_BAR_HORIZONTAL_PADDING));
+                }
+
+                let view_button = cx.debug_bounds("utility-view").expect("View bounds");
+                for (button, menu_row) in [
+                    (new, "utility-new-connect"),
+                    (view_button, "utility-large-icons"),
+                ] {
+                    cx.simulate_click(button.center(), Modifiers::default());
+                    cx.run_until_parked();
+                    let row = cx.debug_bounds(menu_row).expect("Menu row bounds");
+                    assert!((row.left() - button.left()).abs() <= gpui::px(16.0));
+                    cx.simulate_click(
+                        gpui::point(gpui::px(width - 20.0), gpui::px(500.0)),
+                        Modifiers::default(),
+                    );
+                    cx.run_until_parked();
+                }
+            }
         }
     }
 
