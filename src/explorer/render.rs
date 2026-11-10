@@ -75,15 +75,15 @@ use crate::explorer::{
     git_status::{GitDivergence, GitEntryMarker, GitRepositoryStatus},
     icons::{
         ARCHIVE_FILE_ICON, COPY_AS_PATH_ICON, COPY_ICON, CUT_ICON, DELETE_ICON, DETAILS_ICON,
-        EJECT_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, GIT_BRANCH_ICON, GIT_ICON,
-        HAMBURGER_ICON, LARGE_ICONS_ICON, MOUNT_DISC_ICON, NEW_ITEM_ICON, NEW_TAB_ICON, NavIcon,
-        OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON, SETTINGS_ICON,
-        SHORTCUT_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON, directory_kind_icon,
-        directory_kind_icon_sized, directory_shortcut_icon, directory_shortcut_icon_sized,
-        drive_disc_icon_for_path, drive_disc_icon_sized_for_path, drive_icon, drive_windows_icon,
-        drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path, drives_group_icon,
-        executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized, folder_icon,
-        folder_icon_sized, google_drive_icon, google_drive_icon_sized, image_icon,
+        EJECT_ICON, EXTRACT_ICON, FAVORITE_PIN_REMOVE_ICON, FTP_CONNECT_ICON, GIT_BRANCH_ICON,
+        GIT_ICON, HAMBURGER_ICON, LARGE_ICONS_ICON, MOUNT_DISC_ICON, NEW_ITEM_ICON, NEW_TAB_ICON,
+        NavIcon, OPEN_WITH_ICON, PASTE_ICON, PROPERTIES_ICON, RENAME_ICON, RUN_ELEVATED_ICON,
+        SETTINGS_ICON, SHORTCUT_ICON, SORT_CHEVRON_DOWN_ICON, SORT_CHEVRON_UP_ICON,
+        directory_kind_icon, directory_kind_icon_sized, directory_shortcut_icon,
+        directory_shortcut_icon_sized, drive_disc_icon_for_path, drive_disc_icon_sized_for_path,
+        drive_icon, drive_windows_icon, drive_wsl_icon_for_path, drive_wsl_icon_sized_for_path,
+        drives_group_icon, executable_icon_sized, file_icon, file_icon_for_path, file_icon_sized,
+        folder_icon, folder_icon_sized, google_drive_icon, google_drive_icon_sized, image_icon,
         large_file_icon_for_path_sized, nav_icon_font, network_drive_icon,
         network_drive_icon_sized, network_group_icon, onedrive_icon, onedrive_icon_sized,
         pinned_group_icon, portable_device_icon, portable_device_icon_sized,
@@ -290,7 +290,7 @@ impl Render for SidebarItemDragPreview {
 }
 const UTILITY_SEPARATOR_WIDTH: f32 = 1.0;
 const UTILITY_NEW_BUTTON_WIDTH: f32 = 71.0;
-const UTILITY_CONNECT_BUTTON_WIDTH: f32 = 78.0;
+const UTILITY_CONNECT_BUTTON_WIDTH: f32 = 100.0;
 const UTILITY_NEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING;
 const UTILITY_VIEW_MENU_LEFT: f32 = UTILITY_BAR_HORIZONTAL_PADDING
     + UTILITY_NEW_BUTTON_WIDTH
@@ -906,7 +906,12 @@ impl ExplorerView {
             .child(utility_separator().debug_selector(|| "utility-new-connect-separator".into()))
             .child(utility_text_button(
                 "utility-connect-sftp",
-                None,
+                Some(
+                    gpui::img(FTP_CONNECT_ICON.clone())
+                        .w(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                        .h(px(UTILITY_TEXT_BUTTON_ICON_SIZE))
+                        .into_any_element(),
+                ),
                 "Connect",
                 false,
                 true,
