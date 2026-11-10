@@ -285,6 +285,9 @@ impl FileEntry {
         }) = &mut self.kind
         {
             *current = target_kind;
+            if target_kind == ShellShortcutTargetKind::Directory {
+                self.size = None;
+            }
         }
     }
 }
@@ -661,12 +664,14 @@ mod tests {
             },
         );
 
+        entry.size = Some(128);
         entry.resolve_shell_shortcut_target_kind(ShellShortcutTargetKind::NonDirectory);
 
         assert_eq!(entry.type_label(), "LNK File");
         assert!(!entry.is_directory_like());
         assert_eq!(entry.navigation_path(), Path::new("target.lnk"));
         assert!(!entry.uses_directory_shortcut_icon());
+        assert_eq!(entry.size, Some(128));
     }
 
     #[cfg(target_os = "windows")]

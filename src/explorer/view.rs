@@ -4932,6 +4932,8 @@ mod tests {
 
         assert!(view.all_entries[0].is_directory_like());
         assert!(view.entries[0].is_directory_like());
+        assert_eq!(view.all_entries[0].size, None);
+        assert_eq!(view.entries[0].size, None);
         assert_eq!(view.entries[0].navigation_path(), Path::new("target"));
         assert_eq!(view.selected_paths(), vec![PathBuf::from("shortcut.lnk")]);
     }
