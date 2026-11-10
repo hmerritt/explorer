@@ -935,6 +935,26 @@ pub(super) fn resolve_address_input(input: &str, current_path: &Path) -> Result<
     resolve_address_input_with_env(input, current_path, |name| env::var_os(name))
 }
 
+pub(super) fn resolve_shortcut_path(
+    input: &str,
+    directory: &Path,
+    mut env_var: impl FnMut(&str) -> Option<OsString>,
+) -> Result<PathBuf, String> {
+    let cleaned = cleaned_address_input(input);
+    if cleaned.is_empty() {
+        return Err("Enter the location of the item.".into());
+    }
+    let path = expand_address_home_with(&cleaned, &mut env_var)?.unwrap_or_else(|| {
+        PathBuf::from(expand_address_environment_variables_with(&cleaned, env_var))
+    });
+    if !path.is_absolute()
+        && matches!(path.components().next(), Some(std::path::Component::Prefix(_)))
+    {
+        return Err("Enter a full path to the item.".into());
+    }
+    std::path::absolute(directory.join(path)).map_err(|error| error.to_string())
+}
+
 fn resolve_address_input_with_env(
     input: &str,
     current_path: &Path,

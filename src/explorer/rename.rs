@@ -2103,7 +2103,7 @@ fn initial_rename_selection(
     }
 }
 
-fn validate_rename_text(text: &str) -> Result<(), String> {
+pub(super) fn validate_rename_text(text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Err("The file name cannot be empty.".to_owned());
     }

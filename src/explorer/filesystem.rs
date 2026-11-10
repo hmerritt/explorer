@@ -6774,12 +6774,12 @@ fn remove_source(source: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn create_link(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(super) fn create_link(source: &Path, destination: &Path) -> std::io::Result<()> {
     crate::explorer::windows_shell::create_shell_shortcut(destination, source)
 }
 
 #[cfg(unix)]
-fn create_link(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(super) fn create_link(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(source, destination)
 }
 

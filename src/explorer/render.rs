@@ -1087,6 +1087,21 @@ impl ExplorerView {
                         cx.notify();
                     }),
                 ))
+                .when(self.can_create_shortcut(), |menu| {
+                    menu.child(utility_menu_row(
+                        "utility-new-shortcut",
+                        Some(utility_menu_image_icon(SHORTCUT_ICON.clone())),
+                        "Shortcut",
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_utility_menu = None;
+                            if this.commit_active_rename_before_interaction(window, cx) {
+                                this.open_create_shortcut_dialog(window, cx);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ))
+                })
                 .child(utility_menu_row(
                     "utility-new-file",
                     Some(file_icon().into_any_element()),

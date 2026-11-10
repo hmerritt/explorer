@@ -23,14 +23,16 @@ use crate::explorer::{
 use crate::settings::RemoteSidebarItem;
 
 const DIALOG_WIDTH: f32 = 430.0;
-const CREDENTIALS_HEIGHT: f32 = 260.0;
-const HOST_KEY_HEIGHT: f32 = 240.0;
+const DIALOG_PADDING: f32 = 20.0;
+const SITE_INITIAL_HEIGHT: f32 = 266.0;
+const CREDENTIALS_INITIAL_HEIGHT: f32 = 260.0;
+const HOST_KEY_INITIAL_HEIGHT: f32 = 240.0;
 
 enum RemoteDialogKind {
     Site {
         original: Option<crate::settings::RemoteSidebarItem>,
-        name: Entity<RemoteCredentialInput>,
-        address: Entity<RemoteCredentialInput>,
+        name: Entity<DialogTextInput>,
+        address: Entity<DialogTextInput>,
         error: Option<String>,
     },
     Credentials {
@@ -38,8 +40,8 @@ enum RemoteDialogKind {
         host: String,
         message: Option<String>,
         passphrase: bool,
-        username: Entity<RemoteCredentialInput>,
-        password: Entity<RemoteCredentialInput>,
+        username: Entity<DialogTextInput>,
+        password: Entity<DialogTextInput>,
     },
     HostKey {
         id: u64,
@@ -55,7 +57,7 @@ struct RemoteDownloadDialog {
     font: gpui::Font,
 }
 
-struct RemoteCredentialInput {
+pub(super) struct DialogTextInput {
     focus_handle: FocusHandle,
     text: EditableTextState,
     placeholder: SharedString,
@@ -70,14 +72,14 @@ pub(super) fn open_site_dialog(
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
     let (original, name, address) = site_dialog_initial_values(path, remote);
-    let mut options = remote_window_options("Connect to SFTP server", 310.0, cx);
+    let mut options = remote_window_options("Connect to SFTP server", SITE_INITIAL_HEIGHT, cx);
     placement.apply(&mut options);
     cx.open_window(options, move |window, cx| {
         let name = cx.new(|cx| {
-            RemoteCredentialInput::new(name, "Site name (optional)", false, cx.focus_handle())
+            DialogTextInput::new(name, "Site name (optional)", false, cx.focus_handle())
         });
         let address = cx.new(|cx| {
-            RemoteCredentialInput::new(address, "sftp://user@host/folder", false, cx.focus_handle())
+            DialogTextInput::new(address, "sftp://user@host/folder", false, cx.focus_handle())
         });
         address.read(cx).focus_handle.focus(window);
         cx.new(|cx| {
@@ -134,15 +136,15 @@ pub(super) fn open_remote_credentials_dialog(
     passphrase: bool,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
-    let mut options = remote_window_options("Sign in", CREDENTIALS_HEIGHT, cx);
+    let mut options = remote_window_options("Sign in", CREDENTIALS_INITIAL_HEIGHT, cx);
     placement.apply(&mut options);
     let handle = cx
         .open_window(options, move |window, cx| {
             let username_input = cx.new(|cx| {
-                RemoteCredentialInput::new(username, "Username", false, cx.focus_handle())
+                DialogTextInput::new(username, "Username", false, cx.focus_handle())
             });
             let password_input = cx.new(|cx| {
-                RemoteCredentialInput::new(
+                DialogTextInput::new(
                     String::new(),
                     if passphrase { "Passphrase" } else { "Password" },
                     true,
@@ -184,7 +186,7 @@ pub(super) fn open_remote_host_key_dialog(
     key: RemoteHostKey,
     cx: &mut Context<ExplorerView>,
 ) -> Result<AnyWindowHandle, String> {
-    let mut options = remote_window_options("Unknown host", HOST_KEY_HEIGHT, cx);
+    let mut options = remote_window_options("Unknown host", HOST_KEY_INITIAL_HEIGHT, cx);
     placement.apply(&mut options);
     let handle = cx
         .open_window(options, move |window, cx| {
@@ -205,13 +207,13 @@ pub(super) fn open_remote_host_key_dialog(
     Ok(handle.into())
 }
 
-fn remote_window_options(title: &'static str, height: f32, cx: &App) -> WindowOptions {
+fn remote_window_options(title: &'static str, initial_height: f32, cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::centered(
-            size(px(DIALOG_WIDTH), px(height)),
+            size(px(DIALOG_WIDTH), px(initial_height)),
             cx,
         )),
-        window_min_size: Some(size(px(DIALOG_WIDTH), px(height))),
+        window_min_size: Some(size(px(DIALOG_WIDTH), px(0.0))),
         titlebar: Some(TitlebarOptions {
             title: Some(SharedString::from(title)),
             ..Default::default()
@@ -400,8 +402,8 @@ impl RemoteDownloadDialog {
 
     fn render_site(
         &self,
-        name: Entity<RemoteCredentialInput>,
-        address: Entity<RemoteCredentialInput>,
+        name: Entity<DialogTextInput>,
+        address: Entity<DialogTextInput>,
         error: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -468,8 +470,8 @@ impl RemoteDownloadDialog {
         &self,
         host: &str,
         message: Option<&str>,
-        username: Entity<RemoteCredentialInput>,
-        password: Entity<RemoteCredentialInput>,
+        username: Entity<DialogTextInput>,
+        password: Entity<DialogTextInput>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
@@ -593,12 +595,21 @@ impl Render for RemoteDownloadDialog {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(rgb(0xffffff))
-            .p(px(20.0))
+            .p(px(DIALOG_PADDING))
             .text_size(px(12.0))
             .text_color(rgb(0x202020))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::cancel))
+            .on_children_prepainted(|children, window, cx| {
+                let height = (children[0].size.height + px(2.0 * DIALOG_PADDING)).ceil();
+                if (window.viewport_size().height - height).abs() > px(1.0) {
+                    window.defer(cx, move |window, _| {
+                        let viewport = window.viewport_size();
+                        window.resize(size(viewport.width, height));
+                    });
+                }
+            })
             .child(content)
     }
 }
@@ -612,6 +623,7 @@ impl Focusable for RemoteDownloadDialog {
 fn remote_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .debug_selector(move || id.into())
         .min_w(px(84.0))
         .h(px(28.0))
         .flex()
@@ -639,8 +651,8 @@ fn credential_display_text(
     }
 }
 
-impl RemoteCredentialInput {
-    fn new(
+impl DialogTextInput {
+    pub(super) fn new(
         content: String,
         placeholder: &'static str,
         password: bool,
@@ -651,6 +663,17 @@ impl RemoteCredentialInput {
             text: EditableTextState::new(content),
             placeholder: SharedString::from(placeholder),
             password,
+        }
+    }
+
+    pub(super) fn content(&self) -> &str {
+        &self.text.content
+    }
+
+    pub(super) fn set_content(&mut self, content: String, select_all: bool) {
+        self.text = EditableTextState::new(content);
+        if select_all {
+            self.text.select_all();
         }
     }
 
@@ -832,7 +855,7 @@ impl RemoteCredentialInput {
     }
 }
 
-impl Render for RemoteCredentialInput {
+impl Render for DialogTextInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .key_context("ExplorerRenameInput")
@@ -876,13 +899,13 @@ impl Render for RemoteCredentialInput {
     }
 }
 
-impl Focusable for RemoteCredentialInput {
+impl Focusable for DialogTextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl EntityInputHandler for RemoteCredentialInput {
+impl EntityInputHandler for DialogTextInput {
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,
@@ -961,7 +984,7 @@ impl EntityInputHandler for RemoteCredentialInput {
 }
 
 struct RemoteTextElement {
-    input: Entity<RemoteCredentialInput>,
+    input: Entity<DialogTextInput>,
 }
 
 struct RemoteTextPrepaint {
@@ -1153,6 +1176,48 @@ impl Element for RemoteTextElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{ExplorerSettings, SettingsState};
+
+    #[gpui::test]
+    fn site_dialog_fits_actions_with_and_without_wrapped_error(cx: &mut gpui::TestAppContext) {
+        let settings = ExplorerSettings::default();
+        cx.set_global(SettingsState::for_test(settings.clone()));
+        let path = Path::new("local-folder");
+        let explorer = cx.new(|cx| {
+            ExplorerView::new_unloaded_with_settings_for_test(
+                path.to_path_buf(),
+                Some(cx.focus_handle()),
+                &settings,
+            )
+        });
+        let window = explorer.update(cx, |_, cx| {
+            open_site_dialog(explorer.clone(), Default::default(), path, &[], cx).unwrap()
+        });
+        let dialog = window.downcast::<RemoteDownloadDialog>().unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window, cx);
+
+        let check_bottom_padding = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            let height = cx.update(|window, _| window.bounds().size.height);
+            for id in ["site-forget", "site-connect", "site-cancel"] {
+                let bottom = cx.debug_bounds(id).unwrap().bottom();
+                assert!((height - bottom - px(DIALOG_PADDING)).abs() <= px(1.0));
+            }
+            height
+        };
+
+        let initial_height = check_bottom_padding(&mut cx);
+        dialog
+            .update(&mut cx, |dialog, _, cx| {
+                let RemoteDialogKind::Site { error, .. } = &mut dialog.kind else {
+                    panic!("expected the SFTP site dialog");
+                };
+                *error = Some("Could not save the site settings. ".repeat(8));
+                cx.notify();
+            })
+            .unwrap();
+        assert!(check_bottom_padding(&mut cx) >= initial_height + px(46.0));
+    }
 
     #[test]
     fn local_folder_starts_with_blank_site_name_and_address() {

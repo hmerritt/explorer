@@ -9497,7 +9497,7 @@ mod tests {
             dialog
                 .update(app, |_, window, _| {
                     assert_eq!(window.bounds().center(), parent.center());
-                    assert_eq!(window.bounds().size, gpui::size(px(430.), px(310.)));
+                    assert_eq!(window.bounds().size, gpui::size(px(430.), px(266.)));
                     window.remove_window();
                 })
                 .unwrap();

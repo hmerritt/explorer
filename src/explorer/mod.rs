@@ -52,6 +52,8 @@ mod resumable_copy;
 mod scrollbar;
 mod search;
 mod selection;
+mod shortcut;
+mod shortcut_dialog;
 mod sidebar;
 mod sidebar_group_view;
 mod sorting;

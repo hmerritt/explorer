@@ -6,6 +6,13 @@ use std::{
 
 use gpui::http_client::Url;
 
+#[cfg(target_os = "windows")]
+pub(super) const URL_SHORTCUT_EXTENSION: &str = "url";
+#[cfg(target_os = "macos")]
+pub(super) const URL_SHORTCUT_EXTENSION: &str = "webloc";
+#[cfg(target_os = "linux")]
+pub(super) const URL_SHORTCUT_EXTENSION: &str = "desktop";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct UrlShortcut {
     pub(super) url: Url,
@@ -29,51 +36,15 @@ impl UrlShortcut {
             .as_deref()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| self.url.host_str().unwrap_or("Shortcut"));
-        let mut name: String = title
-            .trim()
-            .chars()
-            .map(|ch| {
-                if ch.is_control()
-                    || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
-                {
-                    '_'
-                } else {
-                    ch
-                }
-            })
-            .collect();
-        // Leave room for the extension and collision suffix on all supported filesystems.
-        while name.len() > 180 || name.encode_utf16().count() > 180 {
-            name.pop();
-        }
-        name = name.trim_end_matches(['.', ' ']).to_owned();
-        if name.is_empty() {
-            name = "Shortcut".to_owned();
-        }
-        let stem = name
-            .split('.')
-            .next()
-            .unwrap_or_default()
-            .trim_end()
-            .to_ascii_uppercase();
-        if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
-            || ["COM", "LPT"].iter().any(|prefix| {
-                stem.strip_prefix(prefix).is_some_and(|n| {
-                    matches!(
-                        n,
-                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                    )
-                })
-            })
-        {
-            name.insert(0, '_');
-        }
-        name
+        sanitize_shortcut_name(title)
     }
 
     pub(super) fn create_in(&self, directory: &Path) -> Result<PathBuf, String> {
-        let name = self.name();
-        let (extension, bytes) = self.native_contents(&name)?;
+        self.create_named_in(directory, &self.name())
+    }
+
+    pub(super) fn create_named_in(&self, directory: &Path, name: &str) -> Result<PathBuf, String> {
+        let (extension, bytes) = self.native_contents(name)?;
         for index in 1..=usize::MAX {
             let suffix = if index == 1 {
                 String::new()
@@ -100,7 +71,7 @@ impl UrlShortcut {
         #[cfg(target_os = "windows")]
         {
             Ok((
-                "url",
+                URL_SHORTCUT_EXTENSION,
                 format!("[InternetShortcut]\r\nURL={}\r\n", self.url).into_bytes(),
             ))
         }
@@ -112,16 +83,60 @@ impl UrlShortcut {
             plist::Value::Dictionary(dictionary)
                 .to_writer_xml(&mut bytes)
                 .map_err(|error| error.to_string())?;
-            Ok(("webloc", bytes))
+            Ok((URL_SHORTCUT_EXTENSION, bytes))
         }
         #[cfg(target_os = "linux")]
         {
             Ok((
-                "desktop",
+                URL_SHORTCUT_EXTENSION,
                 desktop_contents(_name, self.url.as_str()).into_bytes(),
             ))
         }
     }
+}
+
+pub(super) fn sanitize_shortcut_name(title: &str) -> String {
+    let mut name: String = title
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    // Leave room for the extension and collision suffix on all supported filesystems.
+    while name.len() > 180 || name.encode_utf16().count() > 180 {
+        name.pop();
+    }
+    name = name.trim_end_matches(['.', ' ']).to_owned();
+    if name.is_empty() {
+        name = "Shortcut".to_owned();
+    }
+    if is_reserved_shortcut_name(&name) {
+        name.insert(0, '_');
+    }
+    name
+}
+
+pub(super) fn is_reserved_shortcut_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|n| {
+                matches!(
+                    n,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        })
 }
 
 #[cfg(any(target_os = "linux", test))]
