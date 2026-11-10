@@ -1286,9 +1286,17 @@ impl ExplorerTabs {
             return false;
         }
 
-        let path = cx.global::<SettingsState>().startup_path();
+        let view = target.view.read(cx);
+        let path = view.path().to_path_buf();
+        let sidebar_group = view.active_sidebar_group();
         let focus_handle = cx.focus_handle();
         let helper_pane = self.create_pane(path, focus_handle, window, cx);
+        if let Some(group) = sidebar_group {
+            helper_pane.view.update(cx, |view, cx| {
+                view.navigate_to_sidebar_group(group, cx);
+                view.back_stack.clear();
+            });
+        }
         debug_assert_eq!(helper_pane.id, helper_pane_id);
         self.next_split_id += 1;
 
@@ -7947,7 +7955,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn self_docking_a_single_tab_uses_startup_pane_and_keeps_current_focused(
+    fn self_docking_a_single_tab_duplicates_directory_and_keeps_original_focused(
         cx: &mut TestAppContext,
     ) {
         let temp = TempDir::new();
@@ -8031,13 +8039,8 @@ mod tests {
             tab.layout.pane_ids(&mut order);
             assert_eq!(order, vec![current_pane, helper_pane_id]);
             assert_ne!(current_pane, helper_pane_id);
-            let paths = tab
-                .panes
-                .iter()
-                .map(|pane| pane.view.read(cx).path().to_path_buf())
-                .collect::<Vec<_>>();
-            assert!(paths.contains(&current_path));
-            assert!(paths.contains(&startup_path));
+            let helper = tab.pane(helper_pane_id).unwrap();
+            assert_eq!(helper.view.read(cx).path(), current_path);
             assert_eq!(tab.active_view().read(cx).path(), current_path);
         });
         assert_active_tab_focused(&tabs, cx);
@@ -8045,7 +8048,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn self_docking_last_tab_creates_startup_pane_and_preserves_left_tab(cx: &mut TestAppContext) {
+    fn self_docking_last_tab_duplicates_directory_and_preserves_left_tab(cx: &mut TestAppContext) {
         let temp = TempDir::new();
         let left_path = temp.path().join("left");
         let current_path = temp.path().join("current");
@@ -8097,11 +8100,11 @@ mod tests {
             assert_eq!(tab.active_pane, current_pane);
             let mut order = Vec::new();
             tab.layout.pane_ids(&mut order);
-            assert_eq!(order.last(), Some(&current_pane));
-            assert!(
-                tab.panes
-                    .iter()
-                    .any(|pane| pane.view.read(cx).path() == startup_path)
+            assert_eq!(order.len(), 2);
+            assert_eq!(order[1], current_pane);
+            assert_eq!(
+                tab.pane(order[0]).unwrap().view.read(cx).path(),
+                current_path
             );
             assert!(
                 !tab.panes
@@ -8115,7 +8118,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn first_tab_self_dock_uses_startup_and_leaves_right_tab_untouched(cx: &mut TestAppContext) {
+    fn first_tab_self_dock_duplicates_directory_and_preserves_right_tab(cx: &mut TestAppContext) {
         let temp = TempDir::new();
         let current_path = temp.path().join("current");
         let right_path = temp.path().join("right");
@@ -8156,7 +8159,7 @@ mod tests {
                 tabs.tabs[0]
                     .panes
                     .iter()
-                    .any(|pane| pane.view.read(cx).path() == startup_path)
+                    .all(|pane| pane.view.read(cx).path() == current_path)
             );
             assert_eq!(tabs.tabs[1].id, right_tab);
             assert_eq!(tabs.tabs[1].active_view().entity_id(), right_entity);
@@ -8165,7 +8168,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn middle_tab_self_dock_uses_startup_and_preserves_surrounding_tabs(cx: &mut TestAppContext) {
+    fn middle_tab_self_dock_duplicates_directory_and_preserves_surrounding_tabs(
+        cx: &mut TestAppContext,
+    ) {
         let temp = TempDir::new();
         let far_left_path = temp.path().join("far-left");
         let composite_path = temp.path().join("composite");
@@ -8270,7 +8275,7 @@ mod tests {
                 tabs.tabs[2]
                     .panes
                     .iter()
-                    .any(|pane| pane.view.read(cx).path() == startup_path)
+                    .all(|pane| pane.view.read(cx).path() == current_path)
             );
             assert_eq!(tabs.tabs[3].id, right_tab);
             assert_eq!(tabs.tabs[3].active_view().entity_id(), right_entity);
@@ -9283,8 +9288,14 @@ mod tests {
 
     #[gpui::test]
     fn lone_tab_drag_self_docks_without_arming_window_move(cx: &mut TestAppContext) {
-        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
-        let (_temp, tabs, cx) = test_tabs_with_files(cx, &[]);
+        let temp = TempDir::new();
+        let startup_path = temp.path().join("startup");
+        let current_path = startup_path.join("current");
+        fs::create_dir_all(&current_path).expect("create test paths");
+        let mut settings = ExplorerSettings::default();
+        settings.app.start = startup_path.clone();
+        cx.set_global(SettingsState::for_test(settings));
+        let (tabs, cx) = test_tabs_at_path(cx, current_path.clone());
         let (workspace_tab, original_pane, original_view, bounds) =
             cx.read_entity(&tabs, |tabs, _| {
                 let tab = tabs.active_tab().unwrap();
@@ -9300,7 +9311,7 @@ mod tests {
         cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::default());
         assert!(cx.debug_bounds("explorer-split-drop-preview").is_some());
         cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
-        cx.read_entity(&tabs, |tabs, _| {
+        let (helper_pane, helper_view) = cx.read_entity(&tabs, |tabs, cx| {
             assert_eq!(tabs.tabs.len(), 1);
             let tab = tabs.active_tab().unwrap();
             assert_eq!(tab.id, workspace_tab);
@@ -9310,11 +9321,73 @@ mod tests {
             let mut pane_ids = Vec::new();
             tab.layout.pane_ids(&mut pane_ids);
             assert_eq!(pane_ids[1], original_pane);
+            let helper_view = &tab.pane(pane_ids[0]).unwrap().view;
+            assert_ne!(helper_view, &original_view);
+            assert_eq!(helper_view.read(cx).path(), current_path);
+            assert_eq!(original_view.read(cx).path(), current_path);
             assert!(tabs.dragging_tab.is_none());
             assert!(tabs.dock_target.is_none());
             assert!(!tabs.should_move_window);
+            (pane_ids[0], helper_view.clone())
         });
         cx.update(|_, app| assert!(!app.has_active_drag()));
+
+        click_selector(cx, "up");
+        click_selector(cx, "up");
+        cx.read_entity(&tabs, |_, cx| {
+            assert_eq!(original_view.read(cx).path(), temp.path());
+            assert_eq!(helper_view.read(cx).path(), current_path);
+        });
+
+        let helper_bounds = cx.read_entity(&tabs, |tabs, _| tabs.pane_bounds[&helper_pane]);
+        cx.simulate_click(helper_bounds.center(), Modifiers::default());
+        click_selector(cx, "up");
+        cx.read_entity(&tabs, |tabs, cx| {
+            assert_eq!(tabs.active_tab().unwrap().active_pane, helper_pane);
+            assert_eq!(helper_view.read(cx).path(), startup_path);
+            assert_eq!(original_view.read(cx).path(), temp.path());
+        });
+    }
+
+    #[gpui::test]
+    fn self_docking_a_sidebar_group_opens_the_same_group_with_fresh_history(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (_temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let tab = tabs.active_tab().unwrap();
+                let (id, original_pane) = (tab.id, tab.active_pane);
+                let original_view = tab.active_view();
+                original_view.update(cx, |view, cx| {
+                    view.navigate_to_sidebar_group(SidebarGroupKind::Drives, cx);
+                });
+                assert!(tabs.self_dock_active_tab(
+                    id,
+                    original_pane,
+                    SplitDirection::Left,
+                    window,
+                    cx,
+                ));
+
+                let tab = tabs.active_tab().unwrap();
+                let helper = tab
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id != original_pane)
+                    .unwrap();
+                let helper_view = helper.view.read(cx);
+                assert_eq!(
+                    helper_view.active_sidebar_group(),
+                    Some(SidebarGroupKind::Drives)
+                );
+                assert!(helper_view.back_stack.is_empty());
+                assert!(helper_view.forward_stack.is_empty());
+                assert_eq!(tab.active_view(), original_view);
+                assert_eq!(original_view.read(cx).back_stack.len(), 1);
+            });
+        });
     }
 
     #[gpui::test]

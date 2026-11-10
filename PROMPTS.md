@@ -1,7 +1,5 @@
 ## 1
 
-- Omit Size for directory shortcuts
-- When self dragging a tab into a split-view, currently it opens the default start directory in it's place. Let's change this so that it opens the same directory twice, this would be more useful.
 - Settings UI
     - The app already has a lot of power in JSON settings: view mode, hidden files, extensions, sidebar pins, WSL visibility, columns, native icons, context menu commands. A real settings window would make existing functionality discoverable immediately. This is probably the best 80/20 feature.
     - context-menu
