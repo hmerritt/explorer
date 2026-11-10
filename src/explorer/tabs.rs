@@ -4384,6 +4384,63 @@ mod tests {
     }
 
     #[gpui::test]
+    fn folder_view_follows_the_folder_across_tabs_and_split_panes(cx: &mut TestAppContext) {
+        use crate::explorer::folder_views::FolderViews;
+        use crate::settings::FileViewMode;
+
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let other = path.join("other");
+        fs::create_dir(&other).unwrap();
+        let mut settings = ExplorerSettings::default();
+        settings.app.start = path.clone();
+        cx.set_global(SettingsState::for_test(settings));
+        cx.set_global(FolderViews::default());
+        let (tabs, cx) = cx.add_window_view({
+            let path = path.clone();
+            move |window, cx| {
+                let focus = cx.focus_handle();
+                focus.focus(window);
+                ExplorerTabs::new(path, focus, window, cx)
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let pane = tabs.tabs[0].active_pane;
+                tabs.pane_bounds.insert(
+                    pane,
+                    Bounds::new(gpui::point(px(0.), px(0.)), gpui::size(px(640.), px(480.))),
+                );
+                assert!(tabs.split_active_pane(SplitDirection::Right, window, cx));
+                tabs.add_background_tab(other.clone(), window, cx);
+                tabs.tabs[0].active_view().update(cx, |view, cx| {
+                    view.select_view_mode(FileViewMode::LargeIcons, cx);
+                });
+                tabs.add_background_tab(path.clone(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read_entity(&tabs, |tabs, app| {
+            for pane in &tabs.tabs[0].panes {
+                assert_eq!(pane.view.read(app).view_mode, FileViewMode::LargeIcons);
+            }
+            assert_eq!(
+                tabs.tabs[1].active_view().read(app).view_mode,
+                FileViewMode::Details
+            );
+            assert_eq!(
+                tabs.tabs[2].active_view().read(app).view_mode,
+                FileViewMode::LargeIcons
+            );
+            assert_eq!(
+                app.global::<SettingsState>().value.view.mode,
+                FileViewMode::Details
+            );
+        });
+    }
+
+    #[gpui::test]
     fn settings_changes_apply_to_existing_and_future_tabs(cx: &mut TestAppContext) {
         cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
         let temp = TempDir::new();

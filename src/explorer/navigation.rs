@@ -294,7 +294,7 @@ impl ExplorerView {
         self.sync_trash_view_settings();
         self.clear_git_entry_status();
         if !self.is_trash_view() {
-            self.reset_view_mode_for_navigation();
+            self.reset_folder_view_for_navigation(cx.as_deref().map(|cx| &**cx));
         }
         self.reset_search_for_navigation();
         self.clear_selection();
@@ -407,6 +407,7 @@ impl ExplorerView {
         self.scroll_to_top();
         self.sidebar_group_view = Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
         self.sync_trash_view_settings();
+        self.reset_folder_view_for_navigation(Some(cx));
         self.rebuild_sidebar_group_entries(&[]);
         self.schedule_sidebar_group_capacities(cx);
     }
@@ -656,6 +657,7 @@ impl ExplorerView {
                 self.sidebar_group_view =
                     Some(SidebarGroupViewState::new(kind, &self.sidebar_sections));
                 self.sync_trash_view_settings();
+                self.reset_folder_view_for_navigation(Some(cx));
                 self.rebuild_sidebar_group_entries(&[]);
                 self.schedule_sidebar_group_capacities(cx);
             }

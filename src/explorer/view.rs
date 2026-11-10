@@ -66,6 +66,8 @@ use crate::settings::{
     FileViewMode, SearchMode, SidebarGroupKind, SidebarSettings, SortDirection,
 };
 
+mod folder_preferences;
+
 const FOLDER_SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 const GIT_ENTRY_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -221,6 +223,9 @@ pub struct ExplorerView {
     pub(super) show_folder_size: bool,
     pub(super) resolve_icons: bool,
     pub(super) base_view_mode: FileViewMode,
+    default_file_sort: FileSortSettings,
+    default_file_columns: FileColumnSettings,
+    folder_view_revision: Option<u64>,
     pub(super) media_view_mode: FileViewMode,
     pub(super) remote_media_view_mode: FileViewMode,
     pub(super) view_mode: FileViewMode,
@@ -465,6 +470,8 @@ impl ExplorerView {
         let settings = cx.global::<crate::settings::SettingsState>().value.clone();
         let mut view =
             Self::new_unloaded_inner_with_settings(initial_path, Some(focus_handle), &settings);
+        view.reset_folder_view_for_navigation(Some(cx));
+        view.observe_folder_views(cx);
         if let Some(window) = parent_window {
             view.hosted_window = Some(window.window_handle());
             view.dialog_placement =
@@ -709,6 +716,9 @@ impl ExplorerView {
             show_folder_size: settings.view.show_folder_sizes,
             resolve_icons: settings.view.native_icons,
             base_view_mode: settings.view.mode,
+            default_file_sort: settings.view.sort,
+            default_file_columns: settings.view.file_columns.clone(),
+            folder_view_revision: None,
             media_view_mode: settings.view.mode_media,
             remote_media_view_mode: settings.view.remote_mode_media,
             view_mode: settings.view.mode,
@@ -764,7 +774,12 @@ impl ExplorerView {
         let filesystem_name = crate::settings::filesystem_name(settings);
         let filesystem_name_changed = self.filesystem_name != filesystem_name;
         let sidebar_changed = self.sidebar_settings != settings.sidebar;
-        let file_sort_changed = self.file_sort != settings.view.sort;
+        self.default_file_sort = settings.view.sort;
+        self.default_file_columns
+            .clone_from(&settings.view.file_columns);
+        let folder_view_enabled = self.folder_view_enabled(cx);
+        let (mode, sort, columns) = self.resolved_folder_view(cx);
+        let file_sort_changed = self.file_sort != sort;
         let media_preview_size_changed =
             self.media_preview_size != settings.view.media_preview_size;
         self.date_format.clone_from(&settings.view.date_format);
@@ -776,7 +791,7 @@ impl ExplorerView {
         self.show_file_name_extensions = settings.view.show_extensions;
         self.show_folder_size = settings.view.show_folder_sizes;
         self.resolve_icons = settings.view.native_icons;
-        self.file_sort = settings.view.sort;
+        self.file_sort = sort;
         self.media_preview_size = settings.view.media_preview_size;
         #[cfg(target_os = "windows")]
         {
@@ -804,7 +819,12 @@ impl ExplorerView {
             self.cancel_video_hover_preview(cx);
             self.cancel_text_hover_preview();
         }
-        if base_view_mode_changed {
+        if folder_view_enabled {
+            self.apply_folder_view_mode(
+                mode,
+                base_view_mode_changed || media_view_mode_changed || remote_media_view_mode_changed,
+            );
+        } else if base_view_mode_changed {
             self.view_mode_selection = ViewModeSelection::Manual;
             self.set_active_view_mode(self.base_view_mode);
         } else if (media_view_mode_changed || remote_media_view_mode_changed)
@@ -819,28 +839,7 @@ impl ExplorerView {
         if self.sidebar_resize_drag.is_none() {
             self.sidebar_width = settings.sidebar.width as f32;
         }
-        if let Some(drag) = self.file_column_resize_drag {
-            let name_width = self.file_columns.name_width;
-            let column_width = match drag.target {
-                FileColumnResizeTarget::Name => None,
-                FileColumnResizeTarget::Column(kind) => {
-                    self.file_columns.widths.get(&kind).copied()
-                }
-            };
-            self.file_columns = settings.view.file_columns.clone();
-            match drag.target {
-                FileColumnResizeTarget::Name => {
-                    self.file_columns.name_width = name_width;
-                }
-                FileColumnResizeTarget::Column(kind) => {
-                    if let Some(width) = column_width {
-                        self.file_columns.widths.insert(kind, width);
-                    }
-                }
-            }
-        } else {
-            self.file_columns = settings.view.file_columns.clone();
-        }
+        self.apply_view_columns(columns);
 
         if self.is_sidebar_group_view() {
             self.invalidate_recursive_search_cache();
@@ -1297,6 +1296,7 @@ impl ExplorerView {
             format_args!("reload.async_start path={path:?} generation={generation}"),
         );
 
+        let folder_views_ready = self.folder_views_pending(cx);
         let task = cx.spawn(async move |this, cx| {
             let load_started = Instant::now();
             let result = cx
@@ -1322,6 +1322,7 @@ impl ExplorerView {
                 ),
             );
 
+            folder_preferences::wait_for_folder_views(folder_views_ready).await;
             let _ = this.update(cx, |explorer, cx| {
                 if explorer.apply_directory_load_result(state, result, None, cx) {
                     cx.notify();
@@ -1383,6 +1384,7 @@ impl ExplorerView {
         );
 
         self.hosted_window = Some(window.window_handle());
+        let folder_views_ready = self.folder_views_pending(cx);
         let task = cx.spawn(async move |this, cx| {
             let load_started = Instant::now();
             let result = cx
@@ -1407,6 +1409,7 @@ impl ExplorerView {
                 ),
             );
 
+            folder_preferences::wait_for_folder_views(folder_views_ready).await;
             let _ = cx.update(|cx| {
                 // Resolve ownership when the load completes: the live view may
                 // have moved to another window while the filesystem was loading.
@@ -1547,6 +1550,7 @@ impl ExplorerView {
         if self.directory_load_generation != state.generation || self.path != state.path {
             return false;
         }
+        self.refresh_folder_view(cx);
         let _span = crate::startup_trace::Span::new("directory_apply");
         if self.is_trash_view()
             && result
@@ -1574,6 +1578,7 @@ impl ExplorerView {
         let reveal_selection_after_load = !state.select_after_load.is_empty();
         match result.entries {
             Ok(entries) => {
+                super::folder_views::repair_missing_volume(cx, &self.path);
                 let selected_paths =
                     if state.preserve_live_selection && state.mode.preserve_selection {
                         self.selected_paths()
@@ -2416,12 +2421,11 @@ impl ExplorerView {
         if let Some(state) = self.trash_view.as_mut() {
             state.location_sort = None;
         }
-        self.file_sort = sort;
-
         if self.search.recursive_results_active {
             self.recursive_file_sort_override = Some(sort);
             self.apply_visible_file_sort_preserving_selection();
         } else {
+            self.file_sort = sort;
             self.apply_file_sort_preserving_selection();
         }
 
@@ -2601,37 +2605,12 @@ impl ExplorerView {
         target: FileColumnKind,
         before: bool,
     ) -> bool {
-        if dragged == target {
-            return false;
-        }
-        let Some(dragged_index) = self
-            .file_columns
-            .order
-            .iter()
-            .position(|kind| *kind == dragged)
-        else {
-            return false;
-        };
-        let Some(mut target_index) = self
-            .file_columns
-            .order
-            .iter()
-            .position(|kind| *kind == target)
-        else {
-            return false;
-        };
-        if dragged_index < target_index {
-            target_index -= 1;
-        }
-
-        let insert_index = if before {
-            target_index
-        } else {
-            target_index + 1
-        };
-        let dragged = self.file_columns.order.remove(dragged_index);
-        self.file_columns.order.insert(insert_index, dragged);
-        true
+        crate::settings::reorder_file_column_in_settings(
+            &mut self.file_columns,
+            dragged,
+            target,
+            before,
+        )
     }
 
     pub(super) fn prepare_for_tab_close(&mut self, cx: &mut Context<Self>) {
@@ -2794,6 +2773,10 @@ impl ExplorerView {
 
 impl ExplorerView {
     pub(super) fn select_view_mode(&mut self, view_mode: FileViewMode, cx: &mut Context<Self>) {
+        if self.folder_view_enabled(cx) {
+            self.edit_folder_view(cx, |view| view.mode = Some(view_mode));
+            return;
+        }
         self.view_mode_selection = ViewModeSelection::Manual;
         if self.is_trash_view() {
             self.set_active_view_mode(view_mode);
@@ -2803,11 +2786,6 @@ impl ExplorerView {
         self.base_view_mode = view_mode;
         self.set_active_view_mode(view_mode);
         crate::settings::set_view_mode(view_mode, cx);
-    }
-
-    pub(super) fn reset_view_mode_for_navigation(&mut self) {
-        self.view_mode_selection = ViewModeSelection::Pending;
-        self.set_active_view_mode(self.base_view_mode);
     }
 
     fn apply_automatic_view_mode(&mut self) -> bool {

@@ -24,6 +24,7 @@ mod explorer_fs;
 mod file_commands;
 mod filesystem;
 mod folder_size;
+mod folder_views;
 mod formatting;
 mod git_status;
 mod icons;
@@ -126,6 +127,9 @@ pub(crate) use filesystem::{
     user_music_dir, user_pictures_dir, user_videos_dir, wsl_drive_roots,
 };
 pub(crate) use folder_size::initialize as initialize_folder_size_cache;
+pub(crate) use folder_views::{
+    flush_on_quit as flush_folder_views, initialize as initialize_folder_views,
+};
 pub(crate) use formatting::format_size;
 pub(crate) use image_memory::{clear_memory_caches, initialize_window_cleanup};
 pub(crate) use image_preview::load_svg_rgba_from_tree;
@@ -148,6 +152,7 @@ pub mod benchmark_support {
         load_entries, plan_archives, prepare_archive_extraction, prepare_copy,
         set_copy_parallelism,
     };
+    pub use super::folder_views::benchmark_support::FolderViewLookup;
     pub use super::image_preview::benchmark_support::*;
     pub use super::image_thumbnails::benchmark_support::*;
     pub use super::properties::benchmark_support::*;

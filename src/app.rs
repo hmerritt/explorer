@@ -781,6 +781,7 @@ fn install_single_instance_server(primary: SingleInstancePrimary, cx: &mut App) 
         _guard: primary.guard,
     });
     cx.on_app_quit(|cx| {
+        crate::explorer::flush_folder_views(cx);
         drop(cx.remove_global::<SingleInstanceServer>());
         async {}
     })
@@ -1543,7 +1544,7 @@ fn push_windows_like_search_input_key_bindings(bindings: &mut Vec<KeyBinding>) {
     ]);
 }
 
-fn initialize_application(cx: &mut App, args: Vec<OsString>) {
+fn initialize_application(cx: &mut App, args: Vec<OsString>, write_folder_views: bool) {
     let _span = crate::startup_trace::Span::new("application_initialization");
     macro_rules! stage {
         ($name:literal, $body:expr) => {{
@@ -1551,6 +1552,7 @@ fn initialize_application(cx: &mut App, args: Vec<OsString>) {
             $body
         }};
     }
+    crate::explorer::initialize_folder_views(cx, write_folder_views);
     stage!("fonts", register_embedded_fonts(cx));
     stage!("http_client", crate::http_client::initialize(cx));
     stage!("debug_options", crate::debug_options::initialize(cx, args));
@@ -1587,7 +1589,7 @@ pub(crate) fn run_benchmark(
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
     Application::new().run(move |cx| {
-        initialize_application(cx, vec![OsString::from("explorer-bench")]);
+        initialize_application(cx, vec![OsString::from("explorer-bench")], false);
         let bounds = WindowBounds::Windowed(Bounds::centered(None, size(px(1024.), px(820.)), cx));
         let handle = open_explorer_window_at(initial_path, bounds, None, cx);
         handle
@@ -1634,7 +1636,7 @@ pub fn run(args: Vec<OsString>, first_run: bool) {
     };
 
     app.run(move |cx: &mut App| {
-        initialize_application(cx, args.clone());
+        initialize_application(cx, args.clone(), single_instance_primary.is_some());
 
         #[cfg(target_os = "windows")]
         if cx.global::<SettingsState>().value.app.tray {

@@ -121,6 +121,7 @@ pub(super) enum ContextMenuIconSlot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuIcon {
+    Check,
     Cut,
     Copy,
     CopyAsPath,
@@ -156,6 +157,7 @@ pub(super) enum ContextMenuIcon {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuCommand {
+    ToggleFileColumn(crate::settings::FileColumnKind),
     RestoreBinSelected,
     RestoreBinToFolder,
     EmptyBin,
@@ -517,6 +519,7 @@ impl ExplorerView {
         }
 
         match command {
+            ContextMenuCommand::ToggleFileColumn(kind) => self.toggle_folder_column(kind, cx),
             ContextMenuCommand::RestoreBinSelected => self.restore_bin_selected(cx),
             ContextMenuCommand::RestoreBinToFolder => self.restore_bin_to_folder(cx),
             ContextMenuCommand::EmptyBin => self.empty_bin(cx),

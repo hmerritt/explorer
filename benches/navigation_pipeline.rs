@@ -5,7 +5,7 @@ use std::{
 };
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use explorer::benchmark_support::load_entries;
+use explorer::benchmark_support::{FolderViewLookup, load_entries};
 use explorer::performance::fixtures::Fixtures;
 
 const FIXTURE_VERSION: &str = "navigation-pipeline-benchmark-v1";
@@ -103,5 +103,30 @@ fn navigation_pipeline_benchmarks(criterion: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, navigation_pipeline_benchmarks);
+fn folder_view_benchmarks(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("navigation_pipeline/folder_view");
+    for count in [1_000, 10_000, 100_000] {
+        let lookup = FolderViewLookup::new(count);
+        let (hit, miss, bootstrap) = lookup.measure_under_io();
+        eprintln!(
+            "{count} folder views, p99 under concurrent save and cleanup: hit={hit:?}, miss={miss:?}; read and parse={bootstrap:?}"
+        );
+        for (label, hit) in [("hit", true), ("miss", false)] {
+            group.bench_function(BenchmarkId::new(label, count), |bencher| {
+                let mut index = 0;
+                bencher.iter(|| {
+                    lookup.resolve(index, hit);
+                    index = index.wrapping_add(97);
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    folder_view_benchmarks,
+    navigation_pipeline_benchmarks
+);
 criterion_main!(benches);

@@ -61,7 +61,7 @@ use crate::explorer::{
     },
     context_menu::{
         ContextMenuCommand, ContextMenuIcon, ContextMenuIconSlot, ContextMenuItem,
-        ContextMenuSource, clamped_context_menu_origin, context_menu_height,
+        ContextMenuSource, ContextMenuState, clamped_context_menu_origin, context_menu_height,
         context_menu_item_is_visually_active, context_menu_item_top, context_menu_path_is_active,
         context_menu_pointer_tip_origin, context_submenu_left,
     },
@@ -1293,6 +1293,21 @@ impl ExplorerView {
                         cx.notify();
                     }),
                 ))
+                .when(self.has_saved_folder_view(cx), |menu| {
+                    menu.child(utility_menu_row(
+                        "utility-use-default-view",
+                        None,
+                        "Use default view",
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_utility_menu = None;
+                            if this.commit_active_rename_before_interaction(window, cx) {
+                                this.use_default_folder_view(cx);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ))
+                })
                 .child(utility_menu_separator())
                 .child(utility_checkbox_row(
                     "utility-dot-items",
@@ -1954,6 +1969,9 @@ impl ExplorerView {
             );
         }
         for kind in self.file_columns.order.iter().copied() {
+            if self.file_columns.hidden.contains(&kind) {
+                continue;
+            }
             header_row =
                 header_row.child(self.render_file_column_header_cell(kind, active_sort, cx));
         }
@@ -1968,6 +1986,31 @@ impl ExplorerView {
             .border_color(rgb(0xf2f2f2))
             .text_size(px(12.0))
             .text_color(rgb(0x1f4e79))
+            .when(self.folder_view_enabled(cx), |header| {
+                header.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        let items = this
+                            .file_columns
+                            .order
+                            .iter()
+                            .copied()
+                            .map(|kind| ContextMenuItem::Action {
+                                id: format!("file-column-{kind:?}"),
+                                icon: (!this.file_columns.hidden.contains(&kind))
+                                    .then_some(ContextMenuIcon::Check),
+                                label: file_column_label(kind).to_owned(),
+                                command: ContextMenuCommand::ToggleFileColumn(kind),
+                                enabled: true,
+                            })
+                            .collect();
+                        this.open_utility_menu = None;
+                        this.context_menu = Some(ContextMenuState::new(event.position, items));
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+            })
             .child(
                 div()
                     .relative()
@@ -2020,9 +2063,7 @@ impl ExplorerView {
 
                 let _ = entity.update(cx, |this, cx| {
                     if this.reorder_file_column(dragged, kind, before) {
-                        if !this.is_trash_view() {
-                            crate::settings::reorder_file_column(dragged, kind, before, cx);
-                        }
+                        this.persist_column_reorder(dragged, kind, before, cx);
                         cx.notify();
                     }
                 });
@@ -3033,6 +3074,7 @@ impl ExplorerView {
             .order
             .iter()
             .copied()
+            .filter(|kind| !self.file_columns.hidden.contains(kind))
             .map(|kind| {
                 let cell = file_column_cell(
                     kind,
@@ -4315,7 +4357,11 @@ impl ExplorerView {
             .w_full()
             .overflow_hidden()
             .when(
-                !self.is_sidebar_group_view() && self.view_mode == FileViewMode::Details,
+                !self.is_sidebar_group_view()
+                    && self.view_mode == FileViewMode::Details
+                    && !(self.folder_view_enabled(cx)
+                        && (self.folder_view_is_loading(cx)
+                            || self.content_branch() == ExplorerContentBranch::Loading)),
                 |this| this.child(self.render_header(window, cx)),
             )
             .child(
@@ -6465,6 +6511,7 @@ fn context_menu_icon_element(
     cx: &mut Context<ExplorerView>,
 ) -> Option<AnyElement> {
     Some(match icon {
+        ContextMenuIcon::Check => div().child("✓").into_any_element(),
         ContextMenuIcon::Cut => gpui::img(CUT_ICON.clone())
             .w(px(CONTEXT_MENU_ICON_SIZE))
             .h(px(CONTEXT_MENU_ICON_SIZE))
@@ -7291,9 +7338,7 @@ fn add_header_sort_click(
         let _ = entity.update(cx, |this, cx| {
             this.close_context_menu();
             let sort = this.sort_entries_from_header(column);
-            if !this.is_trash_view() {
-                crate::settings::set_file_sort(sort, cx);
-            }
+            this.persist_view_sort(sort, cx);
             cx.notify();
         });
         cx.stop_propagation();
@@ -7393,6 +7438,7 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
         .w(px(FILE_COLUMN_RESIZE_HIT_WIDTH))
         .h_full()
         .cursor(CursorStyle::ResizeColumn)
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(
             canvas(
                 |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
@@ -7441,20 +7487,7 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
                                         return;
                                     };
 
-                                    match result {
-                                        FileColumnResizeResult::Name(width) => {
-                                            if !this.is_trash_view() {
-                                                crate::settings::set_name_column_width(width, cx);
-                                            }
-                                        }
-                                        FileColumnResizeResult::Column(kind, width) => {
-                                            if !this.is_trash_view() {
-                                                crate::settings::set_file_column_width(
-                                                    kind, width, cx,
-                                                );
-                                            }
-                                        }
-                                    }
+                                    this.persist_column_resize(result, cx);
                                     cx.stop_propagation();
                                     cx.notify();
                                 });
@@ -7465,9 +7498,10 @@ fn file_column_resize_handle(kind: FileColumnKind, entity: Entity<ExplorerView>)
                                 let _ = entity.update(cx, |this, cx| {
                                     this.close_context_menu();
                                     let (kind, width) = this.reset_file_column_width(kind);
-                                    if !this.is_trash_view() {
-                                        crate::settings::set_file_column_width(kind, width, cx);
-                                    }
+                                    this.persist_column_resize(
+                                        FileColumnResizeResult::Column(kind, width),
+                                        cx,
+                                    );
                                     cx.stop_propagation();
                                     cx.notify();
                                 });
@@ -7532,6 +7566,7 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
         .w(px(FILE_COLUMN_RESIZE_HIT_WIDTH))
         .h_full()
         .cursor(CursorStyle::ResizeColumn)
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(
             canvas(
                 |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
@@ -7580,20 +7615,7 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
                                         return;
                                     };
 
-                                    match result {
-                                        FileColumnResizeResult::Name(width) => {
-                                            if !this.is_trash_view() {
-                                                crate::settings::set_name_column_width(width, cx);
-                                            }
-                                        }
-                                        FileColumnResizeResult::Column(kind, width) => {
-                                            if !this.is_trash_view() {
-                                                crate::settings::set_file_column_width(
-                                                    kind, width, cx,
-                                                );
-                                            }
-                                        }
-                                    }
+                                    this.persist_column_resize(result, cx);
                                     cx.stop_propagation();
                                     cx.notify();
                                 });
@@ -7604,9 +7626,7 @@ fn name_column_resize_handle(width: f32, entity: Entity<ExplorerView>) -> AnyEle
                                 let _ = entity.update(cx, |this, cx| {
                                     this.close_context_menu();
                                     this.reset_name_column_width();
-                                    if !this.is_trash_view() {
-                                        crate::settings::clear_name_column_width(cx);
-                                    }
+                                    this.persist_name_width_reset(cx);
                                     cx.stop_propagation();
                                     cx.notify();
                                 });

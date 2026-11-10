@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
     fs, io,
@@ -1150,10 +1150,7 @@ pub struct ViewSettings {
     pub address_slash: AddressSlash,
     #[serde(default = "default_date_format")]
     pub date_format: String,
-    #[serde(
-        default = "default_file_columns",
-        deserialize_with = "deserialize_file_column_settings"
-    )]
+    #[serde(default = "default_file_columns")]
     pub file_columns: FileColumnSettings,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[serde(default = "default_filesystem_name")]
@@ -1249,6 +1246,8 @@ pub struct FileColumnSettings {
     pub name_width: Option<u32>,
     pub order: Vec<FileColumnKind>,
     pub widths: BTreeMap<FileColumnKind, u32>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub hidden: BTreeSet<FileColumnKind>,
 }
 
 impl Default for ExplorerSettings {
@@ -1712,7 +1711,7 @@ fn sidebar_reorder_index(
     (new_index != source_index).then_some(new_index)
 }
 
-fn reorder_file_column_in_settings(
+pub(crate) fn reorder_file_column_in_settings(
     settings: &mut FileColumnSettings,
     dragged: FileColumnKind,
     target: FileColumnKind,
@@ -1738,6 +1737,9 @@ fn reorder_file_column_in_settings(
     } else {
         target_index + 1
     };
+    if insert_index == dragged_index {
+        return false;
+    }
     let dragged = settings.order.remove(dragged_index);
     settings.order.insert(insert_index, dragged);
     true
@@ -2868,6 +2870,7 @@ fn default_file_columns() -> FileColumnSettings {
         name_width: None,
         order: default_file_column_order().to_vec(),
         widths,
+        hidden: BTreeSet::new(),
     }
 }
 
@@ -3094,12 +3097,10 @@ fn sort_direction_from_str(value: &str) -> Option<SortDirection> {
     }
 }
 
-fn deserialize_file_column_settings<'de, D>(deserializer: D) -> Result<FileColumnSettings, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Value::deserialize(deserializer)?;
-    Ok(file_column_settings_from_value(value))
+impl<'de> Deserialize<'de> for FileColumnSettings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Value::deserialize(deserializer).map(file_column_settings_from_value)
+    }
 }
 
 fn deserialize_file_sort_settings<'de, D>(deserializer: D) -> Result<FileSortSettings, D::Error>
@@ -3161,6 +3162,13 @@ fn file_column_settings_from_value(value: Value) -> FileColumnSettings {
                 .widths
                 .insert(kind, normalized_file_column_width(width));
         }
+    }
+    if let Some(hidden) = object.get("hidden").and_then(Value::as_array) {
+        settings.hidden = hidden
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(file_column_kind_from_str)
+            .collect();
     }
 
     settings.name_width = object

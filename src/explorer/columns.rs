@@ -23,6 +23,7 @@ pub(super) fn file_column_width_total(settings: &FileColumnSettings) -> f32 {
     settings
         .order
         .iter()
+        .filter(|kind| !settings.hidden.contains(kind))
         .map(|kind| file_column_width(settings, *kind))
         .sum()
 }

@@ -1391,6 +1391,13 @@ fn linux_mountinfo_deepest_entry_for_path(
         .max_by_key(|entry| entry.mount_point.components().count())
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn folder_view_mount(path: &Path) -> Option<(PathBuf, String, String)> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let entry = linux_mountinfo_deepest_entry_for_path(&mountinfo, path)?;
+    Some((entry.mount_point, entry.source, entry.fs_type))
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn linux_mountinfo_entry_is_remote(entry: &LinuxMountInfoEntry) -> bool {
     linux_filesystem_type_is_remote(&entry.fs_type)

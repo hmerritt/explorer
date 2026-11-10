@@ -53,7 +53,12 @@ pub(crate) fn initialize(cx: &mut App) {
                 run_scheduled_cache_cleanup(&state_path, interval_days, SystemTime::now())
             });
             let next_check = match cleanup_task.await {
-                Ok(run) => run.next_check,
+                Ok(run) => {
+                    if run.action == CacheCleanupAction::Cleanup {
+                        super::folder_views::cleanup(cx).await;
+                    }
+                    run.next_check
+                }
                 Err(error) => {
                     eprintln!("Unable to run Explorer cache cleanup: {error}");
                     cache_cleanup_interval(interval_days)
