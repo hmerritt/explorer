@@ -303,7 +303,9 @@ const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
 const SIDEBAR_AUTO_HIDE_MAX_WINDOW_FRACTION: f32 = 0.40;
 const SIDEBAR_GROUP_CHILD_INDENT: f32 = 28.0;
-const SIDEBAR_FOLDER_INDENT: f32 = 14.0;
+const SIDEBAR_FOLDER_INDENT: f32 = 8.0;
+const SIDEBAR_FOLDER_CHEVRON_WIDTH: f32 = 14.0;
+const SIDEBAR_FOLDER_CHEVRON_GAP: f32 = 4.0;
 const SIDEBAR_GROUP_GAP: f32 = 14.0;
 const SIDEBAR_COLLAPSED_GROUP_GAP: f32 = 4.0;
 const SIDEBAR_GROUP_LABEL_Y_OFFSET: f32 = 1.0;
@@ -2418,7 +2420,6 @@ impl ExplorerView {
         ));
         if can_expand {
             for child in self.sidebar_tree.children(&key, visibility) {
-                rows.push(sidebar_item_gap().into_any_element());
                 self.render_sidebar_branch(
                     child.row_id,
                     (key.child(&child.item.path), &child.item),
@@ -2559,13 +2560,16 @@ impl ExplorerView {
                 .px(px(SIDEBAR_HORIZONTAL_PADDING))
                 .child(
                     div()
-                        .w(px(content_indent - SIDEBAR_FOLDER_INDENT))
+                        .w(px(content_indent
+                            - SIDEBAR_FOLDER_CHEVRON_WIDTH
+                            - SIDEBAR_FOLDER_CHEVRON_GAP))
                         .flex_shrink_0(),
                 )
                 .child(
                     div()
                         .id("chevron")
-                        .w(px(SIDEBAR_FOLDER_INDENT))
+                        .w(px(SIDEBAR_FOLDER_CHEVRON_WIDTH))
+                        .mr(px(SIDEBAR_FOLDER_CHEVRON_GAP))
                         .h_full()
                         .flex_shrink_0()
                         .when_some(chevron, |this, (key, expanded)| {
@@ -2592,6 +2596,7 @@ impl ExplorerView {
                 .child(sidebar_item_icon(&icon_item))
                 .child(
                     div()
+                        .debug_selector(move || format!("explorer-sidebar-row-{id}-label"))
                         .flex_1()
                         .min_w(px(0.0))
                         .ml(px(SIDEBAR_ICON_TEXT_GAP))
@@ -11041,14 +11046,18 @@ mod tests {
     fn sidebar_folder_chevrons_expand_nested_rows_without_navigating(
         cx: &mut gpui::TestAppContext,
     ) {
+        use crate::explorer::constants::{FILE_ICON_SIZE, SIDEBAR_ICON_TEXT_GAP};
         use crate::explorer::sidebar_tree::sidebar_tree_roots;
+        use gpui::px;
 
         let temp = TempDir::new();
         let initial = temp.path().to_path_buf();
         let root = initial.join("Pinned folder");
         let child = root.join("Child");
         let grandchild = child.join("Grandchild");
+        let sibling = root.join("Sibling");
         std::fs::create_dir_all(&grandchild).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
         let mut settings = crate::settings::ExplorerSettings::default();
         settings.sidebar.pinned = vec![root.clone()];
         cx.set_global(SettingsState::for_test(settings.clone()));
@@ -11068,7 +11077,7 @@ mod tests {
             cx.run_until_parked();
         };
         click(cx, "explorer-sidebar-row-0-chevron", MouseButton::Left);
-        let (root_key, child_id) = cx.read_entity(&view, |view, _| {
+        let (root_key, child_id, sibling_id) = cx.read_entity(&view, |view, _| {
             assert_eq!(view.path(), initial);
             assert!(view.back_stack.is_empty());
             let (root_key, _) = sidebar_tree_roots(
@@ -11080,18 +11089,38 @@ mod tests {
             let children = view
                 .sidebar_tree
                 .children(&root_key, view.entry_visibility());
-            assert_eq!(children.len(), 1);
+            assert_eq!(children.len(), 2);
             assert_eq!(children[0].item.path, child);
-            (root_key, children[0].row_id)
+            assert_eq!(children[1].item.path, sibling);
+            (root_key, children[0].row_id, children[1].row_id)
         });
+        let child_row = format!("explorer-sidebar-row-{child_id}").leak();
+        let sibling_row = format!("explorer-sidebar-row-{sibling_id}").leak();
+        let root_row_bounds = cx.debug_bounds("explorer-sidebar-row-0").unwrap();
+        let child_row_bounds = cx.debug_bounds(child_row).unwrap();
+        assert_eq!(child_row_bounds.origin.y, root_row_bounds.bottom());
+        assert_eq!(
+            cx.debug_bounds(sibling_row).unwrap().origin.y,
+            child_row_bounds.bottom()
+        );
+
         let child_chevron = format!("explorer-sidebar-row-{child_id}-chevron").leak();
         let child_bounds = cx.debug_bounds(child_chevron).unwrap();
-        assert!(
-            child_bounds.origin.x
-                > cx.debug_bounds("explorer-sidebar-row-0-chevron")
-                    .unwrap()
-                    .origin
-                    .x
+        let root_bounds = cx.debug_bounds("explorer-sidebar-row-0-chevron").unwrap();
+        let child_label = format!("explorer-sidebar-row-{child_id}-label").leak();
+        let child_label_bounds = cx.debug_bounds(child_label).unwrap();
+        let root_label_bounds = cx.debug_bounds("explorer-sidebar-row-0-label").unwrap();
+        assert_eq!(child_bounds.origin.x - root_bounds.origin.x, px(8.0));
+        assert_eq!(
+            child_label_bounds.origin.x - root_label_bounds.origin.x,
+            px(8.0)
+        );
+        assert_eq!(child_bounds.size.width, px(14.0));
+        assert_eq!(
+            child_label_bounds.origin.x
+                - child_bounds.right()
+                - px(FILE_ICON_SIZE + SIDEBAR_ICON_TEXT_GAP),
+            px(4.0)
         );
         click(cx, child_chevron, MouseButton::Left);
 
@@ -11105,6 +11134,17 @@ mod tests {
             assert_eq!(children[0].item.path, grandchild);
             children[0].row_id
         });
+        let grandchild_row = format!("explorer-sidebar-row-{grandchild_id}").leak();
+        let grandchild_row_bounds = cx.debug_bounds(grandchild_row).unwrap();
+        assert_eq!(
+            grandchild_row_bounds.origin.y,
+            cx.debug_bounds(child_row).unwrap().bottom()
+        );
+        assert_eq!(
+            cx.debug_bounds(sibling_row).unwrap().origin.y,
+            grandchild_row_bounds.bottom()
+        );
+
         click(cx, "explorer-sidebar-row-0-chevron", MouseButton::Left);
         cx.read_entity(&view, |view, _| {
             assert!(
@@ -11121,7 +11161,6 @@ mod tests {
             assert_eq!(children[0].row_id, grandchild_id);
         });
 
-        let grandchild_row = format!("explorer-sidebar-row-{grandchild_id}").leak();
         click(cx, grandchild_row, MouseButton::Right);
         cx.read_entity(&view, |view, _| {
             let menu = view.context_menu.as_ref().unwrap();
