@@ -2254,6 +2254,7 @@ impl ExplorerView {
         expanded: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let header_id = sidebar_group_header_id(kind);
         let is_current = self.active_sidebar_group() == Some(kind);
         let chevron = if expanded {
             SIDEBAR_GROUP_CHEVRON_DOWN
@@ -2262,8 +2263,8 @@ impl ExplorerView {
         };
 
         div()
-            .id(sidebar_group_header_id(kind))
-            .debug_selector(move || sidebar_group_header_id(kind).to_owned())
+            .id(header_id)
+            .debug_selector(move || header_id.to_owned())
             .flex()
             .flex_row()
             .items_center()
@@ -2290,20 +2291,14 @@ impl ExplorerView {
             .on_mouse_up(
                 MouseButton::Right,
                 cx.listener(move |this, _: &MouseUpEvent, _, cx| {
-                    let expanded = !expanded;
-                    if crate::settings::set_sidebar_group_expanded(kind, expanded, cx) {
-                        set_local_sidebar_group_expanded(
-                            &mut this.sidebar_settings.expanded_groups,
-                            kind,
-                            expanded,
-                        );
-                    }
+                    this.toggle_sidebar_group_expanded(kind, cx);
                     cx.stop_propagation();
-                    cx.notify();
                 }),
             )
             .child(
                 div()
+                    .id("chevron")
+                    .debug_selector(move || format!("{header_id}-chevron"))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2311,6 +2306,10 @@ impl ExplorerView {
                     .font(nav_icon_font())
                     .text_size(px(7.0))
                     .text_color(rgb(0x606060))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.toggle_sidebar_group_expanded(kind, cx);
+                        cx.stop_propagation();
+                    }))
                     .child(chevron),
             )
             .child(div().ml(px(4.0)).child(icon))
@@ -2328,6 +2327,18 @@ impl ExplorerView {
                     .child(label),
             )
             .into_any_element()
+    }
+
+    fn toggle_sidebar_group_expanded(&mut self, kind: SidebarGroupKind, cx: &mut Context<Self>) {
+        let expanded = !sidebar_group_is_expanded(&self.sidebar_settings, kind);
+        if crate::settings::set_sidebar_group_expanded(kind, expanded, cx) {
+            set_local_sidebar_group_expanded(
+                &mut self.sidebar_settings.expanded_groups,
+                kind,
+                expanded,
+            );
+        }
+        cx.notify();
     }
 
     fn render_sidebar_insertion_zone(
@@ -8507,9 +8518,9 @@ mod tests {
         lines_of_code_tooltip, open_current_folder_context_menu_from_event, operation_notice_style,
         recursive_result_path_tooltip, recursive_result_text_width, search_working_detail,
         selection_modifiers_for_click, sidebar_auto_hide_is_active, sidebar_context_menu_is_active,
-        sidebar_context_menu_target, sidebar_item_is_current, sidebar_item_is_dragging,
-        sidebar_pin_path_from_value, sidebar_row_background_color, sort_indicator_direction,
-        text_cell_width,
+        sidebar_context_menu_target, sidebar_group_is_expanded, sidebar_item_is_current,
+        sidebar_item_is_dragging, sidebar_pin_path_from_value, sidebar_row_background_color,
+        sort_indicator_direction, text_cell_width,
     };
     use crate::settings::{
         AddressSlash, FileSortColumn, FileSortSettings, FileViewMode, SearchMode, SettingsState,
@@ -10863,7 +10874,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_clicking_sidebar_group_header_persists_and_repaints(cx: &mut gpui::TestAppContext) {
+    fn clicking_sidebar_group_chevron_and_right_clicking_header_toggle_expansion(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let temp = TempDir::new();
         let path = temp.path().to_path_buf();
         let drive_path = temp.path().join("drive");
@@ -10879,8 +10892,14 @@ mod tests {
             view.sidebar_sections = SidebarSections {
                 drives: vec![SidebarItem {
                     label: "Drive".to_owned(),
-                    path: drive_path,
+                    path: drive_path.clone(),
                     kind: SidebarItemKind::Drive,
+                    configured_index: None,
+                }],
+                network_drives: vec![SidebarItem {
+                    label: "Share".to_owned(),
+                    path: drive_path.with_file_name("share"),
+                    kind: SidebarItemKind::DriveNetwork(NetworkDriveState::Disconnected),
                     configured_index: None,
                 }],
                 ..SidebarSections::default()
@@ -10890,29 +10909,50 @@ mod tests {
 
         cx.run_until_parked();
         assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_none());
-        let position = cx
-            .debug_bounds("explorer-sidebar-group-drives")
-            .expect("drive group bounds")
-            .center();
-        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
-        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
-        cx.run_until_parked();
+        let network_header = "explorer-sidebar-group-network";
+        let collapsed_network_top = cx.debug_bounds(network_header).unwrap().origin.y;
+        let header = "explorer-sidebar-group-drives";
+        let chevron = "explorer-sidebar-group-drives-chevron";
+        for (button, target, expanded) in [
+            (MouseButton::Left, chevron, true),
+            (MouseButton::Left, chevron, false),
+            (MouseButton::Right, header, true),
+            (MouseButton::Right, chevron, false),
+        ] {
+            let position = cx
+                .debug_bounds(target)
+                .expect("click target bounds")
+                .center();
+            cx.simulate_mouse_down(position, button, Modifiers::default());
+            cx.simulate_mouse_up(position, button, Modifiers::default());
+            cx.run_until_parked();
 
-        assert!(cx.debug_bounds("explorer-sidebar-row-2000").is_some());
-        cx.read_entity(&view, |view, _| {
-            assert!(
-                view.sidebar_settings
-                    .expanded_groups
-                    .contains(&SidebarGroupKind::Drives)
-            );
-        });
-        assert!(cx.read(|cx| {
-            cx.global::<SettingsState>()
-                .value
-                .sidebar
-                .expanded_groups
-                .contains(&SidebarGroupKind::Drives)
-        }));
+            cx.read_entity(&view, |view, _| {
+                assert_eq!(view.active_sidebar_group(), None);
+                assert_eq!(
+                    sidebar_group_is_expanded(&view.sidebar_settings, SidebarGroupKind::Drives),
+                    expanded
+                );
+            });
+            cx.read(|cx| {
+                assert_eq!(
+                    sidebar_group_is_expanded(
+                        &cx.global::<SettingsState>().value.sidebar,
+                        SidebarGroupKind::Drives,
+                    ),
+                    expanded
+                );
+            });
+            // GPUI can retain debug bounds for removed elements. Check the layout of
+            // the Network header below the drive row to verify that it was removed.
+            let network_top = cx.debug_bounds(network_header).unwrap().origin.y;
+            if expanded {
+                let drive = cx.debug_bounds("explorer-sidebar-row-2000").unwrap();
+                assert!(network_top > drive.bottom());
+            } else {
+                assert_eq!(network_top, collapsed_network_top);
+            }
+        }
     }
 
     #[gpui::test]
