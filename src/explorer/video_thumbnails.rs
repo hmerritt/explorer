@@ -109,46 +109,13 @@ pub(super) fn load_video_thumbnail_rgba(
     }
 
     let total_started = Instant::now();
-    let fast_args = static_video_thumbnail_args(path, Some(STATIC_THUMBNAIL_SEEK_SECONDS), size);
-    let fast = run_ffmpeg_ppm_stream(&fast_args, cancel, |_, frame| Some(frame));
-    match fast {
+    match extract_static_video_thumbnail(path, size, cancel, |args| {
+        run_ffmpeg_ppm_stream(args, cancel, |_, frame| Some(frame))
+    }) {
         Ok(mut extraction) => {
-            let image = extraction.value.pop().ok_or_else(|| {
-                VideoExtractionError::new(
-                    VideoExtractionErrorKind::InvalidFrame,
-                    "ffmpeg did not return a video thumbnail frame.",
-                )
-            })?;
             extraction.metrics.total = total_started.elapsed();
             log_video_thumbnail_metrics(path, &extraction.metrics, "ready");
-            Ok(VideoExtraction {
-                value: image.image,
-                metrics: extraction.metrics,
-            })
-        }
-        Err(fast_error) if fast_error.permits_fallback() => {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(VideoExtractionError::cancelled());
-            }
-            let fallback_args = static_video_thumbnail_args(path, None, size);
-            let mut extraction =
-                run_ffmpeg_ppm_stream(&fallback_args, cancel, |_, frame| Some(frame))?;
-            let image = extraction.value.pop().ok_or_else(|| {
-                VideoExtractionError::new(
-                    VideoExtractionErrorKind::InvalidFrame,
-                    format!(
-                        "ffmpeg did not return a fallback video thumbnail frame; fast attempt failed: {fast_error}"
-                    ),
-                )
-            })?;
-            extraction.metrics.processes += 1;
-            extraction.metrics.used_fallback = true;
-            extraction.metrics.total = total_started.elapsed();
-            log_video_thumbnail_metrics(path, &extraction.metrics, "ready");
-            Ok(VideoExtraction {
-                value: image.image,
-                metrics: extraction.metrics,
-            })
+            Ok(extraction)
         }
         Err(error) => {
             if crate::debug_options::icon_timings_enabled() {
@@ -162,6 +129,65 @@ pub(super) fn load_video_thumbnail_rgba(
             Err(error)
         }
     }
+}
+
+fn extract_static_video_thumbnail(
+    path: &Path,
+    size: u32,
+    cancel: &AtomicBool,
+    mut run: impl FnMut(
+        &[OsString],
+    ) -> Result<VideoExtraction<Vec<VideoFrameRgba>>, VideoExtractionError>,
+) -> Result<VideoExtraction<image::RgbaImage>, VideoExtractionError> {
+    let mut extract = |seek, limited_probe| {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(VideoExtractionError::cancelled());
+        }
+        let args = static_video_thumbnail_args(path, seek, size, limited_probe);
+        let mut extraction = run(&args)?;
+        let frame = extraction.value.pop().ok_or_else(|| {
+            VideoExtractionError::new(
+                VideoExtractionErrorKind::InvalidFrame,
+                "ffmpeg did not return a video thumbnail frame.",
+            )
+        })?;
+        Ok(VideoExtraction {
+            value: frame.image,
+            metrics: extraction.metrics,
+        })
+    };
+
+    let seek = Some(STATIC_THUMBNAIL_SEEK_SECONDS);
+    let mut previous_processes = 0;
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("m2ts"))
+    {
+        match extract(seek, true) {
+            Err(error)
+                if matches!(
+                    error.kind,
+                    VideoExtractionErrorKind::Process | VideoExtractionErrorKind::InvalidFrame
+                ) =>
+            {
+                previous_processes += 1;
+            }
+            result => return result,
+        }
+    }
+
+    let mut extraction = match extract(seek, false) {
+        Ok(extraction) => extraction,
+        Err(error) if error.permits_fallback() => {
+            previous_processes += 1;
+            let mut extraction = extract(None, false)?;
+            extraction.metrics.used_fallback = true;
+            extraction
+        }
+        Err(error) => return Err(error),
+    };
+    extraction.metrics.processes += previous_processes;
+    Ok(extraction)
 }
 
 pub(super) fn extract_video_frame_batch(
@@ -211,10 +237,11 @@ fn merge_metrics(total: &mut VideoExtractionMetrics, next: VideoExtractionMetric
     }
 }
 
-pub(super) fn static_video_thumbnail_args(
+fn static_video_thumbnail_args(
     path: &Path,
     seek_seconds: Option<f64>,
     size: u32,
+    limited_probe: bool,
 ) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-v"),
@@ -223,6 +250,12 @@ pub(super) fn static_video_thumbnail_args(
         OsString::from("-threads"),
         OsString::from(STATIC_THUMBNAIL_DECODER_THREADS.to_string()),
     ];
+    if limited_probe {
+        // A single frame at a fixed timestamp does not need an end-of-file duration scan.
+        args.extend(
+            ["-probesize", "2M", "-skip_estimate_duration_from_pts", "1"].map(OsString::from),
+        );
+    }
     if let Some(seek_seconds) = seek_seconds {
         args.extend([
             OsString::from("-ss"),
@@ -781,6 +814,7 @@ mod tests {
             Path::new("clip.mp4"),
             Some(STATIC_THUMBNAIL_SEEK_SECONDS),
             128,
+            false,
         );
         let args = args
             .iter()
@@ -801,12 +835,129 @@ mod tests {
         assert!(args[index("-vf") + 1].contains("format=rgb24"));
     }
 
+    fn static_frame_result(frames: Vec<VideoFrameRgba>) -> VideoExtraction<Vec<VideoFrameRgba>> {
+        VideoExtraction {
+            metrics: VideoExtractionMetrics {
+                processes: 1,
+                frames: frames.len(),
+                ..VideoExtractionMetrics::default()
+            },
+            value: frames,
+        }
+    }
+
+    fn test_static_frame() -> VideoFrameRgba {
+        VideoFrameRgba {
+            image: image::RgbaImage::new(1, 1),
+        }
+    }
+
+    #[test]
+    fn only_m2ts_static_thumbnails_use_the_limited_probe() {
+        for (name, limited) in [
+            ("clip.M2tS", true),
+            ("clip.mp4", false),
+            ("clip.mts", false),
+        ] {
+            let path = Path::new(name);
+            let seek = Some(STATIC_THUMBNAIL_SEEK_SECONDS);
+            let original_args = static_video_thumbnail_args(path, seek, 128, false);
+            let mut attempts = 0;
+            let result =
+                extract_static_video_thumbnail(path, 128, &AtomicBool::new(false), |args| {
+                    attempts += 1;
+                    let mut expected = original_args.clone();
+                    if limited {
+                        let seek_index = expected.iter().position(|arg| arg == "-ss").unwrap();
+                        expected.splice(
+                            seek_index..seek_index,
+                            ["-probesize", "2M", "-skip_estimate_duration_from_pts", "1"]
+                                .map(OsString::from),
+                        );
+                    }
+                    assert_eq!(args, expected);
+                    Ok(static_frame_result(vec![test_static_frame()]))
+                })
+                .unwrap();
+            assert_eq!(attempts, 1);
+            assert_eq!(result.metrics.processes, 1);
+            assert!(!result.metrics.used_fallback);
+        }
+    }
+
+    #[test]
+    fn m2ts_retries_the_full_probe_before_falling_back_to_the_opening_frame() {
+        let path = Path::new("clip.m2ts");
+        let seek = Some(STATIC_THUMBNAIL_SEEK_SECONDS);
+        let cancel = AtomicBool::new(false);
+
+        for full_probe_has_frame in [true, false] {
+            let mut attempts = Vec::new();
+            let result = extract_static_video_thumbnail(path, 128, &cancel, |args| {
+                attempts.push(args.to_vec());
+                match attempts.len() {
+                    1 if full_probe_has_frame => Err(VideoExtractionError::new(
+                        VideoExtractionErrorKind::Process,
+                        "error",
+                    )),
+                    1 => Ok(static_frame_result(vec![])),
+                    2 if !full_probe_has_frame => Ok(static_frame_result(vec![])),
+                    _ => Ok(static_frame_result(vec![test_static_frame()])),
+                }
+            })
+            .unwrap();
+            let mut expected = vec![
+                static_video_thumbnail_args(path, seek, 128, true),
+                static_video_thumbnail_args(path, seek, 128, false),
+            ];
+            if !full_probe_has_frame {
+                expected.push(static_video_thumbnail_args(path, None, 128, false));
+            }
+            assert_eq!(attempts, expected);
+            assert_eq!(result.metrics.processes, expected.len());
+            assert_eq!(result.metrics.used_fallback, !full_probe_has_frame);
+        }
+    }
+
+    #[test]
+    fn m2ts_does_not_retry_spawn_errors_or_cancelled_extraction() {
+        let path = Path::new("clip.m2ts");
+        for (failure, cancelled, expected) in [
+            (
+                VideoExtractionErrorKind::Spawn,
+                false,
+                VideoExtractionErrorKind::Spawn,
+            ),
+            (
+                VideoExtractionErrorKind::Cancelled,
+                false,
+                VideoExtractionErrorKind::Cancelled,
+            ),
+            (
+                VideoExtractionErrorKind::Process,
+                true,
+                VideoExtractionErrorKind::Cancelled,
+            ),
+        ] {
+            let cancel = AtomicBool::new(false);
+            let mut attempts = 0;
+            let error = extract_static_video_thumbnail(path, 128, &cancel, |_| {
+                attempts += 1;
+                cancel.store(cancelled, Ordering::Relaxed);
+                Err(VideoExtractionError::new(failure.clone(), "error"))
+            })
+            .unwrap_err();
+            assert_eq!(attempts, 1);
+            assert_eq!(error.kind, expected);
+        }
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_media_arguments_normalize_input_paths_only() {
         let path = Path::new(r"C:/videos\子 clip.mp4");
         for args in [
-            static_video_thumbnail_args(path, None, 128),
+            static_video_thumbnail_args(path, None, 128, false),
             video_frame_batch_args(path, &[0.0, 2.0]),
             super::super::video_hover_preview::video_hover_preview_ffmpeg_args(path, 128),
         ] {
@@ -823,7 +974,7 @@ mod tests {
 
     #[test]
     fn static_thumbnail_fallback_decodes_opening_frame_without_seeking() {
-        let args = static_video_thumbnail_args(Path::new("clip.mp4"), None, 128);
+        let args = static_video_thumbnail_args(Path::new("clip.mp4"), None, 128, false);
         let args = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
