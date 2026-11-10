@@ -25,7 +25,7 @@ use crate::explorer::{
     view::ExplorerView,
 };
 
-const VIDEO_HOVER_PREVIEW_FPS: u32 = 15;
+const VIDEO_HOVER_PREVIEW_MAX_FPS: u32 = 30;
 const VIDEO_HOVER_PREVIEW_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 type SharedFfmpegChild = Arc<Mutex<Option<FfmpegChild>>>;
@@ -296,6 +296,10 @@ fn run_video_hover_preview_worker(
     child: &SharedFfmpegChild,
     shared: &VideoHoverPreviewShared,
 ) {
+    if cancel.load(Ordering::Relaxed) {
+        shared.finished.store(true, Ordering::Relaxed);
+        return;
+    }
     let mut ffmpeg = match spawn_video_hover_preview_ffmpeg(path, size) {
         Ok(ffmpeg) => ffmpeg,
         Err(_) => {
@@ -314,8 +318,9 @@ fn run_video_hover_preview_worker(
             return;
         }
     };
-    if let Ok(mut child_slot) = child.lock() {
-        *child_slot = Some(ffmpeg);
+    if !register_video_hover_preview_child(child, cancel, ffmpeg) {
+        shared.finished.store(true, Ordering::Relaxed);
+        return;
     }
 
     let mut failed = false;
@@ -353,9 +358,11 @@ fn run_video_hover_preview_worker(
         }
     }
 
-    if let Ok(mut child_slot) = child.lock()
-        && let Some(mut ffmpeg) = child_slot.take()
-    {
+    let ffmpeg = child
+        .lock()
+        .ok()
+        .and_then(|mut child_slot| child_slot.take());
+    if let Some(mut ffmpeg) = ffmpeg {
         if cancel.load(Ordering::Relaxed) || failed {
             let _ = ffmpeg.kill();
         }
@@ -366,6 +373,24 @@ fn run_video_hover_preview_worker(
         shared.failed.store(true, Ordering::Relaxed);
     }
     shared.finished.store(true, Ordering::Relaxed);
+}
+
+fn register_video_hover_preview_child(
+    child: &SharedFfmpegChild,
+    cancel: &AtomicBool,
+    mut ffmpeg: FfmpegChild,
+) -> bool {
+    // Cancellation may have found an empty slot while FFmpeg was starting.
+    if let Ok(mut child_slot) = child.lock()
+        && !cancel.load(Ordering::Relaxed)
+    {
+        *child_slot = Some(ffmpeg);
+        return true;
+    }
+
+    let _ = ffmpeg.kill();
+    let _ = ffmpeg.wait();
+    false
 }
 
 fn spawn_video_hover_preview_ffmpeg(path: &Path, size: u32) -> Result<FfmpegChild, String> {
@@ -386,7 +411,6 @@ pub(super) fn video_hover_preview_ffmpeg_args(path: &Path, size: u32) -> Vec<OsS
     vec![
         OsString::from("-stream_loop"),
         OsString::from("-1"),
-        OsString::from("-re"),
         OsString::from("-i"),
         crate::os_paths::native_path(path),
         OsString::from("-map"),
@@ -395,7 +419,7 @@ pub(super) fn video_hover_preview_ffmpeg_args(path: &Path, size: u32) -> Vec<OsS
         OsString::from("-sn"),
         OsString::from("-dn"),
         OsString::from("-vf"),
-        OsString::from(video_hover_preview_filter(size, VIDEO_HOVER_PREVIEW_FPS)),
+        OsString::from(video_hover_preview_filter(size)),
         OsString::from("-f"),
         OsString::from("rawvideo"),
         OsString::from("-pix_fmt"),
@@ -404,9 +428,13 @@ pub(super) fn video_hover_preview_ffmpeg_args(path: &Path, size: u32) -> Vec<OsS
     ]
 }
 
-pub(super) fn video_hover_preview_filter(size: u32, fps: u32) -> String {
+fn video_hover_preview_filter(size: u32) -> String {
+    let max_fps = VIDEO_HOVER_PREVIEW_MAX_FPS;
+    // Fit square pixels to the display aspect ratio in one resize, then pace the output.
     format!(
-        "fps={fps},scale=trunc(iw*sar):ih,scale={size}:{size}:force_original_aspect_ratio=decrease:flags=fast_bilinear,setsar=1"
+        "fps='if(gt(source_fps,0),min(source_fps,{max_fps}),{max_fps})',\
+         scale=w='if(gte(dar,1),{size},max(1,round({size}*dar)))':\
+         h='if(gte(dar,1),max(1,round({size}/dar)),{size})':flags=fast_bilinear,setsar=1,realtime"
     )
 }
 
@@ -484,6 +512,23 @@ mod tests {
     use super::*;
     use crate::explorer::image_thumbnails::ThumbnailSourcePolicy;
 
+    #[test]
+    fn cancelling_during_startup_rejects_the_new_ffmpeg_child() {
+        if !crate::explorer::video::ffmpeg_is_installed() {
+            return;
+        }
+        let child = Arc::new(Mutex::new(None));
+        let cancel = AtomicBool::new(false);
+        let ffmpeg = FfmpegCommand::new_with_path(ffmpeg_executable_path())
+            .arg("-version")
+            .spawn()
+            .unwrap();
+
+        cancel.store(true, Ordering::Relaxed);
+        assert!(!register_video_hover_preview_child(&child, &cancel, ffmpeg));
+        assert!(child.lock().unwrap().is_none());
+    }
+
     #[gpui::test]
     fn releasing_alt_cancels_video_session_and_rejects_late_frames(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, cx| {
@@ -510,10 +555,13 @@ mod tests {
                     failed: false,
                 });
                 assert!(view.video_hover_preview_matches(&path, 1));
+                view.video_hover_preview.as_mut().unwrap().generation = 2;
+                assert!(!view.video_hover_preview_matches(&path, 1));
+                assert!(view.video_hover_preview_matches(&path, 2));
                 view.handle_hover_preview_modifiers(gpui::Modifiers::default(), cx);
                 assert!(cancel.load(Ordering::Relaxed));
                 assert!(view.video_hover_preview.is_none());
-                assert!(!view.video_hover_preview_matches(&path, 1));
+                assert!(!view.video_hover_preview_matches(&path, 2));
             });
         });
     }
@@ -548,10 +596,12 @@ mod tests {
     }
 
     #[test]
-    fn video_hover_preview_filter_caps_size_and_corrects_sar() {
+    fn video_hover_preview_filter_limits_cadence_and_paces_scaled_frames() {
         assert_eq!(
-            video_hover_preview_filter(400, 15),
-            "fps=15,scale=trunc(iw*sar):ih,scale=400:400:force_original_aspect_ratio=decrease:flags=fast_bilinear,setsar=1"
+            video_hover_preview_filter(400),
+            "fps='if(gt(source_fps,0),min(source_fps,30),30)',\
+             scale=w='if(gte(dar,1),400,max(1,round(400*dar)))':\
+             h='if(gte(dar,1),max(1,round(400/dar)),400)':flags=fast_bilinear,setsar=1,realtime"
         );
     }
 
@@ -565,13 +615,16 @@ mod tests {
 
         assert!(args.windows(2).any(|args| args == ["-stream_loop", "-1"]));
         assert!(args.windows(2).any(|args| args == ["-map", "0:v:0"]));
-        assert!(args.contains(&"-re".to_owned()));
+        assert!(!args.contains(&"-re".to_owned()));
         assert!(args.contains(&"-an".to_owned()));
         assert!(args.contains(&"-sn".to_owned()));
         assert!(args.contains(&"-dn".to_owned()));
         assert!(args.windows(2).any(|args| args == ["-f", "rawvideo"]));
         assert!(args.windows(2).any(|args| args == ["-pix_fmt", "bgra"]));
-        assert!(args.iter().any(|arg| arg.contains("scale=720:720")));
+        assert!(
+            args.windows(2)
+                .any(|args| args == ["-vf", &video_hover_preview_filter(720)])
+        );
         assert_eq!(args.last().map(String::as_str), Some("-"));
         assert!(!args.contains(&"-v".to_owned()));
     }
