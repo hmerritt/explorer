@@ -1078,6 +1078,12 @@ impl ExplorerView {
     ) -> Option<AnyElement> {
         let menu = self.open_utility_menu?;
         let left = utility_menu_left(menu, sidebar_auto_hide_active, self.is_trash_view());
+        let host_offset = if self.shared_chrome_hosted {
+            TITLEBAR_HEIGHT
+        } else {
+            0.0
+        };
+        let top = host_offset + NAVBAR_HEIGHT + UTILITY_BAR_HEIGHT - 2.0;
 
         let menu = match menu {
             UtilityMenu::New => utility_dropdown()
@@ -1230,11 +1236,7 @@ impl ExplorerView {
                 .top(px(0.0))
                 .size_full()
                 .child(click_catcher)
-                .child(
-                    menu.absolute()
-                        .left(px(left))
-                        .top(px(NAVBAR_HEIGHT + UTILITY_BAR_HEIGHT - 2.0)),
-                )
+                .child(menu.absolute().left(px(left)).top(px(top)))
                 .into_any_element(),
         )
     }
@@ -5795,6 +5797,7 @@ fn utility_separator() -> Div {
 
 fn utility_dropdown() -> Div {
     div()
+        .debug_selector(|| "utility-menu".into())
         .w(px(UTILITY_MENU_WIDTH))
         .py(px(4.0))
         .rounded(px(6.0))

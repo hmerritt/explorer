@@ -3447,7 +3447,7 @@ mod tests {
         git_status::GitRepositoryStatus,
         remote_transfer::{JobSnapshot, State as TransferState},
         test_support::{TempDir, selected_names},
-        view::{PendingPermanentDelete, PendingTrash, tab_label_for_path},
+        view::{PendingPermanentDelete, PendingTrash, UtilityMenu, tab_label_for_path},
     };
     use crate::settings::{ExplorerSettings, SettingsState};
     use git2::Repository;
@@ -8221,6 +8221,43 @@ mod tests {
             assert_eq!(tabs.tabs[3].active_view().entity_id(), right_entity);
             assert_eq!(tabs.tabs[3].active_view().read(cx).path(), right_path);
         });
+    }
+
+    #[gpui::test]
+    fn hosted_utility_menus_render_below_their_toolbar_buttons(cx: &mut TestAppContext) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (_temp, tabs, cx) = test_tabs_with_directories(cx, &[]);
+        let view = active_test_view(&tabs, cx);
+        cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+        cx.run_until_parked();
+
+        for (selector, expected_menu) in [
+            ("utility-new", UtilityMenu::New),
+            ("utility-view", UtilityMenu::View),
+        ] {
+            let button = cx.debug_bounds(selector).expect("toolbar button bounds");
+            cx.simulate_click(button.center(), Modifiers::default());
+            cx.run_until_parked();
+            cx.read_entity(&view, |view, _| {
+                assert_eq!(view.open_utility_menu, Some(expected_menu));
+            });
+
+            let menu = cx
+                .debug_bounds("utility-menu")
+                .expect("utility menu bounds");
+            let gap = menu.top() - button.bottom();
+            assert!(
+                gap >= px(0.0) && gap <= px(8.0),
+                "{selector}: button {button:?}, menu {menu:?}"
+            );
+            assert!((menu.left() - button.left()).abs() <= px(16.0));
+
+            cx.simulate_click(gpui::point(px(950.0), px(500.0)), Modifiers::default());
+            cx.run_until_parked();
+            cx.read_entity(&view, |view, _| {
+                assert!(view.open_utility_menu.is_none(), "{selector}");
+            });
+        }
     }
 
     #[gpui::test]
