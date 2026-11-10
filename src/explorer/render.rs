@@ -110,6 +110,7 @@ use crate::explorer::{
         SidebarDragIdentity, SidebarItem, SidebarItemKind, sidebar_hidden_item, sidebar_order_item,
     },
     sidebar_group_view::{drive_capacity_text, used_capacity_fraction},
+    sidebar_tree::{SidebarTreeKey, sidebar_item_can_expand, sidebar_tree_roots},
     text_hover_preview::{
         HoverPreviewKind, TEXT_HOVER_PREVIEW_LINE_HEIGHT, TEXT_HOVER_PREVIEW_PADDING,
         TEXT_HOVER_PREVIEW_TEXT_SIZE, TextHoverPreviewContent, TextHoverPreviewLookup,
@@ -189,9 +190,12 @@ const IMAGE_HOVER_PREVIEW_OFFSET_X: f32 = 4.0;
 const IMAGE_HOVER_PREVIEW_OFFSET_Y: f32 = 4.0;
 const IMAGE_HOVER_PREVIEW_RADIUS: f32 = 15.0;
 
-#[derive(Clone, Copy)]
 enum SidebarItemPresentation {
-    Row { content_indent: f32 },
+    Row {
+        content_indent: f32,
+        nested: bool,
+        chevron: Option<(SidebarTreeKey, bool)>,
+    },
     UtilityIcon,
 }
 
@@ -299,6 +303,7 @@ const UTILITY_ICON_CHECK: &str = "\u{E73E}";
 const UTILITY_TEXT_BUTTON_ICON_SIZE: f32 = 16.0;
 const SIDEBAR_AUTO_HIDE_MAX_WINDOW_FRACTION: f32 = 0.40;
 const SIDEBAR_GROUP_CHILD_INDENT: f32 = 28.0;
+const SIDEBAR_FOLDER_INDENT: f32 = 14.0;
 const SIDEBAR_GROUP_GAP: f32 = 14.0;
 const SIDEBAR_COLLAPSED_GROUP_GAP: f32 = 4.0;
 const SIDEBAR_GROUP_LABEL_Y_OFFSET: f32 = 1.0;
@@ -1911,7 +1916,10 @@ impl ExplorerView {
             ));
 
             if expanded {
-                for (index, item) in sections.user_directories.iter().cloned().enumerate() {
+                for (index, root @ (_, item)) in
+                    sidebar_tree_roots(SidebarGroupKind::Pinned, &sections.user_directories)
+                        .enumerate()
+                {
                     if item.kind == SidebarItemKind::Directory(DirectoryKind::Bin)
                         || super::trash::is_root(&item.path)
                     {
@@ -1926,13 +1934,7 @@ impl ExplorerView {
                             cx,
                         ),
                     );
-                    children.push(self.render_sidebar_row(
-                        index,
-                        item,
-                        SidebarGroupKind::Pinned,
-                        SIDEBAR_GROUP_CHILD_INDENT,
-                        cx,
-                    ));
+                    self.render_sidebar_branch(index, root, 0, &mut children, cx);
                 }
 
                 let final_insertion_index = sections
@@ -1969,17 +1971,13 @@ impl ExplorerView {
 
             if expanded {
                 children.push(sidebar_item_gap().into_any_element());
-                for (index, item) in sections.drives.iter().cloned().enumerate() {
+                for (index, root) in
+                    sidebar_tree_roots(SidebarGroupKind::Drives, &sections.drives).enumerate()
+                {
                     if index > 0 {
                         children.push(sidebar_item_gap().into_any_element());
                     }
-                    children.push(self.render_sidebar_row(
-                        index + 2_000,
-                        item,
-                        SidebarGroupKind::Drives,
-                        SIDEBAR_GROUP_CHILD_INDENT,
-                        cx,
-                    ));
+                    self.render_sidebar_branch(index + 2_000, root, 0, &mut children, cx);
                 }
             }
             previous_group_expanded = Some(expanded);
@@ -2003,17 +2001,14 @@ impl ExplorerView {
 
             if expanded {
                 children.push(sidebar_item_gap().into_any_element());
-                for (index, item) in sections.network_drives.iter().cloned().enumerate() {
+                for (index, root) in
+                    sidebar_tree_roots(SidebarGroupKind::Network, &sections.network_drives)
+                        .enumerate()
+                {
                     if index > 0 {
                         children.push(sidebar_item_gap().into_any_element());
                     }
-                    children.push(self.render_sidebar_row(
-                        index + 3_000,
-                        item,
-                        SidebarGroupKind::Network,
-                        SIDEBAR_GROUP_CHILD_INDENT,
-                        cx,
-                    ));
+                    self.render_sidebar_branch(index + 3_000, root, 0, &mut children, cx);
                 }
             }
             #[cfg(target_os = "windows")]
@@ -2040,17 +2035,13 @@ impl ExplorerView {
 
             if expanded {
                 children.push(sidebar_item_gap().into_any_element());
-                for (index, item) in sections.wsl_drives.iter().cloned().enumerate() {
+                for (index, root) in
+                    sidebar_tree_roots(SidebarGroupKind::Wsl, &sections.wsl_drives).enumerate()
+                {
                     if index > 0 {
                         children.push(sidebar_item_gap().into_any_element());
                     }
-                    children.push(self.render_sidebar_row(
-                        index + 4_000,
-                        item,
-                        SidebarGroupKind::Wsl,
-                        SIDEBAR_GROUP_CHILD_INDENT,
-                        cx,
-                    ));
+                    self.render_sidebar_branch(index + 4_000, root, 0, &mut children, cx);
                 }
             }
         }
@@ -2082,7 +2073,7 @@ impl ExplorerView {
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_hidden()
+                    .overflow_y_scroll()
                     .children(children),
             )
             .child(self.render_sidebar_lower_section(cx))
@@ -2284,6 +2275,7 @@ impl ExplorerView {
             .flex_row()
             .items_center()
             .h(px(SIDEBAR_ROW_HEIGHT))
+            .flex_shrink_0()
             .mx(px(8.0))
             .px(px(4.0))
             .rounded(px(4.0))
@@ -2396,21 +2388,46 @@ impl ExplorerView {
             .into_any_element()
     }
 
-    fn render_sidebar_row(
+    fn render_sidebar_branch(
         &self,
         id: usize,
-        item: SidebarItem,
-        group: SidebarGroupKind,
-        content_indent: f32,
+        (key, item): (SidebarTreeKey, &SidebarItem),
+        depth: usize,
+        rows: &mut Vec<AnyElement>,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.render_sidebar_item(
+    ) {
+        let visibility = self.entry_visibility();
+        let can_expand = sidebar_item_can_expand(item);
+        let chevron = can_expand
+            .then(|| self.sidebar_tree.chevron(&key, visibility))
+            .flatten()
+            .map(|expanded| (key.clone(), expanded));
+        let max_indent = (self.sidebar_width - 66.0).max(SIDEBAR_GROUP_CHILD_INDENT);
+        let content_indent =
+            (SIDEBAR_GROUP_CHILD_INDENT + depth as f32 * SIDEBAR_FOLDER_INDENT).min(max_indent);
+        rows.push(self.render_sidebar_item(
             id,
-            item,
-            group,
-            SidebarItemPresentation::Row { content_indent },
+            item.clone(),
+            key.group(),
+            SidebarItemPresentation::Row {
+                content_indent,
+                nested: depth > 0,
+                chevron,
+            },
             cx,
-        )
+        ));
+        if can_expand {
+            for child in self.sidebar_tree.children(&key, visibility) {
+                rows.push(sidebar_item_gap().into_any_element());
+                self.render_sidebar_branch(
+                    child.row_id,
+                    (key.child(&child.item.path), &child.item),
+                    depth + 1,
+                    rows,
+                    cx,
+                );
+            }
+        }
     }
 
     fn render_sidebar_item(
@@ -2427,14 +2444,21 @@ impl ExplorerView {
         let path = item.path.clone();
         let icon_item = item.clone();
         let configured_index = item.configured_index;
-        let drag_identity = configured_index
-            .map(SidebarDragIdentity::Pinned)
-            .unwrap_or_else(|| SidebarDragIdentity::Ordered {
-                group,
-                item: sidebar_order_item(&item),
-            });
-        let is_dragging =
-            sidebar_item_is_dragging(&drag_identity, self.dragging_sidebar_item.as_ref());
+        let nested = matches!(
+            &presentation,
+            SidebarItemPresentation::Row { nested: true, .. }
+        );
+        let drag_identity = (!nested).then(|| {
+            configured_index
+                .map(SidebarDragIdentity::Pinned)
+                .unwrap_or_else(|| SidebarDragIdentity::Ordered {
+                    group,
+                    item: sidebar_order_item(&item),
+                })
+        });
+        let is_dragging = drag_identity.as_ref().is_some_and(|identity| {
+            sidebar_item_is_dragging(identity, self.dragging_sidebar_item.as_ref())
+        });
         let accepts_directory_drop = !super::trash::is_root(&path)
             && matches!(
                 item.kind,
@@ -2457,18 +2481,24 @@ impl ExplorerView {
 
         let click_path = path.clone();
         let middle_click_path = path.clone();
-        let context_menu_target = sidebar_context_menu_target(&item);
+        let context_menu_target = if nested {
+            (path.clone(), None, None, None, false)
+        } else {
+            sidebar_context_menu_target(&item)
+        };
         let context_menu_active = sidebar_context_menu_is_active(self.context_menu.as_ref(), id);
+        let debug_id = match &presentation {
+            SidebarItemPresentation::Row { .. } => format!("explorer-sidebar-row-{id}"),
+            SidebarItemPresentation::UtilityIcon => "explorer-sidebar-bin".to_owned(),
+        };
         let row = div()
             .id(("explorer-sidebar-row", id))
-            .debug_selector(move || match presentation {
-                SidebarItemPresentation::Row { .. } => format!("explorer-sidebar-row-{id}"),
-                SidebarItemPresentation::UtilityIcon => "explorer-sidebar-bin".to_owned(),
-            })
+            .debug_selector(move || debug_id.clone())
             .flex()
             .flex_row()
             .items_center()
             .h(px(SIDEBAR_ROW_HEIGHT))
+            .flex_shrink_0()
             .rounded(px(4.0))
             .cursor_default()
             .when(is_dragging, |this| this.opacity(0.4))
@@ -2520,10 +2550,45 @@ impl ExplorerView {
                 }),
             );
         let mut row = match presentation {
-            SidebarItemPresentation::Row { content_indent } => row
+            SidebarItemPresentation::Row {
+                content_indent,
+                chevron,
+                ..
+            } => row
                 .mx(px(8.0))
                 .px(px(SIDEBAR_HORIZONTAL_PADDING))
-                .child(div().w(px(content_indent)).h(px(1.0)).flex_shrink_0())
+                .child(
+                    div()
+                        .w(px(content_indent - SIDEBAR_FOLDER_INDENT))
+                        .flex_shrink_0(),
+                )
+                .child(
+                    div()
+                        .id("chevron")
+                        .w(px(SIDEBAR_FOLDER_INDENT))
+                        .h_full()
+                        .flex_shrink_0()
+                        .when_some(chevron, |this, (key, expanded)| {
+                            this.debug_selector(move || {
+                                format!("explorer-sidebar-row-{id}-chevron")
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .font(nav_icon_font())
+                            .text_size(px(7.0))
+                            .text_color(rgb(0x606060))
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
+                                view.toggle_sidebar_folder(key.clone(), cx);
+                                cx.stop_propagation();
+                            }))
+                            .child(if expanded {
+                                SIDEBAR_GROUP_CHEVRON_DOWN
+                            } else {
+                                SIDEBAR_GROUP_CHEVRON_RIGHT
+                            })
+                        }),
+                )
                 .child(sidebar_item_icon(&icon_item))
                 .child(
                     div()
@@ -2563,120 +2628,122 @@ impl ExplorerView {
             }),
         );
 
-        let drag_label = SharedString::from(item.label.clone());
-        let drag_path = item.path.clone();
-        let drag_kind = item.kind;
-        let target_drag_identity = drag_identity.clone();
-        row = row
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if this.dragging_sidebar_item.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    if this.dragging_sidebar_item.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_drag(
-                SidebarItemDrag {
-                    identity: drag_identity,
-                    label: drag_label,
-                    path: drag_path,
-                    kind: drag_kind,
-                },
-                {
-                    let entity = entity.clone();
-                    move |drag, _, _, cx| {
-                        let width = entity.update(cx, |this, cx| {
-                            this.dragging_sidebar_item = Some(drag.identity.clone());
+        if let Some(drag_identity) = drag_identity {
+            let drag_label = SharedString::from(item.label.clone());
+            let drag_path = item.path.clone();
+            let drag_kind = item.kind;
+            let target_drag_identity = drag_identity.clone();
+            row = row
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if this.dragging_sidebar_item.take().is_some() {
                             cx.notify();
-                            this.sidebar_width
-                        });
-                        let font = entity.read(cx).font.clone();
-                        cx.new(move |_| SidebarItemDragPreview {
-                            label: drag.label.clone(),
-                            path: drag.path.clone(),
-                            kind: drag.kind,
-                            width,
-                            font,
-                        })
-                    }
-                },
-            )
-            .on_drag_move::<SidebarItemDrag>({
-                let entity = entity.clone();
-                move |event: &DragMoveEvent<SidebarItemDrag>, _, cx| {
-                    if !event.bounds.contains(&event.event.position) {
-                        return;
-                    }
-                    let top = f32::from(event.bounds.origin.y);
-                    let height = f32::from(event.bounds.size.height);
-                    let cursor_y = f32::from(event.event.position.y);
-                    let before = cursor_y < top + (height / 2.0);
-                    let fallback_source = event.drag(cx).identity.clone();
-
-                    let _ = entity.update(cx, |this, cx| {
-                        let source = this
-                            .dragging_sidebar_item
-                            .clone()
-                            .unwrap_or(fallback_source);
-                        match (&source, &target_drag_identity) {
-                            (
-                                SidebarDragIdentity::Pinned(source_index),
-                                SidebarDragIdentity::Pinned(target_index),
-                            ) => {
-                                if let Some(new_index) = crate::settings::reorder_sidebar_item(
-                                    *source_index,
-                                    *target_index,
-                                    before,
-                                    cx,
-                                ) {
-                                    this.dragging_sidebar_item =
-                                        Some(SidebarDragIdentity::Pinned(new_index));
-                                    cx.notify();
-                                }
-                            }
-                            (
-                                SidebarDragIdentity::Ordered {
-                                    group: source_group,
-                                    item: source_item,
-                                },
-                                SidebarDragIdentity::Ordered {
-                                    group: target_group,
-                                    item: target_item,
-                                },
-                            ) if source_group == target_group => {
-                                let visible_items =
-                                    crate::explorer::sidebar_group_view::sidebar_group_items(
-                                        *source_group,
-                                        &this.sidebar_sections,
-                                    )
-                                    .iter()
-                                    .map(sidebar_order_item)
-                                    .collect::<Vec<_>>();
-                                if crate::settings::reorder_sidebar_group_item(
-                                    *source_group,
-                                    source_item,
-                                    target_item,
-                                    before,
-                                    &visible_items,
-                                    cx,
-                                ) {
-                                    cx.notify();
-                                }
-                            }
-                            _ => {}
                         }
-                    });
-                }
-            });
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if this.dragging_sidebar_item.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_drag(
+                    SidebarItemDrag {
+                        identity: drag_identity,
+                        label: drag_label,
+                        path: drag_path,
+                        kind: drag_kind,
+                    },
+                    {
+                        let entity = entity.clone();
+                        move |drag, _, _, cx| {
+                            let width = entity.update(cx, |this, cx| {
+                                this.dragging_sidebar_item = Some(drag.identity.clone());
+                                cx.notify();
+                                this.sidebar_width
+                            });
+                            let font = entity.read(cx).font.clone();
+                            cx.new(move |_| SidebarItemDragPreview {
+                                label: drag.label.clone(),
+                                path: drag.path.clone(),
+                                kind: drag.kind,
+                                width,
+                                font,
+                            })
+                        }
+                    },
+                )
+                .on_drag_move::<SidebarItemDrag>({
+                    let entity = entity.clone();
+                    move |event: &DragMoveEvent<SidebarItemDrag>, _, cx| {
+                        if !event.bounds.contains(&event.event.position) {
+                            return;
+                        }
+                        let top = f32::from(event.bounds.origin.y);
+                        let height = f32::from(event.bounds.size.height);
+                        let cursor_y = f32::from(event.event.position.y);
+                        let before = cursor_y < top + (height / 2.0);
+                        let fallback_source = event.drag(cx).identity.clone();
+
+                        let _ = entity.update(cx, |this, cx| {
+                            let source = this
+                                .dragging_sidebar_item
+                                .clone()
+                                .unwrap_or(fallback_source);
+                            match (&source, &target_drag_identity) {
+                                (
+                                    SidebarDragIdentity::Pinned(source_index),
+                                    SidebarDragIdentity::Pinned(target_index),
+                                ) => {
+                                    if let Some(new_index) = crate::settings::reorder_sidebar_item(
+                                        *source_index,
+                                        *target_index,
+                                        before,
+                                        cx,
+                                    ) {
+                                        this.dragging_sidebar_item =
+                                            Some(SidebarDragIdentity::Pinned(new_index));
+                                        cx.notify();
+                                    }
+                                }
+                                (
+                                    SidebarDragIdentity::Ordered {
+                                        group: source_group,
+                                        item: source_item,
+                                    },
+                                    SidebarDragIdentity::Ordered {
+                                        group: target_group,
+                                        item: target_item,
+                                    },
+                                ) if source_group == target_group => {
+                                    let visible_items =
+                                        crate::explorer::sidebar_group_view::sidebar_group_items(
+                                            *source_group,
+                                            &this.sidebar_sections,
+                                        )
+                                        .iter()
+                                        .map(sidebar_order_item)
+                                        .collect::<Vec<_>>();
+                                    if crate::settings::reorder_sidebar_group_item(
+                                        *source_group,
+                                        source_item,
+                                        target_item,
+                                        before,
+                                        &visible_items,
+                                        cx,
+                                    ) {
+                                        cx.notify();
+                                    }
+                                }
+                                _ => {}
+                            }
+                        });
+                    }
+                });
+        }
 
         if accepts_directory_drop {
             row = row
@@ -10968,6 +11035,167 @@ mod tests {
                 assert_eq!(network_top, collapsed_network_top);
             }
         }
+    }
+
+    #[gpui::test]
+    fn sidebar_folder_chevrons_expand_nested_rows_without_navigating(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::explorer::sidebar_tree::sidebar_tree_roots;
+
+        let temp = TempDir::new();
+        let initial = temp.path().to_path_buf();
+        let root = initial.join("Pinned folder");
+        let child = root.join("Child");
+        let grandchild = child.join("Grandchild");
+        std::fs::create_dir_all(&grandchild).unwrap();
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.pinned = vec![root.clone()];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+
+        let start = initial.clone();
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window);
+            ExplorerView::new_with_settings_for_test(start, Some(focus), &settings)
+        });
+        cx.run_until_parked();
+
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str, button| {
+            let position = cx.debug_bounds(selector).expect(selector).center();
+            cx.simulate_mouse_down(position, button, Modifiers::default());
+            cx.simulate_mouse_up(position, button, Modifiers::default());
+            cx.run_until_parked();
+        };
+        click(cx, "explorer-sidebar-row-0-chevron", MouseButton::Left);
+        let (root_key, child_id) = cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path(), initial);
+            assert!(view.back_stack.is_empty());
+            let (root_key, _) = sidebar_tree_roots(
+                SidebarGroupKind::Pinned,
+                &view.sidebar_sections.user_directories,
+            )
+            .next()
+            .unwrap();
+            let children = view
+                .sidebar_tree
+                .children(&root_key, view.entry_visibility());
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].item.path, child);
+            (root_key, children[0].row_id)
+        });
+        let child_chevron = format!("explorer-sidebar-row-{child_id}-chevron").leak();
+        let child_bounds = cx.debug_bounds(child_chevron).unwrap();
+        assert!(
+            child_bounds.origin.x
+                > cx.debug_bounds("explorer-sidebar-row-0-chevron")
+                    .unwrap()
+                    .origin
+                    .x
+        );
+        click(cx, child_chevron, MouseButton::Left);
+
+        let child_key = root_key.child(&child);
+        let grandchild_id = cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path(), initial);
+            assert!(view.back_stack.is_empty());
+            let children = view
+                .sidebar_tree
+                .children(&child_key, view.entry_visibility());
+            assert_eq!(children[0].item.path, grandchild);
+            children[0].row_id
+        });
+        click(cx, "explorer-sidebar-row-0-chevron", MouseButton::Left);
+        cx.read_entity(&view, |view, _| {
+            assert!(
+                view.sidebar_tree
+                    .children(&root_key, view.entry_visibility())
+                    .is_empty()
+            );
+        });
+        click(cx, "explorer-sidebar-row-0-chevron", MouseButton::Left);
+        cx.read_entity(&view, |view, _| {
+            let children = view
+                .sidebar_tree
+                .children(&child_key, view.entry_visibility());
+            assert_eq!(children[0].row_id, grandchild_id);
+        });
+
+        let grandchild_row = format!("explorer-sidebar-row-{grandchild_id}").leak();
+        click(cx, grandchild_row, MouseButton::Right);
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().unwrap();
+            assert_eq!(menu.items.len(), 2);
+            assert!(matches!(&menu.items[0], ContextMenuItem::Action {
+                command: ContextMenuCommand::OpenDirectory { path }, ..
+            } if path == &grandchild));
+        });
+        click(cx, "explorer-sidebar-row-0", MouseButton::Right);
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().unwrap();
+            assert!(menu.items.iter().any(|item| matches!(
+                item,
+                ContextMenuItem::Action {
+                    command: ContextMenuCommand::UnpinSidebar {
+                        configured_index: 0
+                    },
+                    ..
+                }
+            )));
+        });
+        cx.update_entity(&view, |view, cx| {
+            view.close_context_menu();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click(cx, grandchild_row, MouseButton::Left);
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(view.path(), grandchild);
+            assert_eq!(view.back_stack.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_folder_rows_scroll_independently_of_the_bottom_controls(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let path = temp.path().to_path_buf();
+        let root = path.join("Pinned folder");
+        for index in 0..40 {
+            std::fs::create_dir_all(root.join(format!("Folder {index}"))).unwrap();
+        }
+        let mut settings = crate::settings::ExplorerSettings::default();
+        settings.sidebar.pinned = vec![root];
+        cx.set_global(SettingsState::for_test(settings.clone()));
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window);
+            ExplorerView::new_with_settings_for_test(path, Some(focus), &settings)
+        });
+        cx.run_until_parked();
+        let chevron = cx
+            .debug_bounds("explorer-sidebar-row-0-chevron")
+            .unwrap()
+            .center();
+        cx.simulate_mouse_down(chevron, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(chevron, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let row = "explorer-sidebar-row-0";
+        let row_before = cx.debug_bounds(row).unwrap();
+        let settings_button = "explorer-sidebar-settings";
+        let settings_before = cx.debug_bounds(settings_button).unwrap();
+        let position = cx.debug_bounds("explorer-sidebar-items").unwrap().center();
+        cx.simulate_mouse_move(position, None::<MouseButton>, Modifiers::default());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-120.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(row).unwrap().origin.y < row_before.origin.y);
+        assert_eq!(cx.debug_bounds(settings_button).unwrap(), settings_before);
     }
 
     #[gpui::test]

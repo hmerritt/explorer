@@ -55,6 +55,7 @@ use crate::explorer::{
         SidebarGroupViewState, query_drive_capacities, sidebar_group_entries, sidebar_group_items,
         sidebar_group_label,
     },
+    sidebar_tree::SidebarTree,
     sorting::sort_entries,
     text_hover_preview::TextHoverPreviewSession,
     video_hover_preview::VideoHoverPreviewSession,
@@ -240,6 +241,7 @@ pub struct ExplorerView {
     pub(super) portable_hotplug_task: Option<Task<()>>,
     pub(super) sidebar_settings: SidebarSettings,
     pub(super) sidebar_sections: SidebarSections,
+    pub(super) sidebar_tree: SidebarTree,
     pub(super) sidebar_group_view: Option<SidebarGroupViewState>,
     pub(super) shell_shortcut_resolution_generation: u64,
     pub(super) shell_shortcut_resolution_task: Option<Task<()>>,
@@ -725,6 +727,7 @@ impl ExplorerView {
             portable_hotplug_task: None,
             sidebar_settings: settings.sidebar.clone(),
             sidebar_sections: sidebar_sections(&settings.sidebar, &filesystem_name),
+            sidebar_tree: SidebarTree::default(),
             sidebar_group_view: None,
             shell_shortcut_resolution_generation: 0,
             shell_shortcut_resolution_task: None,
@@ -841,8 +844,7 @@ impl ExplorerView {
 
         if self.is_sidebar_group_view() {
             self.invalidate_recursive_search_cache();
-            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
-            self.rebuild_active_sidebar_group_items(true);
+            self.rebuild_fast_sidebar_sections();
             self.schedule_sidebar_group_capacities(cx);
         } else if visibility_changed {
             self.invalidate_recursive_search_cache();
@@ -887,6 +889,9 @@ impl ExplorerView {
             self.view_mode = mode;
             self.apply_file_sort_preserving_selection();
             self.apply_trash_location_sort();
+        }
+        if visibility_changed {
+            self.refresh_sidebar_folders(cx);
         }
         cx.notify();
     }
@@ -1003,7 +1008,10 @@ impl ExplorerView {
 
         if mode.rebuild_sidebar {
             let sidebar_started = Instant::now();
-            self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
+            self.replace_sidebar_sections(sidebar_sections(
+                &self.sidebar_settings,
+                &self.filesystem_name,
+            ));
             crate::debug_options::log_nav_timing(
                 sidebar_started.elapsed(),
                 format_args!("reload.sidebar_sections path={:?}", self.path),
@@ -1425,8 +1433,18 @@ impl ExplorerView {
     }
 
     fn rebuild_fast_sidebar_sections(&mut self) {
-        self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
+        self.replace_sidebar_sections(sidebar_sections(
+            &self.sidebar_settings,
+            &self.filesystem_name,
+        ));
         self.rebuild_active_sidebar_group_items(true);
+    }
+
+    fn replace_sidebar_sections(&mut self, sections: SidebarSections) {
+        if sections != self.sidebar_sections {
+            self.sidebar_tree.reconcile_roots(&sections);
+            self.sidebar_sections = sections;
+        }
     }
 
     pub(super) fn active_sidebar_group(&self) -> Option<SidebarGroupKind> {
@@ -1515,8 +1533,7 @@ impl ExplorerView {
         if self.sidebar_group_view.is_none() {
             return;
         }
-        self.sidebar_sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
-        self.rebuild_active_sidebar_group_items(true);
+        self.rebuild_fast_sidebar_sections();
         self.schedule_sidebar_group_capacities(cx);
     }
 
@@ -1551,7 +1568,7 @@ impl ExplorerView {
 
         if let Some(sidebar_sections) = result.sidebar_sections {
             changed |= self.sidebar_sections != sidebar_sections;
-            self.sidebar_sections = sidebar_sections;
+            self.replace_sidebar_sections(sidebar_sections);
         }
 
         let reveal_selection_after_load = !state.select_after_load.is_empty();
@@ -2264,7 +2281,7 @@ impl ExplorerView {
     fn refresh_device_catalog(&mut self, cx: &mut Context<Self>) {
         let sections = sidebar_sections(&self.sidebar_settings, &self.filesystem_name);
         if sections != self.sidebar_sections {
-            self.sidebar_sections = sections;
+            self.replace_sidebar_sections(sections);
             if self.is_sidebar_group_view() {
                 self.rebuild_active_sidebar_group_items(true);
                 self.schedule_sidebar_group_capacities(cx);

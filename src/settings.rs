@@ -71,7 +71,7 @@ enum SidebarItemSetting {
     Legacy(LegacySidebarLocation),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidebarGroupKind {
     Pinned,

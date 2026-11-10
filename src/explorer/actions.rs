@@ -452,6 +452,7 @@ impl ExplorerView {
         } else {
             self.refresh_with_entry_metadata_and_search_resolution(cx);
         }
+        self.refresh_sidebar_folders(cx);
         cx.notify();
     }
 

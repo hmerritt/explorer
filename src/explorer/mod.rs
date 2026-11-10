@@ -56,6 +56,7 @@ mod shortcut;
 mod shortcut_dialog;
 mod sidebar;
 mod sidebar_group_view;
+mod sidebar_tree;
 mod sorting;
 mod tabs;
 #[cfg(test)]
