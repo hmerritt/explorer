@@ -494,6 +494,10 @@ impl EditableTextState {
         self.finish_edit_group();
     }
 
+    pub(crate) fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
     pub(crate) fn undo(&mut self) -> bool {
         let Some(snapshot) = self.undo_stack.pop() else {
             self.finish_edit_group();

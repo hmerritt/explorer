@@ -397,6 +397,11 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.close_text_context_menu(ActiveTextInput::Rename) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         self.cancel_pending_click_rename();
         self.cancel_active_rename();
         self.focus_explorer(window);
@@ -866,7 +871,7 @@ impl ExplorerView {
             .and_then(|rename| rename.focus_handle.clone())
     }
 
-    fn active_text_input(&self) -> Option<ActiveTextInput> {
+    pub(super) fn active_text_input(&self) -> Option<ActiveTextInput> {
         if self.active_rename.is_some() {
             Some(ActiveTextInput::Rename)
         } else if self.active_address_bar.is_some() {
@@ -903,6 +908,7 @@ impl ExplorerView {
             return false;
         }
 
+        self.close_text_context_menu(input);
         if input == ActiveTextInput::Rename {
             self.finish_active_rename_on_focus_out(cx);
         } else if input == ActiveTextInput::Address {
@@ -1225,6 +1231,7 @@ impl ExplorerView {
     }
 
     pub(super) fn cancel_active_rename(&mut self) {
+        self.close_text_context_menu(ActiveTextInput::Rename);
         self.cancel_pending_click_rename();
         self.rename_focus_out = None;
         self.active_rename = None;
@@ -1232,6 +1239,7 @@ impl ExplorerView {
     }
 
     fn commit_active_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.close_text_context_menu(ActiveTextInput::Rename);
         let will_change_filesystem = self
             .active_rename
             .as_ref()
@@ -1248,6 +1256,7 @@ impl ExplorerView {
     }
 
     pub(super) fn finish_active_rename_on_focus_out(&mut self, cx: &mut Context<Self>) {
+        self.close_text_context_menu(ActiveTextInput::Rename);
         let will_change_filesystem = self
             .active_rename
             .as_ref()

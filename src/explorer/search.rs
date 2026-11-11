@@ -37,6 +37,7 @@ use crate::explorer::{
     },
     entry::FileEntry,
     navigation::EntryAction,
+    rename::ActiveTextInput,
     recursive_search::{
         RecursiveSearchCache, RecursiveSearchOutput, RecursiveSearchProgress,
         RecursiveSearchProgressSnapshot, recursive_search_entries,
@@ -400,6 +401,7 @@ impl ExplorerView {
     }
 
     pub(super) fn finish_search_edit(&mut self) {
+        self.close_text_context_menu(ActiveTextInput::Search);
         self.search.focus_out = None;
         self.search.focus_handle = None;
         self.search.is_selecting = false;
@@ -455,6 +457,11 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.close_text_context_menu(ActiveTextInput::Search) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         self.clear_search();
         self.finish_search_edit();
         self.focus_explorer(window);

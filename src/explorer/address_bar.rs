@@ -24,6 +24,7 @@ use crate::explorer::{
     },
     filesystem::should_hide_directory_entry,
     navigation::HistoryMode,
+    rename::ActiveTextInput,
     scrollbar::{ScrollbarDrag, ScrollbarMetrics},
     text_input::{
         EDITABLE_TEXT_SELECTION_BACKGROUND, EditableTextEditKind, EditableTextState,
@@ -202,6 +203,11 @@ impl ExplorerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.close_text_context_menu(ActiveTextInput::Address) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         self.cancel_address_bar_edit();
         self.focus_explorer(window);
         cx.stop_propagation();
@@ -568,6 +574,7 @@ impl ExplorerView {
     }
 
     pub(super) fn cancel_address_bar_edit(&mut self) {
+        self.close_text_context_menu(ActiveTextInput::Address);
         if let Some(mut address) = self.active_address_bar.take() {
             address.focus_out = None;
         }

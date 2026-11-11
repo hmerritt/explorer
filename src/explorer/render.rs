@@ -401,10 +401,28 @@ fn address_suggestions_top(shared_chrome_hosted: bool) -> f32 {
 }
 
 impl ExplorerView {
+    fn text_context_menu_contains_position(
+        &self,
+        input: ActiveTextInput,
+        position: Point<Pixels>,
+        window: &Window,
+    ) -> bool {
+        self.context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.source == Some(ContextMenuSource::TextInput(input)))
+            && context_menu_contains_window_position(self, position, window)
+    }
+
     fn context_menu_uses_shared_chrome(&self) -> bool {
         self.shared_chrome_hosted
             && self.context_menu.as_ref().is_some_and(|menu| {
-                matches!(menu.source, Some(ContextMenuSource::SidebarItem { .. }))
+                matches!(
+                    menu.source,
+                    Some(ContextMenuSource::SidebarItem { .. })
+                        | Some(ContextMenuSource::TextInput(
+                            ActiveTextInput::Address | ActiveTextInput::Search
+                        ))
+                )
             })
     }
 
@@ -559,6 +577,22 @@ impl ExplorerView {
 
         div()
             .id("search-bar")
+            .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    open_text_context_menu_from_event(
+                        this,
+                        ActiveTextInput::Search,
+                        event,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
             .debug_selector(|| "search-bar".to_owned())
             .key_context("ExplorerSearchInput")
             .on_action(cx.listener(Self::handle_move_up))
@@ -622,6 +656,7 @@ impl ExplorerView {
                 this.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.close_text_context_menu(ActiveTextInput::Search);
                         this.on_search_mouse_down(event);
                         cx.stop_propagation();
                         cx.notify();
@@ -643,7 +678,13 @@ impl ExplorerView {
                 .on_mouse_up_out(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                        if this.active_text_input_is_selecting() {
+                        if this.text_context_menu_contains_position(
+                            ActiveTextInput::Search,
+                            event.position,
+                            window,
+                        ) {
+                            return;
+                        } else if this.active_text_input_is_selecting() {
                             this.on_search_mouse_up(event);
                             cx.stop_propagation();
                             cx.notify();
@@ -5352,6 +5393,21 @@ impl ExplorerView {
     }
 }
 
+fn open_text_context_menu_from_event(
+    this: &mut ExplorerView,
+    input: ActiveTextInput,
+    event: &MouseUpEvent,
+    window: &mut Window,
+    cx: &mut Context<ExplorerView>,
+) {
+    let origin = if this.shared_chrome_hosted && input != ActiveTextInput::Rename {
+        event.position
+    } else {
+        local_context_menu_origin(event.position, this.view_origin)
+    };
+    this.open_text_context_menu(input, origin, window, cx);
+}
+
 fn open_current_folder_context_menu_from_event(
     this: &mut ExplorerView,
     event: &MouseUpEvent,
@@ -7000,6 +7056,22 @@ fn editable_directory_bar(
 
     div()
         .id("directory-bar-input")
+        .on_mouse_down(MouseButton::Right, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_up(
+            MouseButton::Right,
+            cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                open_text_context_menu_from_event(
+                    this,
+                    ActiveTextInput::Address,
+                    event,
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            }),
+        )
         .debug_selector(|| "directory-bar-input".to_owned())
         .key_context("ExplorerAddressInput")
         .on_action(cx.listener(ExplorerView::handle_address_edit))
@@ -7048,6 +7120,7 @@ fn editable_directory_bar(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.close_text_context_menu(ActiveTextInput::Address);
                 this.on_address_mouse_down(event);
                 cx.stop_propagation();
                 cx.notify();
@@ -7069,7 +7142,13 @@ fn editable_directory_bar(
         .on_mouse_up_out(
             MouseButton::Left,
             cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                if this.active_text_input_is_selecting() {
+                if this.text_context_menu_contains_position(
+                    ActiveTextInput::Address,
+                    event.position,
+                    window,
+                ) {
+                    return;
+                } else if this.active_text_input_is_selecting() {
                     this.on_address_mouse_up(event);
                     cx.stop_propagation();
                     cx.notify();
@@ -7883,6 +7962,17 @@ fn rename_name_cell(
     let entity = cx.entity();
     let input = div()
         .debug_selector(|| "rename-input".to_owned())
+        .occlude()
+        .on_mouse_down(MouseButton::Right, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_up(
+            MouseButton::Right,
+            cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                open_text_context_menu_from_event(this, ActiveTextInput::Rename, event, window, cx);
+                cx.stop_propagation();
+            }),
+        )
         .key_context("ExplorerRenameInput")
         .flex_1()
         .min_w(px(0.0))
@@ -7902,6 +7992,7 @@ fn rename_name_cell(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.close_text_context_menu(ActiveTextInput::Rename);
                 this.on_rename_mouse_down(event);
                 cx.stop_propagation();
                 cx.notify();
@@ -7923,7 +8014,13 @@ fn rename_name_cell(
         .on_mouse_up_out(
             MouseButton::Left,
             cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                if this.active_text_input_is_selecting() {
+                if this.text_context_menu_contains_position(
+                    ActiveTextInput::Rename,
+                    event.position,
+                    window,
+                ) {
+                    return;
+                } else if this.active_text_input_is_selecting() {
                     this.on_rename_mouse_up(event);
                     cx.stop_propagation();
                     cx.notify();
@@ -8108,6 +8205,16 @@ fn large_icon_rename_input(
     let entity = cx.entity();
     div()
         .debug_selector(|| "large-icon-rename-input".to_owned())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_up(
+            MouseButton::Right,
+            cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                open_text_context_menu_from_event(this, ActiveTextInput::Rename, event, window, cx);
+                cx.stop_propagation();
+            }),
+        )
         .key_context("ExplorerRenameInput wrapped = true")
         .w(px(large_icon_filename_text_width() + 6.0))
         .h(px(LARGE_ICON_TEXT_LINE_HEIGHT * rows as f32 + 4.0))
@@ -8128,6 +8235,7 @@ fn large_icon_rename_input(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                this.close_text_context_menu(ActiveTextInput::Rename);
                 this.on_rename_mouse_down(event);
                 cx.stop_propagation();
                 cx.notify();
@@ -8149,7 +8257,13 @@ fn large_icon_rename_input(
         .on_mouse_up_out(
             MouseButton::Left,
             cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                if this.active_text_input_is_selecting() {
+                if this.text_context_menu_contains_position(
+                    ActiveTextInput::Rename,
+                    event.position,
+                    window,
+                ) {
+                    return;
+                } else if this.active_text_input_is_selecting() {
                     this.on_rename_mouse_up(event);
                     cx.stop_propagation();
                     cx.notify();

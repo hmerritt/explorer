@@ -17,6 +17,8 @@ use crate::explorer::{
     filesystem::mountable_image_path_is_supported,
     formatting::format_timestamp,
     navigation::{HistoryMode, directory_new_tab_target},
+    rename::ActiveTextInput,
+    text_input::EditableTextState,
     view::{ExplorerView, ExplorerViewEvent},
 };
 use crate::settings::{
@@ -88,6 +90,17 @@ pub(super) struct ContextMenuState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuSource {
     SidebarItem { row_id: usize },
+    TextInput(ActiveTextInput),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TextEditCommand {
+    Undo,
+    Cut,
+    Copy,
+    Paste,
+    Delete,
+    SelectAll,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -157,6 +170,10 @@ pub(super) enum ContextMenuIcon {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ContextMenuCommand {
+    EditText {
+        input: ActiveTextInput,
+        command: TextEditCommand,
+    },
     ToggleFileColumn(crate::settings::FileColumnKind),
     RestoreBinSelected,
     RestoreBinToFolder,
@@ -263,7 +280,173 @@ impl ContextMenuState {
     }
 }
 
+fn text_context_menu_items(
+    input: ActiveTextInput,
+    text: &EditableTextState,
+    can_paste: bool,
+) -> Vec<ContextMenuItem> {
+    let selected = !text.selected_range.is_empty();
+    let action = |id: &str, label: &str, command, enabled| ContextMenuItem::Action {
+        id: format!("text-context-menu-{id}"),
+        label: label.into(),
+        command: ContextMenuCommand::EditText { input, command },
+        icon: None,
+        enabled,
+    };
+    vec![
+        action("undo", "Undo", TextEditCommand::Undo, text.can_undo()),
+        ContextMenuItem::Separator,
+        action("cut", "Cut", TextEditCommand::Cut, selected),
+        action("copy", "Copy", TextEditCommand::Copy, selected),
+        action("paste", "Paste", TextEditCommand::Paste, can_paste),
+        action("delete", "Delete", TextEditCommand::Delete, selected),
+        ContextMenuItem::Separator,
+        action(
+            "select-all",
+            "Select All",
+            TextEditCommand::SelectAll,
+            !text.content.is_empty(),
+        ),
+    ]
+}
+
 impl ExplorerView {
+    pub(super) fn text_input_state(&self, input: ActiveTextInput) -> Option<&EditableTextState> {
+        match input {
+            ActiveTextInput::Rename => self.active_rename.as_deref(),
+            ActiveTextInput::Address => self.active_address_bar.as_deref(),
+            ActiveTextInput::Search => self.search_is_editing().then_some(&*self.search),
+        }
+    }
+
+    pub(super) fn close_text_context_menu(&mut self, input: ActiveTextInput) -> bool {
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.source == Some(ContextMenuSource::TextInput(input)))
+        {
+            self.close_context_menu()
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn open_text_context_menu(
+        &mut self,
+        input: ActiveTextInput,
+        origin: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if input == ActiveTextInput::Search
+            && !self.search_is_editing()
+            && !self.start_search_edit(window, cx)
+        {
+            return;
+        }
+        let can_paste = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .is_some();
+        let Some(text) = self.text_input_state(input) else {
+            return;
+        };
+        let items = text_context_menu_items(input, text, can_paste);
+        self.cancel_pending_click_rename();
+        self.cancel_mouse_selection_drag();
+        self.open_utility_menu = None;
+        self.context_menu = Some(ContextMenuState::new_with_source(
+            origin,
+            items,
+            ContextMenuSource::TextInput(input),
+        ));
+        let focus = match input {
+            ActiveTextInput::Rename => self.active_rename_focus_handle(),
+            ActiveTextInput::Address => self.active_address_focus_handle(),
+            ActiveTextInput::Search => self.active_search_focus_handle(),
+        };
+        if let Some(focus) = focus {
+            focus.focus(window);
+        }
+        cx.notify();
+    }
+
+    fn execute_text_context_menu_command(
+        &mut self,
+        input: ActiveTextInput,
+        command: TextEditCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_text_input() != Some(input) {
+            return;
+        }
+        // Validate the target before touching an editor: it may have ended since
+        // the menu opened. In particular, Delete here must never delete a file.
+        let Some(text) = self.text_input_state(input) else {
+            return;
+        };
+        if matches!(
+            command,
+            TextEditCommand::Cut | TextEditCommand::Copy | TextEditCommand::Delete
+        ) && text.selected_range.is_empty()
+        {
+            return;
+        }
+        macro_rules! route {
+            ($rename:ident, $address:ident, $search:ident, $rename_action:ident, $address_action:ident, $search_action:ident) => {
+                match input {
+                    ActiveTextInput::Rename => self.$rename(&super::$rename_action, window, cx),
+                    ActiveTextInput::Address => self.$address(&super::$address_action, window, cx),
+                    ActiveTextInput::Search => self.$search(&super::$search_action, window, cx),
+                }
+            };
+        }
+        match command {
+            TextEditCommand::Undo => self.handle_text_input_undo(&super::TextInputUndo, window, cx),
+            TextEditCommand::Cut => route!(
+                handle_rename_cut,
+                handle_address_cut,
+                handle_search_cut,
+                RenameCut,
+                AddressCut,
+                SearchCut
+            ),
+            TextEditCommand::Copy => route!(
+                handle_rename_copy,
+                handle_address_copy,
+                handle_search_copy,
+                RenameCopy,
+                AddressCopy,
+                SearchCopy
+            ),
+            TextEditCommand::Paste => route!(
+                handle_rename_paste,
+                handle_address_paste,
+                handle_search_paste,
+                RenamePaste,
+                AddressPaste,
+                SearchPaste
+            ),
+            TextEditCommand::Delete => route!(
+                handle_rename_delete,
+                handle_address_delete,
+                handle_search_delete,
+                RenameDelete,
+                AddressDelete,
+                SearchDelete
+            ),
+            TextEditCommand::SelectAll => route!(
+                handle_rename_select_all,
+                handle_address_select_all,
+                handle_search_select_all,
+                RenameSelectAll,
+                AddressSelectAll,
+                SearchSelectAll
+            ),
+        }
+    }
+
     pub(super) fn open_folder_context_menu(
         &mut self,
         origin: Point<Pixels>,
@@ -514,11 +697,17 @@ impl ExplorerView {
         self.close_context_menu();
         self.open_utility_menu = None;
 
+        if let ContextMenuCommand::EditText { input, command } = command {
+            self.execute_text_context_menu_command(input, command, window, cx);
+            return;
+        }
+
         if !self.commit_active_rename_before_interaction(window, cx) {
             return;
         }
 
         match command {
+            ContextMenuCommand::EditText { .. } => unreachable!("text commands are handled above"),
             ContextMenuCommand::ToggleFileColumn(kind) => self.toggle_folder_column(kind, cx),
             ContextMenuCommand::RestoreBinSelected => self.restore_bin_selected(cx),
             ContextMenuCommand::RestoreBinToFolder => self.restore_bin_to_folder(cx),
@@ -2473,6 +2662,136 @@ mod tests {
     use crate::settings::{ContextMenuAction, CustomContextMenuItem};
     use gpui::AppContext;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn text_menu_order_and_availability_follow_selection_history_and_clipboard() {
+        let mut text = EditableTextState::with_selection(String::new(), 0..0);
+        for input in [
+            ActiveTextInput::Address,
+            ActiveTextInput::Search,
+            ActiveTextInput::Rename,
+        ] {
+            let items = text_context_menu_items(input, &text, false);
+            assert_eq!(items.len(), 8);
+            assert!(matches!(items[1], ContextMenuItem::Separator));
+            assert!(matches!(items[6], ContextMenuItem::Separator));
+            let actions = items
+                .iter()
+                .filter_map(|item| match item {
+                    ContextMenuItem::Action {
+                        label,
+                        enabled,
+                        command,
+                        ..
+                    } => Some((label.as_str(), *enabled, command)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actions
+                    .iter()
+                    .map(|(label, enabled, _)| (*label, *enabled))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("Undo", false),
+                    ("Cut", false),
+                    ("Copy", false),
+                    ("Paste", false),
+                    ("Delete", false),
+                    ("Select All", false)
+                ]
+            );
+            assert!(actions.iter().all(|(_, _, command)| matches!(command,
+                ContextMenuCommand::EditText { input: target, .. } if *target == input)));
+        }
+        text.replace_text_as_typing(None, "a界z");
+        text.selected_range = 1..4;
+        assert!(text.can_undo());
+        let items = text_context_menu_items(ActiveTextInput::Rename, &text, true);
+        assert!(
+            items
+                .iter()
+                .all(|item| !matches!(item, ContextMenuItem::Action { enabled: false, .. }))
+        );
+        text.move_to(0);
+        let items = text_context_menu_items(ActiveTextInput::Rename, &text, true);
+        for index in [2, 3, 5] {
+            assert!(matches!(
+                items[index],
+                ContextMenuItem::Action { enabled: false, .. }
+            ));
+        }
+        text.undo();
+        assert!(!text.can_undo());
+        text.redo();
+        assert!(text.can_undo());
+    }
+
+    #[gpui::test]
+    fn address_text_menu_refreshes_suggestions_after_paste_delete_and_undo(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = TempDir::new();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).unwrap();
+        let other = temp.path().join("other");
+        fs::create_dir(&other).unwrap();
+        let (view, cx) = test_view_entity_at_path(cx, temp.path().to_path_buf());
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                assert!(view.start_address_bar_edit(window, cx));
+                let prefix = format!("{}/ch", temp.path().display());
+                cx.write_to_clipboard(ClipboardItem::new_string(prefix.clone()));
+                let edit = |view: &mut ExplorerView,
+                            command,
+                            window: &mut Window,
+                            cx: &mut Context<ExplorerView>| {
+                    view.execute_context_menu_command(
+                        ContextMenuCommand::EditText {
+                            input: ActiveTextInput::Address,
+                            command,
+                        },
+                        window,
+                        cx,
+                    );
+                };
+                edit(view, TextEditCommand::Paste, window, cx);
+                let address = view.active_address_bar.as_ref().unwrap();
+                assert_eq!(address.content, prefix);
+                assert!(
+                    address
+                        .suggestions
+                        .iter()
+                        .any(|suggestion| suggestion.path == child)
+                );
+                edit(view, TextEditCommand::SelectAll, window, cx);
+                edit(view, TextEditCommand::Delete, window, cx);
+                let address = view.active_address_bar.as_ref().unwrap();
+                assert!(address.content.is_empty());
+                assert_eq!(address.suggestions.len(), 2);
+                assert!(
+                    address
+                        .suggestions
+                        .iter()
+                        .any(|suggestion| suggestion.path == other)
+                );
+                edit(view, TextEditCommand::Undo, window, cx);
+                let address = view.active_address_bar.as_ref().unwrap();
+                assert_eq!(address.content, prefix);
+                assert!(
+                    address
+                        .suggestions
+                        .iter()
+                        .any(|suggestion| suggestion.path == child)
+                );
+                assert_eq!(view.path(), temp.path());
+                assert_eq!(
+                    cx.read_from_clipboard().unwrap().text().as_deref(),
+                    Some(prefix.as_str())
+                );
+            })
+        });
+    }
 
     #[test]
     fn bin_background_menu_only_offers_empty_and_selected_menu_keeps_properties() {

@@ -874,6 +874,17 @@ impl ExplorerTabs {
         }
 
         self.cancel_active_tab_thumbnail_extraction(cx);
+        if let Some(previous) = self.active_tab().map(ExplorerTab::active_view) {
+            previous.update(cx, |view, cx| {
+                if matches!(
+                    view.context_menu.as_ref().and_then(|menu| menu.source),
+                    Some(super::context_menu::ContextMenuSource::TextInput(_))
+                ) {
+                    view.close_context_menu();
+                    cx.notify();
+                }
+            });
+        }
         self.active_tab = id;
         self.scroll_active_tab_into_view();
         self.focus_active_tab(window, cx);
@@ -6557,6 +6568,357 @@ mod tests {
             assert!(!view.address_bar_is_editing());
             assert_eq!(selected_names(view), vec!["b.txt"]);
         });
+    }
+
+    fn exercise_text_context_menu(
+        cx: &mut TestAppContext,
+        input: super::super::rename::ActiveTextInput,
+        large_icons: bool,
+    ) {
+        use super::super::{
+            context_menu::ContextMenuSource, rename::ActiveTextInput, text_input::EditableTextState,
+        };
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        let selector = match input {
+            ActiveTextInput::Address => "directory-bar-input",
+            ActiveTextInput::Search => "search-bar",
+            ActiveTextInput::Rename if large_icons => "large-icon-rename-input",
+            ActiveTextInput::Rename => "rename-input",
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                match input {
+                    ActiveTextInput::Address => {
+                        assert!(view.start_address_bar_edit(window, cx));
+                    }
+                    ActiveTextInput::Search => {
+                        assert!(view.start_search_edit(window, cx));
+                    }
+                    ActiveTextInput::Rename => {
+                        if large_icons {
+                            view.view_mode = crate::settings::FileViewMode::LargeIcons;
+                        }
+                        view.select_single_path(&temp.path().join("a.txt"));
+                        assert!(view.start_rename_selected(window, cx));
+                    }
+                }
+                let text: &mut EditableTextState = match input {
+                    ActiveTextInput::Address => view.active_address_bar.as_deref_mut().unwrap(),
+                    ActiveTextInput::Search => &mut view.search,
+                    ActiveTextInput::Rename => view.active_rename.as_deref_mut().unwrap(),
+                };
+                text.content = "a界z".into();
+                text.selected_range = 1..4;
+                text.selection_reversed = true;
+                text.reset_history();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        for (action, expected) in [
+            ("text-context-menu-copy", "a界z"),
+            ("text-context-menu-cut", "az"),
+            ("text-context-menu-undo", "a界z"),
+            ("text-context-menu-paste", "abz"),
+            ("text-context-menu-select-all", "abz"),
+            ("text-context-menu-delete", ""),
+            ("text-context-menu-undo", "abz"),
+        ] {
+            if action == "text-context-menu-paste" {
+                cx.update(|_, app| {
+                    app.write_to_clipboard(gpui::ClipboardItem::new_string("b".into()))
+                });
+            }
+            right_click_selector(cx, selector);
+            cx.run_until_parked();
+            cx.read_entity(&view, |view, _| {
+                assert_eq!(
+                    view.context_menu.as_ref().unwrap().source,
+                    Some(ContextMenuSource::TextInput(input))
+                );
+                assert!(view.mouse_selection_drag.is_none());
+                if action == "text-context-menu-copy" {
+                    let text = view.text_input_state(input).unwrap();
+                    assert_eq!(text.selected_range, 1..4);
+                    assert!(text.selection_reversed);
+                }
+            });
+            click_selector(cx, action);
+            cx.run_until_parked();
+            cx.update(|window, app| {
+                let view = view.read(app);
+                assert!(view.context_menu.is_none());
+                assert_eq!(view.text_input_state(input).unwrap().content, expected);
+                let focus = match input {
+                    ActiveTextInput::Address => view.active_address_focus_handle(),
+                    ActiveTextInput::Search => view.active_search_focus_handle(),
+                    ActiveTextInput::Rename => view.active_rename_focus_handle(),
+                }
+                .unwrap();
+                assert!(focus.is_focused(window));
+                if action == "text-context-menu-copy" || action == "text-context-menu-cut" {
+                    assert_eq!(
+                        app.read_from_clipboard().unwrap().text().as_deref(),
+                        Some("界")
+                    );
+                }
+                if action == "text-context-menu-delete" {
+                    assert_eq!(
+                        app.read_from_clipboard().unwrap().text().as_deref(),
+                        Some("b")
+                    );
+                }
+                assert_eq!(view.path(), temp.path());
+                assert!(view.cut_paths.is_empty());
+            });
+            assert!(temp.path().join("a.txt").exists());
+            assert!(temp.path().join("b.txt").exists());
+        }
+        // Padding and borders belong to the editor too, not the file-list hit layer.
+        let bounds = cx.debug_bounds(selector).unwrap();
+        right_click_position(
+            cx,
+            gpui::point(bounds.left() + px(1.0), bounds.top() + px(1.0)),
+        );
+        cx.read_entity(&view, |view, _| {
+            assert_eq!(
+                view.context_menu.as_ref().unwrap().source,
+                Some(ContextMenuSource::TextInput(input))
+            );
+            assert!(view.mouse_selection_drag.is_none());
+        });
+        // Escape closes just the menu, preserving the editor and its contents.
+        right_click_selector(cx, selector);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                match input {
+                    ActiveTextInput::Address => {
+                        view.handle_address_cancel(&super::super::AddressCancel, window, cx)
+                    }
+                    ActiveTextInput::Search => {
+                        view.handle_search_cancel(&super::super::SearchCancel, window, cx)
+                    }
+                    ActiveTextInput::Rename => {
+                        view.handle_rename_cancel(&super::super::RenameCancel, window, cx)
+                    }
+                }
+                assert!(view.context_menu.is_none());
+                assert_eq!(view.text_input_state(input).unwrap().content, "abz");
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn address_text_context_menu_edits_without_navigating(cx: &mut TestAppContext) {
+        exercise_text_context_menu(cx, super::super::rename::ActiveTextInput::Address, false);
+    }
+
+    #[gpui::test]
+    fn search_text_context_menu_edits_without_leaving_input(cx: &mut TestAppContext) {
+        exercise_text_context_menu(cx, super::super::rename::ActiveTextInput::Search, false);
+    }
+
+    #[gpui::test]
+    fn rename_text_context_menu_edits_without_committing(cx: &mut TestAppContext) {
+        exercise_text_context_menu(cx, super::super::rename::ActiveTextInput::Rename, false);
+    }
+
+    #[gpui::test]
+    fn large_icon_rename_text_context_menu_edits_without_committing(cx: &mut TestAppContext) {
+        exercise_text_context_menu(cx, super::super::rename::ActiveTextInput::Rename, true);
+    }
+
+    #[gpui::test]
+    fn inactive_search_text_context_menu_disables_file_paste_and_selection_commands(
+        cx: &mut TestAppContext,
+    ) {
+        use super::super::{
+            context_menu::{
+                ContextMenuCommand, ContextMenuItem, ContextMenuSource, TextEditCommand,
+            },
+            rename::ActiveTextInput,
+        };
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_files(
+                vec![temp.path().join("a.txt")],
+                gpui::ClipboardFileOperation::Copy,
+            ))
+        });
+        right_click_selector(cx, "search-bar");
+        cx.run_until_parked();
+        cx.read_entity(&view, |view, _| {
+            let menu = view.context_menu.as_ref().unwrap();
+            assert_eq!(
+                menu.source,
+                Some(ContextMenuSource::TextInput(ActiveTextInput::Search))
+            );
+            assert!(
+                menu.items
+                    .iter()
+                    .all(|item| !matches!(item, ContextMenuItem::Action { enabled: true, .. }))
+            );
+        });
+        click_selector(cx, "text-context-menu-delete");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_some());
+            assert!(view.search_is_editing());
+            assert!(view.search_query().is_empty());
+        });
+        // Even a stale Delete command cannot act like the forward-delete key.
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.search.content = "abc".into();
+                view.search.move_to(1);
+                view.execute_context_menu_command(
+                    ContextMenuCommand::EditText {
+                        input: ActiveTextInput::Search,
+                        command: TextEditCommand::Delete,
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(view.search_query(), "abc");
+                view.search.select_all();
+                cx.write_to_clipboard(ClipboardItem::new_string("b\r\n".into()));
+                view.execute_context_menu_command(
+                    ContextMenuCommand::EditText {
+                        input: ActiveTextInput::Search,
+                        command: TextEditCommand::Paste,
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(view.search_query(), "b  ");
+                assert!(view.entries.is_empty());
+                cx.write_to_clipboard(ClipboardItem::new_string("b".into()));
+                view.search.select_all();
+                view.execute_context_menu_command(
+                    ContextMenuCommand::EditText {
+                        input: ActiveTextInput::Search,
+                        command: TextEditCommand::Paste,
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(selected_names(view), Vec::<String>::new());
+                assert_eq!(
+                    view.entries
+                        .iter()
+                        .map(|entry| entry.name.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["b.txt"]
+                );
+                cx.notify();
+            })
+        });
+        right_click_selector(cx, "search-bar");
+        click_selector(cx, "explorer-entry-name-hit-0");
+        cx.read_entity(&view, |view, _| {
+            assert!(view.context_menu.is_none());
+            assert!(!view.search_is_editing());
+            assert_eq!(view.search_query(), "b");
+        });
+        assert!(temp.path().join("a.txt").exists());
+    }
+
+    #[gpui::test]
+    fn text_context_menu_closes_on_tab_switch_and_clamps_to_window(cx: &mut TestAppContext) {
+        use super::super::{context_menu::ContextMenuSource, rename::ActiveTextInput};
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let view = active_test_view(&tabs, cx);
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.start_search_edit(window, cx);
+                let size = window.bounds().size;
+                view.open_text_context_menu(
+                    ActiveTextInput::Search,
+                    gpui::point(size.width - px(1.0), size.height - px(1.0)),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.run_until_parked();
+        let menu_bounds = cx.debug_bounds("context-menu").unwrap();
+        cx.update(|window, _| {
+            let size = window.bounds().size;
+            assert!(menu_bounds.left() >= px(0.0));
+            assert!(menu_bounds.top() >= px(0.0));
+            assert!(menu_bounds.right() <= size.width);
+            assert!(menu_bounds.bottom() <= size.height);
+        });
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                let next = tabs.tabs[1].id;
+                tabs.activate_tab(next, window, cx);
+                assert!(view.read(cx).context_menu.is_none());
+                let first = tabs.tabs[0].id;
+                tabs.activate_tab(first, window, cx);
+            })
+        });
+        cx.read_entity(&view, |view, _| {
+            assert!(!matches!(
+                view.context_menu.as_ref().and_then(|menu| menu.source),
+                Some(ContextMenuSource::TextInput(_))
+            ))
+        });
+    }
+
+    #[gpui::test]
+    fn rename_text_context_menu_in_split_pane_keeps_position_and_closes_on_pane_switch(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(SettingsState::for_test(ExplorerSettings::default()));
+        let (temp, tabs, cx) = test_tabs_with_two_files(cx);
+        let (view, owner, first) = cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                let owner = tabs.active_tab;
+                let first = tabs.tabs[0].active_pane;
+                tabs.add_background_tab(temp.path().to_path_buf(), window, cx);
+                let second = tabs.tabs[1].active_pane;
+                assert!(tabs.split_tab_into_pane(
+                    tabs.tabs[1].id,
+                    owner,
+                    first,
+                    SplitDirection::Right,
+                    window,
+                    cx
+                ));
+                tabs.activate_pane(owner, second, window, cx);
+                let view = tabs.active_tab().unwrap().active_view();
+                (view, owner, first)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.select_single_path(&temp.path().join("a.txt"));
+                assert!(view.start_rename_selected(window, cx));
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let input = cx.debug_bounds("rename-input").unwrap();
+        let pointer = input.center();
+        right_click_position(cx, pointer);
+        cx.run_until_parked();
+        let menu = cx.debug_bounds("context-menu").unwrap();
+        assert!((menu.left() - pointer.x).abs() < px(20.0));
+        click_selector(cx, "text-context-menu-copy");
+        cx.read_entity(&view, |view, _| assert!(view.active_rename.is_some()));
+        right_click_selector(cx, "rename-input");
+        cx.update(|window, app| {
+            tabs.update(app, |tabs, cx| {
+                tabs.activate_pane(owner, first, window, cx);
+            })
+        });
+        cx.read_entity(&view, |view, _| assert!(view.context_menu.is_none()));
+        assert!(temp.path().join("a.txt").exists());
     }
 
     #[gpui::test]
